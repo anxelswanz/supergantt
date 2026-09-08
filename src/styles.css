@@ -1,0 +1,73 @@
+@import "tailwindcss";
+
+/**
+ * 设计 token 层。
+ * DOM 用这些 CSS 变量，Canvas 用 src/gantt/theme.ts 里语义同名的 JS 常量 ——
+ * 两边必须同步修改。
+ */
+
+:root {
+  --surface: #ffffff;
+  --surface-alt: #fafafa;
+  --rule: rgba(15, 23, 42, 0.1);
+  --text: #0f172a;
+  --text-dim: #64748b;
+  --row-hover: rgba(15, 23, 42, 0.035);
+  --row-stripe: rgba(15, 23, 42, 0.018);
+  --accent: #6366f1;
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: #0b1020;
+    --surface-alt: #0f1629;
+    --rule: rgba(255, 255, 255, 0.1);
+    --text: #e2e8f0;
+    --text-dim: #7c8aa5;
+    --row-hover: rgba(255, 255, 255, 0.05);
+    --row-stripe: rgba(255, 255, 255, 0.022);
+    --accent: #818cf8;
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  background: var(--surface);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 桌面应用不该有网页那种文本选中拖影，但输入框要保留 */
+* {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input,
+textarea,
+[contenteditable] {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* DESIGN.md §9 铁律：尊重系统的减弱动效偏好 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.12s !important;
+    transition-duration: 0.12s !important;
+  }
+}
