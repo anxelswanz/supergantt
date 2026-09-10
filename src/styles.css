@@ -49,6 +49,16 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/*
+ * Windows 上 WebView2 默认是经典滚动条：又宽又灰，常驻不隐藏，放在这种
+ * 紧凑的桌面界面里很扎眼。macOS 本来就是悬浮滚动条，不受影响 ——
+ * data-platform 由 main.tsx 在启动时标记。
+ */
+:root[data-platform="other"] * {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--text-dim) 45%, transparent) transparent;
+}
+
 /* 桌面应用不该有网页那种文本选中拖影，但输入框要保留 */
 * {
   -webkit-user-select: none;

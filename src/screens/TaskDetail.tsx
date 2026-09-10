@@ -22,6 +22,7 @@ import { useAppStore } from "../store/useAppStore";
 import { Avatar } from "./Avatar";
 import { MenuItem, Popover } from "./Popover";
 import { DatePicker } from "./DatePicker";
+import { ALT_LABEL, shortcut } from "../core/keys";
 
 /**
  * 任务详情抽屉。
@@ -317,7 +318,7 @@ function BlockedSection({
             : task.milestone
               ? "里程碑是一个时间点，没有可标记的区间。"
               : canAdd
-                ? "「＋ 新建」记下此刻卡在什么上；已经过去的那几天，在甘特条上按住 ⌥ 拖一段。"
+                ? `「＋ 新建」记下此刻卡在什么上；已经过去的那几天，在甘特条上按住 ${ALT_LABEL} 拖一段。`
                 : "只有进行中的任务能记阻碍 —— 还没开工的活该改的是计划日期。"}
         </EmptyHint>
       )}
@@ -418,7 +419,7 @@ function BlockedRow({
         {/* 受阻时段进了撤销栈，所以删除不需要二次确认 —— ⌘Z 就能回来 */}
         <button
           onClick={onRemove}
-          title="删除（⌘Z 可撤销）"
+          title={`删除（${shortcut("mod", "Z")} 可撤销）`}
           className="shrink-0 rounded px-1 text-[10px] text-[var(--text-dim)] opacity-0 transition-opacity hover:text-rose-500 group-hover:opacity-100"
         >
           ✕
@@ -534,7 +535,7 @@ function RiskSection({
             value={draft}
             onChange={setDraft}
             onSubmit={() => void add()}
-            placeholder="记一条风险…（⇧↵ 换行）"
+            placeholder={`记一条风险…（${shortcut("shift", "↵")} 换行）`}
           />
         </div>
       ) : (
@@ -595,7 +596,7 @@ function CommentSection({
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void add();
           }}
           rows={2}
-          placeholder="写点什么…（⌘Enter 提交）"
+          placeholder={`写点什么…（${shortcut("mod", "Enter")} 提交）`}
           className="w-full resize-none rounded-md border border-[var(--rule)] bg-[var(--surface-alt)] px-2 py-1.5 text-[11px] leading-relaxed outline-none focus:border-[var(--accent)]"
         />
         {draft.trim() && (

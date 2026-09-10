@@ -17,6 +17,7 @@ import { dayToIso, isoToDay, today } from "../gantt/time";
 import { useAppStore } from "../store/useAppStore";
 import { api, type Risk } from "../db/api";
 import { ExportButton } from "./ExportButton";
+import { shortcut } from "../core/keys";
 
 const KIND_STYLE: Record<
   TimelineEvent["kind"],
@@ -324,7 +325,7 @@ function Composer() {
       />
 
       <div className="mt-2 flex items-center gap-2">
-        <span className="text-[10px] text-[var(--text-dim)]">⌘Enter 保存 · Esc 取消</span>
+        <span className="text-[10px] text-[var(--text-dim)]">{shortcut("mod", "Enter")} 保存 · Esc 取消</span>
         <button
           onClick={() => setNoteDraft(null)}
           className="ml-auto rounded-lg px-3 py-1 text-xs text-[var(--text-dim)] hover:text-[var(--text)]"

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { REVEAL_LABEL } from "../core/keys";
 
 /**
  * 导入项目文件的三条关键路径。
@@ -220,7 +221,7 @@ describe("导入项目文件", () => {
 });
 
 describe("导出项目文件", () => {
-  it("从卡片导出，导完给一个「在访达中显示」的去处", async () => {
+  it("从卡片导出，导完给一个「在访达 / 资源管理器中显示」的去处", async () => {
     invoke.mockImplementation((cmd: string) => {
       if (cmd === "list_projects") return Promise.resolve([summary]);
       if (cmd === "export_project") return Promise.resolve(FILE);
@@ -237,7 +238,7 @@ describe("导出项目文件", () => {
       expect(invoke.mock.calls.filter(([c]) => c === "export_project")).toHaveLength(1),
     );
     await screen.findByText(/已导出到/);
-    expect(screen.getByText("在访达中显示")).toBeTruthy();
+    expect(screen.getByText(REVEAL_LABEL)).toBeTruthy();
   });
 
   it("记住上次导出的目录 —— 每次重新翻到云盘目录是这个功能最烦的地方", async () => {
@@ -289,5 +290,106 @@ describe("项目名唯一", () => {
     await waitFor(() =>
       expect(invoke.mock.calls.filter(([c]) => c === "create_project")).toHaveLength(1),
     );
+  });
+});
+
+/**
+ * 整库导入：另一台电脑（比如 Mac）导出的 .db，拿到这台（比如 Windows）上导进来。
+ *
+ * 和单项目导入是同一套承诺的放大版：写之前逐个项目摆出去向；有一处不合格
+ * 就一个都不写；导完能撤销 —— 撤销走的是整库快照恢复。
+ */
+describe("导入整个数据库（.db）", () => {
+  const DB = "C:\\Users\\me\\Desktop\\Gantt-数据库-2026-09-10.db";
+  const SNAPSHOT = "C:\\Users\\me\\AppData\\Roaming\\com.ronghuizhong.gantt\\backups\\整库导入前-20260910-2310.db";
+
+  const dbPreview = {
+    problems: [] as string[],
+    warnings: [] as string[],
+    projects: [
+      {
+        file: side("厂房建设二期", 47, "1756000000"),
+        existing: side("厂房建设", 42, "1755000000"),
+        matchedBy: "uuid",
+        targetId: 7,
+        finalName: "厂房建设二期",
+      },
+      {
+        file: side("新工地", 12, "1756000000"),
+        existing: null,
+        matchedBy: null,
+        targetId: null,
+        finalName: "新工地",
+      },
+    ],
+    extraPeople: ["王五"],
+  };
+
+  function mockDb(p: typeof dbPreview) {
+    pick.mockResolvedValue(DB);
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_projects") return Promise.resolve([summary]);
+      if (cmd === "list_people") return Promise.resolve([]);
+      if (cmd === "inspect_db_import") return Promise.resolve(p);
+      if (cmd === "commit_db_import")
+        return Promise.resolve({ created: 1, overwritten: 1, newPeople: ["王五"], backupPath: SNAPSHOT });
+      return Promise.resolve(null);
+    });
+  }
+
+  it("逐个项目摆出去向，确认后一次导入；撤销走整库快照恢复", async () => {
+    mockDb(dbPreview);
+    await startImport();
+
+    await screen.findByText("导入整个数据库");
+    // Windows 路径同样只显示文件名
+    expect(screen.getByText("Gantt-数据库-2026-09-10.db")).toBeTruthy();
+    expect(screen.getByText(/新建 1 个，覆盖本机 1 个/)).toBeTruthy();
+    expect(screen.getByText("覆盖本机「厂房建设」")).toBeTruthy();
+    expect(screen.getByText("新建")).toBeTruthy();
+    expect(screen.getByText(/一并加入：王五/)).toBeTruthy();
+    // 走的是整库那条命令，不是单项目的
+    expect(invoke.mock.calls.some(([c]) => c === "inspect_import")).toBe(false);
+
+    fireEvent.click(screen.getByText("导入 2 个项目"));
+    await waitFor(() =>
+      expect(invoke.mock.calls.filter(([c]) => c === "commit_db_import")).toHaveLength(1),
+    );
+    const args = invoke.mock.calls.find(([c]) => c === "commit_db_import")![1];
+    expect(args.path).toBe(DB);
+    // 快照文件名里的时间由前端给：Rust 的 std 拿不到本机时区
+    expect(args.backupStamp).toMatch(/^\d{8}-\d{4}$/);
+
+    await screen.findByText(/已导入数据库/);
+    fireEvent.click(screen.getByText("撤销"));
+    await waitFor(() =>
+      expect(invoke.mock.calls.find(([c]) => c === "undo_db_import")?.[1]).toEqual({
+        backupPath: SNAPSHOT,
+      }),
+    );
+  });
+
+  it("有一个项目不合格就只报问题，一个项目都不写", async () => {
+    mockDb({
+      ...dbPreview,
+      problems: ["「坏项目」任务「验收」：只填了实施开始，没有实施结束"],
+    });
+    await startImport();
+
+    await screen.findByText(/无法导入，这个数据库有 1 处问题/);
+    expect(screen.getByText(/「坏项目」任务「验收」/)).toBeTruthy();
+    expect(screen.getByText(/数据库未发生任何改动/)).toBeTruthy();
+    expect(invoke.mock.calls.some(([c]) => c === "commit_db_import")).toBe(false);
+  });
+
+  it("既不是 .ganttproj 也不是 .db：说清楚能导什么，不去读它", async () => {
+    mockDb(dbPreview);
+    pick.mockResolvedValue("C:\\Users\\me\\Desktop\\排期.xlsx");
+    await startImport();
+
+    await screen.findByText(/「排期.xlsx」不是 Gantt 能导入的文件/);
+    expect(
+      invoke.mock.calls.some(([c]) => c === "inspect_import" || c === "inspect_db_import"),
+    ).toBe(false);
   });
 });

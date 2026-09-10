@@ -15,7 +15,7 @@
  * 看的人要能一眼分出「今天就得去处理」和「安排人盯着」。
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
 import {
   BOARD_COLUMNS,
@@ -109,26 +109,20 @@ export function BoardView() {
   const [composing, setComposing] = useState(false);
   /** 右侧面板一次只开一个 —— 两个 380px 抽屉并排会把看板挤没 */
   const [panel, setPanel] = useState<"blockers" | "risks" | null>(null);
-  const [dragId, setDragId] = useState<number | null>(null);
-  const [overCol, setOverCol] = useState<BoardColumn | null>(null);
   /** 拖进"卡住"列时要先问清原因 —— 不问就只能记成「其他」，归因视图里等于没记 */
   const [askReason, setAskReason] = useState<number | null>(null);
 
-  const drop = (column: BoardColumn, reason: BlockReason = "other") => {
-    if (dragId == null) return;
-    const task = taskMap.get(dragId);
-    setDragId(null);
-    setOverCol(null);
+  const drop = (taskId: number, column: BoardColumn) => {
+    const task = taskMap.get(taskId);
     if (!task) return;
-
-    if (column === "blocked" && reason === "other" && askReason == null) {
-      setAskReason(dragId);
+    if (column === "blocked") {
+      setAskReason(taskId);
       return;
     }
-    const changes = moveToColumn(task, column, day, reason);
+    const changes = moveToColumn(task, column, day, "other");
     if (changes) patchTask(task.id, changes, `移到「${labelOf(column)}」`);
-    setAskReason(null);
   };
+  const dnd = useCardDrag(drop);
 
   const openRiskCount = projectRisks.filter((r) => !r.resolved).length;
   const openBlockerCount = tasks.reduce((n, t) => n + openBlocks(t.blocked).length, 0);
@@ -188,19 +182,12 @@ export function BoardView() {
         <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto p-3">
       {BOARD_COLUMNS.map((col) => {
         const items = grouped[col.key];
-        const isOver = overCol === col.key;
+        const isOver = dnd.overCol === col.key;
         return (
           <div
             key={col.key}
-            onDragOver={(e) => {
-              e.preventDefault();
-              setOverCol(col.key);
-            }}
-            onDragLeave={() => setOverCol((c) => (c === col.key ? null : c))}
-            onDrop={(e) => {
-              e.preventDefault();
-              drop(col.key);
-            }}
+            ref={dnd.columnRef(col.key)}
+            data-board-column={col.key}
             className="flex min-h-0 w-[280px] shrink-0 flex-col rounded-xl border transition-colors"
             style={{
               borderColor: isOver ? COLUMN_TINT[col.key] : "var(--rule)",
@@ -231,15 +218,11 @@ export function BoardView() {
                   path={pathOf(task)}
                   people={people}
                   selected={task.id === selectedId}
-                  dragging={dragId === task.id}
+                  dragging={dnd.dragId === task.id}
                   day={day}
                   risk={flags.get(task.id) ?? null}
                   onCloseBlocker={(periodId) => closeBlocker(task.id, periodId)}
-                  onDragStart={() => setDragId(task.id)}
-                  onDragEnd={() => {
-                    setDragId(null);
-                    setOverCol(null);
-                  }}
+                  onPointerDown={(e) => dnd.start(task.id, task.name || "未命名", e)}
                   onClick={() => select(task.id)}
                   onDoubleClick={() => openDetail(task.id)}
                 />
@@ -256,6 +239,16 @@ export function BoardView() {
 
         </div>
       </div>
+
+      {/* 跟手的小标签：拖的是哪张卡，一眼就知道 */}
+      {dnd.ghost && (
+        <div
+          className="pointer-events-none fixed z-50 max-w-[240px] truncate rounded-lg border border-[var(--accent)] bg-[var(--surface)] px-2.5 py-1.5 text-xs font-medium text-[var(--text)] shadow-lg"
+          style={{ left: dnd.ghost.x + 12, top: dnd.ghost.y + 8 }}
+        >
+          {dnd.ghost.name}
+        </div>
+      )}
 
       <AnimatePresence>
         {panel === "blockers" && (
@@ -297,6 +290,89 @@ export function BoardView() {
 const labelOf = (c: BoardColumn) =>
   BOARD_COLUMNS.find((x) => x.key === c)?.label ?? c;
 
+/** 按下之后挪过这么多像素才算开始拖 —— 否则每次点选都会闪一下拖拽态 */
+const DRAG_THRESHOLD = 5;
+
+/**
+ * 卡片拖拽，用指针事件实现。
+ *
+ * 不用 HTML5 的 draggable：Tauri 在 Windows 上默认接管窗口的拖放（项目列表
+ * 要接住从资源管理器拖进来的 .ganttproj / .db），代价是网页里的 HTML5 拖拽
+ * 整个失效 —— 卡片按住了拖不动。macOS 上一切正常，所以这种 bug 只有换到
+ * 另一台机器上才看得见。指针事件不经过那一层，两个平台行为一致；
+ * 左侧网格的行拖拽用的也是这一套。
+ */
+function useCardDrag(onDrop: (taskId: number, column: BoardColumn) => void) {
+  const columns = useRef(new Map<BoardColumn, HTMLElement>());
+  // 拖拽横跨好几次渲染，落下时要用最新的那个回调，而不是按下时的快照
+  const dropRef = useRef(onDrop);
+  dropRef.current = onDrop;
+  const stopRef = useRef<(() => void) | null>(null);
+
+  const [dragId, setDragId] = useState<number | null>(null);
+  const [overCol, setOverCol] = useState<BoardColumn | null>(null);
+  const [ghost, setGhost] = useState<{ x: number; y: number; name: string } | null>(null);
+
+  // 拖到一半视图被切走：别把监听器留在 window 上
+  useEffect(() => () => stopRef.current?.(), []);
+
+  const columnRef = (key: BoardColumn) => (el: HTMLElement | null) => {
+    if (el) columns.current.set(key, el);
+    else columns.current.delete(key);
+  };
+
+  const columnAt = (x: number, y: number): BoardColumn | null => {
+    for (const [key, el] of columns.current) {
+      const r = el.getBoundingClientRect();
+      if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return key;
+    }
+    return null;
+  };
+
+  const start = (taskId: number, name: string, e: React.PointerEvent) => {
+    // 只认主键；卡片上的「✓ 关闭」这类按钮是它们自己的交互
+    if (e.button !== 0) return;
+    if ((e.target as HTMLElement).closest("button, input, textarea, select")) return;
+    stopRef.current?.();
+
+    const origin = { x: e.clientX, y: e.clientY };
+    let active = false;
+    let over: BoardColumn | null = null;
+
+    const move = (ev: PointerEvent) => {
+      if (!active) {
+        if (Math.hypot(ev.clientX - origin.x, ev.clientY - origin.y) < DRAG_THRESHOLD) return;
+        active = true;
+        setDragId(taskId);
+      }
+      over = columnAt(ev.clientX, ev.clientY);
+      setOverCol(over);
+      setGhost({ x: ev.clientX, y: ev.clientY, name });
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", stop);
+      stopRef.current = null;
+      setDragId(null);
+      setOverCol(null);
+      setGhost(null);
+    };
+    const up = () => {
+      const target = active ? over : null;
+      stop();
+      if (target) dropRef.current(taskId, target);
+    };
+
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", stop);
+    stopRef.current = stop;
+  };
+
+  return { dragId, overCol, ghost, columnRef, start };
+}
+
 function Card({
   task,
   path,
@@ -306,8 +382,7 @@ function Card({
   day,
   risk,
   onCloseBlocker,
-  onDragStart,
-  onDragEnd,
+  onPointerDown,
   onClick,
   onDoubleClick,
 }: {
@@ -320,8 +395,7 @@ function Card({
   /** 未关闭的风险；没有就是 null */
   risk: RiskFlag | null;
   onCloseBlocker: (periodId: string) => void;
-  onDragStart: () => void;
-  onDragEnd: () => void;
+  onPointerDown: (e: React.PointerEvent) => void;
   onClick: () => void;
   onDoubleClick: () => void;
 }) {
@@ -349,9 +423,7 @@ function Card({
   return (
     <motion.div
       layout
-      draggable
-      onDragStart={onDragStart}
-      onDragEnd={onDragEnd}
+      onPointerDown={onPointerDown}
       onClick={onClick}
       onDoubleClick={onDoubleClick}
       className="cursor-grab rounded-lg border bg-[var(--surface)] p-2.5 active:cursor-grabbing"

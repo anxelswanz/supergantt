@@ -3,11 +3,12 @@ use tauri::Manager;
 
 mod backup;
 mod db;
+mod dbfile;
 mod export;
 mod transfer;
 
 
-const DB_FILE: &str = "gantt.db";
+pub(crate) const DB_FILE: &str = "gantt.db";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -72,6 +73,10 @@ pub fn run() {
             transfer::export_project,
             transfer::inspect_import,
             transfer::commit_import,
+            dbfile::export_database,
+            dbfile::inspect_db_import,
+            dbfile::commit_db_import,
+            dbfile::undo_db_import,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

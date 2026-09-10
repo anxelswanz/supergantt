@@ -307,6 +307,25 @@ export const api = {
     name: string,
     backupStamp: string,
   ) => invoke<ImportOutcome>("commit_import", { path, targetId, name, backupStamp }),
+
+  /* ---------------- 整库（.db）---------------- */
+
+  /**
+   * 把整个库导出成一个独立的 .db —— 换台电脑时一次搬走全部项目。
+   * 见 src-tauri/src/dbfile.rs。
+   */
+  exportDatabase: (path: string) => invoke<string>("export_database", { path }),
+
+  /** 读另一台电脑的 .db、校验、和本机项目逐个对号，但一个字都不写库 */
+  inspectDbImport: (path: string) =>
+    invoke<DbImportPreview>("inspect_db_import", { path }),
+
+  /** 真正落库：先给本机整库拍快照，再把所有项目放进同一个事务写进来 */
+  commitDbImport: (path: string, backupStamp: string) =>
+    invoke<DbImportOutcome>("commit_db_import", { path, backupStamp }),
+
+  /** 把导入前的快照恢复回来 */
+  undoDbImport: (backupPath: string) => invoke<void>("undo_db_import", { backupPath }),
 };
 
 /* ---------------- 项目文件相关的类型 ---------------- */
@@ -351,4 +370,35 @@ export interface ImportOutcome {
   backupPath: string | null;
   taskCount: number;
   newPeople: string[];
+}
+
+/* ---------------- 整库导入相关的类型 ---------------- */
+
+/** 源库里一个项目的去向 */
+export interface DbImportItem {
+  file: SideSummary;
+  /** 本机会被覆盖的那个项目；null = 新建 */
+  existing: SideSummary | null;
+  /** "uuid" | "name" */
+  matchedBy: string | null;
+  targetId: number | null;
+  /** 落库后的名字。和 file.name 不同 = 原名被本机另一个项目占着 */
+  finalName: string;
+}
+
+export interface DbImportPreview {
+  /** 非空 = 不能导入。全有或全无，有一条就一个项目都不写 */
+  problems: string[];
+  warnings: string[];
+  projects: DbImportItem[];
+  /** 没有任何项目用到、本机也还没有的负责人，会一并带过来 */
+  extraPeople: string[];
+}
+
+export interface DbImportOutcome {
+  created: number;
+  overwritten: number;
+  newPeople: string[];
+  /** 导入前本机整库的快照；「撤销」就是把它恢复回来 */
+  backupPath: string;
 }

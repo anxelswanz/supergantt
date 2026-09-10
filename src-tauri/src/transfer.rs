@@ -906,7 +906,7 @@ pub struct ImportPreview {
     pub suggested_name: String,
 }
 
-fn local_summary(conn: &Connection, id: i64) -> rusqlite::Result<SideSummary> {
+pub(crate) fn local_summary(conn: &Connection, id: i64) -> rusqlite::Result<SideSummary> {
     let (name, updated_at) = conn.query_row(
         "SELECT name, updated_at FROM projects WHERE id = ?1",
         params![id],
@@ -940,7 +940,7 @@ fn local_summary(conn: &Connection, id: i64) -> rusqlite::Result<SideSummary> {
     })
 }
 
-fn file_summary(a: &Archive) -> SideSummary {
+pub(crate) fn file_summary(a: &Archive) -> SideSummary {
     let b = &a.bundle;
     SideSummary {
         name: b.project.name.clone(),
@@ -1102,6 +1102,30 @@ pub fn apply(
     backup_path: Option<String>,
 ) -> Result<ImportOutcome> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let (project_id, new_people) = apply_in(&tx, a, target_id, name)?;
+    tx.commit().map_err(|e| e.to_string())?;
+
+    Ok(ImportOutcome {
+        project_id,
+        name: name.to_string(),
+        overwritten: target_id.is_some(),
+        backup_path,
+        task_count: a.bundle.tasks.len() as i64,
+        new_people,
+    })
+}
+
+/// 把一份项目写进库，但**不开也不提交事务** —— 由调用方决定边界。
+///
+/// 单个 .ganttproj 导入时一个项目一个事务（见 `apply`）；整库导入时
+/// 几十个项目要放进同一个事务里（dbfile.rs），第 17 个失败就一个都不写。
+/// 返回（项目 id, 本次新建的负责人）。
+pub(crate) fn apply_in(
+    tx: &Connection,
+    a: &Archive,
+    target_id: Option<i64>,
+    name: &str,
+) -> Result<(i64, Vec<String>)> {
     let ts = now_secs().to_string();
 
     // ---- 人员：同名即同人，本地优先，头像缺失才补 ----
@@ -1324,16 +1348,7 @@ pub fn apply(
         }
     }
 
-    tx.commit().map_err(|e| e.to_string())?;
-
-    Ok(ImportOutcome {
-        project_id,
-        name: name.to_string(),
-        overwritten: target_id.is_some(),
-        backup_path,
-        task_count: a.bundle.tasks.len() as i64,
-        new_people,
-    })
+    Ok((project_id, new_people))
 }
 
 /* ------------------------------------------------------------------ */

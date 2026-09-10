@@ -15,6 +15,8 @@
 | Node | ≥ 20 | `node -v` |
 | Rust | ≥ 1.80 | `rustc --version` |
 | Xcode Command Line Tools（macOS） | — | `xcode-select -p` |
+| Microsoft C++ 生成工具（Windows） | VS 2019+ | 见下方「Windows」 |
+| WebView2 运行时（Windows） | — | Win10 / Win11 自带 |
 
 三样都有的话，直接：
 
@@ -26,6 +28,26 @@ npm run tauri dev    # 启动
 首次启动 Rust 要编译约 350 个 crate，**大概 1–3 分钟**；之后增量编译几秒钟。
 窗口自动弹出，前端改动热更新，Rust 改动自动重启。
 
+### Windows
+
+在 Windows 上 `git clone` 下来，比 macOS 多准备一样东西：
+
+1. 装 [Visual Studio 生成工具](https://visualstudio.microsoft.com/visual-cpp-build-tools/)，
+   勾选 **「使用 C++ 的桌面开发」**。SQLite 是随应用一起从 C 源码编译的（`rusqlite` 的
+   `bundled`），没有 MSVC 编译器这一步会直接失败。
+2. 装 Rust 时选默认的 `x86_64-pc-windows-msvc` 工具链（[rustup.rs](https://rustup.rs)）。
+3. 然后和 macOS 一样：`npm install`、`npm run tauri dev`。
+
+和 macOS 的差别都已经处理掉了，这里记一下免得以后改回去：
+
+- 快捷键 `⌘` → `Ctrl`、`⌥` → `Alt`，界面上的提示也会显示成 `Ctrl+]`、`Alt+↑`
+- 「在访达中显示」→「在资源管理器中显示」
+- 看板拖卡片用的是指针事件而不是 HTML5 拖拽 —— Windows 上后者会被 Tauri 的
+  文件拖放接管而整个失效（DESIGN.md §10）
+- 发布版里屏蔽了 `F5` / `Ctrl+R`：WebView2 会把它当成「刷新网页」，撤销栈和
+  还没落库的编辑会一起丢掉
+- 仓库带了 `.gitattributes`，Windows 上检出也是 LF，两台电脑来回改不会出现整文件的换行符 diff
+
 ### 打包成独立应用
 
 ```bash
@@ -35,16 +57,20 @@ npm run tauri build
 产物在 `src-tauri/target/release/bundle/`：
 
 - macOS：`dmg/Gantt_0.1.0_aarch64.dmg` 和 `macos/Gantt.app`
-- Windows：`msi/Gantt_0.1.0_x64_en-US.msi`
+- Windows：`msi/Gantt_0.1.0_x64_zh-CN.msi` 和 `nsis/Gantt_0.1.0_x64-setup.exe`（安装界面是中文）
 
 > **不能交叉编译。** macOS 上打不出 Windows 包，反之亦然。
-> 两个平台都要出包得用 GitHub Actions 跑双平台构建。
+> 仓库里的 `.github/workflows/build.yml` 会在 GitHub Actions 的 Windows 机器上
+> 跑全部测试并打包，安装包在该次运行的 Artifacts 里下载。
+>
+> 个别精简过的 Windows 11 删掉了 VBScript，打 msi 的 WiX 会因此失败 ——
+> 那就只打 exe：`npm run tauri build -- --bundles nsis`。
 
 ### 测试
 
 ```bash
-npm test                    # 前端：406 个（纯逻辑 + 着色 + 工作日历 + 层级排序 + DOM 冒烟 + 导入导出流程）
-cd src-tauri && cargo test  # Rust：35 个（迁移、约束、级联、WAL 备份、项目文件往返）
+npm test                    # 前端：421 个（纯逻辑 + 着色 + 工作日历 + 层级排序 + DOM 冒烟 + 导入导出流程）
+cd src-tauri && cargo test  # Rust：46 个（迁移、约束、级联、WAL 备份、项目文件往返、整库导入）
 ```
 
 ---
@@ -123,6 +149,27 @@ avatars/1.png     头像还原成真实图片，不是 base64 字符串
 JSON 是缩进过的，能读、能 diff、必要时能手改 —— 一个自己都打不开的备份格式，
 出事的时候给不了任何安全感。
 
+### 整个库一起搬（`.db`，比如从 Mac 搬到 Windows）
+
+项目多的时候一个个导 `.ganttproj` 太累，可以直接搬整个数据库：
+
+1. 旧电脑：**设置 → 数据 → 导出数据库…**，得到一个 `Gantt-数据库-日期.db`
+2. 拷到新电脑，项目列表页 **↧ 导入项目** 选中它（或者直接拖进窗口）
+3. 预检里逐个列出每个项目是**新建**还是**覆盖本机某个项目**，确认后一次导入
+
+SQLite 文件本身不分 Mac 和 Windows，所以这几种 `.db` 都能导：
+
+- 「导出数据库」导出的文件（推荐：单文件，自给自足）
+- 旧电脑 `backups/` 里的自动备份 `gantt-日期.db`
+- 旧电脑数据目录里的 `gantt.db` 本身 —— 但要么先退出那边的 Gantt，要么把同目录的
+  `gantt.db-wal` 一起拷过来，否则最近一段修改还在 `-wal` 里没带上（预检会提醒）
+- 旧版本 Gantt 的库也行，会在临时副本上先升级，源文件一个字节不动
+
+规则和 `.ganttproj` 完全一样（它们走的是同一条写库路径）：uuid 优先、名字兜底；
+**本机独有的项目不受影响**；同名负责人沿用本机的，没被任何任务用到的负责人也会一起带过来。
+全部项目在一个事务里写，有一个不合格就一个都不写。导入前会把本机整库快照成
+`backups/整库导入前-时间.db`，导完横幅上的**撤销**就是把它恢复回来。
+
 ---
 
 ## 操作
@@ -159,7 +206,8 @@ JSON 是缩进过的，能读、能 diff、必要时能手改 —— 一个自�
 | `T` | 回到今天 |
 | `⌘S` | 立即落库（平时 400ms 自动保存） |
 
-Windows 上 `⌘` 一律对应 `Ctrl` —— 快捷键走了平台抽象（`src/core/keys.ts`），没有硬编码。
+Windows 上 `⌘` 一律对应 `Ctrl`、`⌥` 对应 `Alt` —— 快捷键和界面上的提示文案都走了
+平台抽象（`src/core/keys.ts`），没有硬编码。
 
 ---
 
@@ -191,7 +239,8 @@ src-tauri/
   migrations/001_init.sql   schema（唯一知情方）
   src/db.rs                 类型化命令 + 事务写入
   src/transfer.rs           .ganttproj 的导出/导入：zip 容器、校验、身份匹配
-  src/backup.rs             滚动备份
+  src/dbfile.rs             整库 .db 的导出/导入：副本上迁移、逐项目复用 transfer 的写库路径
+  src/backup.rs             滚动备份、单文件快照
 ```
 
 **一条纪律**：任务数据只能经由命令栈修改。

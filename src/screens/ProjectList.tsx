@@ -1,13 +1,24 @@
 import { useCallback, useEffect, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { isoToDay, today } from "../gantt/time";
-import { api, type ImportOutcome, type ImportPreview, type ProjectSummary } from "../db/api";
+import {
+  api,
+  type DbImportOutcome,
+  type DbImportPreview,
+  type ImportOutcome,
+  type ImportPreview,
+  type ProjectSummary,
+} from "../db/api";
+import { REVEAL_LABEL, shortcut } from "../core/keys";
 import { PROJECT_COLORS, useAppStore } from "../store/useAppStore";
+import { DbImportDialog } from "./DbImportDialog";
 import { ImportDialog } from "./ImportDialog";
 import {
   commit,
   exportProjectFile,
   inspect,
+  inspectDatabase,
+  isDatabaseFile,
   isProjectFile,
   onProjectFileDrop,
   pickProjectFile,
@@ -29,6 +40,7 @@ import {
  */
 type Notice =
   | { kind: "imported"; outcome: ImportOutcome }
+  | { kind: "dbImported"; outcome: DbImportOutcome }
   | { kind: "exported"; path: string };
 
 export function ProjectList() {
@@ -38,6 +50,7 @@ export function ProjectList() {
   const createProject = useAppStore((s) => s.createProject);
   const openProject = useAppStore((s) => s.openProject);
   const deleteProject = useAppStore((s) => s.deleteProject);
+  const loadPeople = useAppStore((s) => s.loadPeople);
 
   const [creating, setCreating] = useState(false);
   /** 正在确认删除的项目。删项目是这个应用里唯一不可撤销的破坏性操作 */
@@ -45,6 +58,10 @@ export function ProjectList() {
 
   /** 预检通过、等用户拍板的那份文件 */
   const [pending, setPending] = useState<{ path: string; preview: ImportPreview } | null>(null);
+  /** 同上，但拿来的是另一台电脑的整个库（.db） */
+  const [pendingDb, setPendingDb] = useState<{ path: string; preview: DbImportPreview } | null>(
+    null,
+  );
   /** 读文件本身失败（不是数据有问题）—— 拖进来一个 .txt 就走这条 */
   const [readError, setReadError] = useState<string | null>(null);
   const [reading, setReading] = useState(false);
@@ -66,14 +83,18 @@ export function ProjectList() {
 
   const beginImport = useCallback(async (path: string) => {
     setNotice(null);
-    if (!isProjectFile(path)) {
-      setReadError(`「${path.split(/[/\\]/).pop()}」不是 Gantt 项目文件（.ganttproj）。`);
+    const database = isDatabaseFile(path);
+    if (!database && !isProjectFile(path)) {
+      setReadError(
+        `「${path.split(/[/\\]/).pop()}」不是 Gantt 能导入的文件（.ganttproj 项目文件或 .db 数据库）。`,
+      );
       return;
     }
     setReading(true);
     setReadError(null);
     try {
-      setPending({ path, preview: await inspect(path) });
+      if (database) setPendingDb({ path, preview: await inspectDatabase(path) });
+      else setPending({ path, preview: await inspect(path) });
     } catch (err) {
       setReadError(String(err));
     } finally {
@@ -114,6 +135,26 @@ export function ProjectList() {
     }
   };
 
+  /**
+   * 撤销一次整库导入：把导入前的整库快照恢复回来。
+   *
+   * 和单项目的撤销不同，这里没法「把备份再导入一次」—— 一次整库导入可能
+   * 覆盖了三个项目、新建了五个、还加了几个人。导入前那一刻的快照是唯一
+   * 确定的口径，恢复它一步到位。
+   */
+  const undoDb = async (outcome: DbImportOutcome) => {
+    setUndoing(true);
+    try {
+      await api.undoDbImport(outcome.backupPath);
+      await Promise.all([loadProjects(), loadPeople()]);
+      setNotice(null);
+    } catch (err) {
+      setReadError(`撤销失败：${err}`);
+    } finally {
+      setUndoing(false);
+    }
+  };
+
   const runExport = async (summary: ProjectSummary) => {
     setNotice(null);
     try {
@@ -137,7 +178,7 @@ export function ProjectList() {
           <button
             onClick={() => void pickProjectFile().then((p) => { if (p) void beginImport(p); })}
             disabled={reading}
-            title="从 .ganttproj 文件导入一个项目（也可以把文件直接拖进窗口）"
+            title="从 .ganttproj 项目文件或另一台电脑导出的 .db 数据库导入（也可以把文件直接拖进窗口）"
             className="ml-auto rounded-full border border-[var(--rule)] px-4 py-2 text-xs font-semibold text-[var(--text-dim)] transition-colors hover:text-[var(--text)] disabled:opacity-40"
           >
             {reading ? "读取中…" : "↧ 导入项目"}
@@ -155,7 +196,10 @@ export function ProjectList() {
             <NoticeBanner
               notice={notice}
               undoing={undoing}
-              onUndo={() => notice.kind === "imported" && void undo(notice.outcome)}
+              onUndo={() => {
+                if (notice.kind === "imported") void undo(notice.outcome);
+                else if (notice.kind === "dbImported") void undoDb(notice.outcome);
+              }}
               onReveal={() =>
                 notice.kind === "exported" && void api.revealPath(notice.path).catch(() => {})
               }
@@ -203,7 +247,7 @@ export function ProjectList() {
           <div className="mt-16 text-center text-sm leading-relaxed text-[var(--text-dim)]">
             还没有项目。点右上角新建一个开始，
             <br />
-            或者把另一台电脑导出的 <code>.ganttproj</code> 拖进这个窗口。
+            或者把另一台电脑导出的 <code>.ganttproj</code> 或 <code>.db</code> 拖进这个窗口。
           </div>
         )}
       </div>
@@ -220,7 +264,7 @@ export function ProjectList() {
             <div className="grid place-items-center gap-2 rounded-3xl border-2 border-dashed border-[var(--accent)] px-16 py-14">
               <div className="text-3xl">↧</div>
               <div className="text-sm font-semibold text-[var(--text)]">松开以导入项目</div>
-              <div className="font-mono text-[11px] text-[var(--text-dim)]">.ganttproj</div>
+              <div className="font-mono text-[11px] text-[var(--text-dim)]">.ganttproj · .db</div>
             </div>
           </motion.div>
         )}
@@ -236,6 +280,19 @@ export function ProjectList() {
               setPending(null);
               setNotice({ kind: "imported", outcome });
               void loadProjects();
+            }}
+          />
+        )}
+        {pendingDb && (
+          <DbImportDialog
+            path={pendingDb.path}
+            preview={pendingDb.preview}
+            onCancel={() => setPendingDb(null)}
+            onDone={(outcome) => {
+              setPendingDb(null);
+              setNotice({ kind: "dbImported", outcome });
+              void loadProjects();
+              void loadPeople();
             }}
           />
         )}
@@ -269,6 +326,7 @@ function NoticeBanner({
   onClose: () => void;
 }) {
   const imported = notice.kind === "imported" ? notice.outcome : null;
+  const dbImported = notice.kind === "dbImported" ? notice.outcome : null;
   const exportedPath = notice.kind === "exported" ? notice.path : null;
 
   return (
@@ -296,6 +354,19 @@ function NoticeBanner({
               </div>
             )}
           </>
+        ) : dbImported ? (
+          <>
+            已导入数据库：新建 {dbImported.created} 个项目
+            {dbImported.overwritten > 0 && `，覆盖 ${dbImported.overwritten} 个`}
+            {dbImported.newPeople.length > 0 && (
+              <span className="text-[var(--text-dim)]">
+                （新增负责人 {dbImported.newPeople.join("、")}）
+              </span>
+            )}
+            <div className="mt-0.5 text-[11px] text-[var(--text-dim)]">
+              导入前的整库快照在 <code>backups/</code>，横幅关掉后文件仍在。
+            </div>
+          </>
         ) : (
           <>
             已导出到 <code className="text-[11px]">{exportedPath}</code>
@@ -303,7 +374,7 @@ function NoticeBanner({
         )}
       </div>
 
-      {imported?.backupPath && (
+      {(imported?.backupPath || dbImported) && (
         <button
           onClick={onUndo}
           disabled={undoing}
@@ -317,7 +388,7 @@ function NoticeBanner({
           onClick={onReveal}
           className="shrink-0 rounded-lg border border-[var(--rule)] px-2.5 py-1 text-[11px] font-semibold text-[var(--text)] hover:bg-[var(--row-hover)]"
         >
-          在访达中显示
+          {REVEAL_LABEL}
         </button>
       )}
       <button
@@ -411,7 +482,7 @@ function DeleteProjectDialog({
           {summary.taskCount} 个任务，连同它们的风险、评论和逐日记录会一起删掉。
           <br />
           <span className="font-medium text-rose-500">这一步不能撤销</span>
-          —— ⌘Z 救不回来，只能从 <code>backups/</code> 里的备份回滚。
+          —— {shortcut("mod", "Z")} 救不回来，只能从 <code>backups/</code> 里的备份回滚。
         </p>
 
         <label className="mt-4 block text-[11px] text-[var(--text-dim)]">
@@ -518,7 +589,7 @@ function ProjectCard({
             e.stopPropagation();
             onRevealData();
           }}
-          title="在访达中显示数据文件所在的目录（所有项目共用同一个 .db）"
+          title={`${REVEAL_LABEL}数据文件所在的目录（所有项目共用同一个 .db）`}
           className="rounded-lg px-2 py-1 text-[10px] font-medium text-[var(--text-dim)] hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
         >
           ⧉ 数据目录

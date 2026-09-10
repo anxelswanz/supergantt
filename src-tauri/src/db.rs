@@ -32,15 +32,22 @@ pub fn open(path: &std::path::Path) -> rusqlite::Result<Connection> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     // WAL：崩溃后能恢复到最后一次提交，且读写不互相阻塞
     conn.pragma_update(None, "journal_mode", "WAL")?;
+    migrate(&conn)?;
+    Ok(conn)
+}
 
+/// 把库补到当前 schema，再自愈一遍已知损坏。
+///
+/// 单独拆出来是因为整库导入（dbfile.rs）要对**别人的库**做同一件事：
+/// 另一台电脑上的 Gantt 可能比本机旧几个版本，它的库得先迁到和本机一样，
+/// 读取的 SQL 才对得上。两处共用一份迁移逻辑，就不会有「本机能开、导入读不懂」。
+pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     for (i, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
         conn.execute_batch(sql)?;
         conn.pragma_update(None, "user_version", (i + 1) as i64)?;
     }
-
-    repair(&conn)?;
-    Ok(conn)
+    repair(conn)
 }
 
 /**

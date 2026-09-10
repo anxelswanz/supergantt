@@ -139,7 +139,7 @@ describe("数据目录", () => {
   it("卡片上就能打开数据文件所在的目录", async () => {
     await openList();
     await act(async () => {
-      fireEvent.click(screen.getByTitle(/在访达中显示数据文件所在的目录/));
+      fireEvent.click(screen.getByTitle(/数据文件所在的目录/));
     });
     expect(invoke.mock.calls.some(([c]) => c === "reveal_data_dir")).toBe(true);
   });
@@ -147,7 +147,7 @@ describe("数据目录", () => {
   it("点它不会顺手把项目打开 —— 卡片本身是个按钮，事件必须拦住", async () => {
     await openList();
     await act(async () => {
-      fireEvent.click(screen.getByTitle(/在访达中显示数据文件所在的目录/));
+      fireEvent.click(screen.getByTitle(/数据文件所在的目录/));
     });
     expect(invoke.mock.calls.some(([c]) => c === "load_project")).toBe(false);
   });

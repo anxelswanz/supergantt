@@ -21,6 +21,7 @@ import { today } from "../gantt/time";
 import type { Person } from "../db/api";
 import { Avatar } from "./Avatar";
 import { MenuDivider, MenuItem, Popover } from "./Popover";
+import { shortcut } from "../core/keys";
 
 /**
  * 左侧任务网格。
@@ -994,7 +995,7 @@ function RowMenu({
         </MenuItem>
         <MenuDivider />
         <MenuItem
-          hint="⇧↵"
+          hint={shortcut("shift", "↵")}
           onClick={() => {
             setOpen(false);
             onAddSubtask();
@@ -1026,7 +1027,7 @@ function RowMenu({
           </>
         )}
         <MenuItem
-          hint="⌥↑"
+          hint={shortcut("alt", "↑")}
           onClick={() => {
             setOpen(false);
             onMove(-1);
@@ -1035,7 +1036,7 @@ function RowMenu({
           上移
         </MenuItem>
         <MenuItem
-          hint="⌥↓"
+          hint={shortcut("alt", "↓")}
           onClick={() => {
             setOpen(false);
             onMove(1);
@@ -1045,7 +1046,7 @@ function RowMenu({
         </MenuItem>
         <MenuDivider />
         <MenuItem
-          hint="⌘]"
+          hint={shortcut("mod", "]")}
           onClick={() => {
             setOpen(false);
             onIndent();
@@ -1054,7 +1055,7 @@ function RowMenu({
           缩进
         </MenuItem>
         <MenuItem
-          hint="⌘["
+          hint={shortcut("mod", "[")}
           disabled={task.parentId == null}
           onClick={() => {
             setOpen(false);

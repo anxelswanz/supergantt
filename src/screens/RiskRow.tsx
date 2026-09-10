@@ -20,6 +20,7 @@ import { RISK_COLORS, RISK_LEVELS } from "../core/risks";
 import { withAlpha } from "../gantt/coloring";
 import { useAppStore } from "../store/useAppStore";
 import type { Risk } from "../db/api";
+import { shortcut } from "../core/keys";
 
 export function RiskRow({
   risk,
@@ -163,7 +164,7 @@ export function RiskRow({
             className="w-full resize-none rounded-lg border border-[var(--rule)] bg-[var(--surface-alt)] px-2 py-1.5 text-[11px] leading-relaxed text-[var(--text)] outline-none focus:border-[var(--accent)]"
           />
           <div className="mt-1 flex items-center gap-2">
-            <span className="text-[9px] text-[var(--text-dim)]">⌘↵ 关闭 · Esc 取消</span>
+            <span className="text-[9px] text-[var(--text-dim)]">{shortcut("mod", "↵")} 关闭 · Esc 取消</span>
             <button
               onClick={() => {
                 setClosing(false);

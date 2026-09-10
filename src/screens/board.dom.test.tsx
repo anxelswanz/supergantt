@@ -469,3 +469,61 @@ describe("看板 · 阻碍清单", () => {
     expect(screen.getByText(/全项目 · 高风险在前/)).toBeTruthy();
   });
 });
+
+/**
+ * 卡片拖拽走指针事件，不走 HTML5 draggable —— 后者在 Windows 上会被 Tauri 的
+ * 文件拖放接管而整个失效，macOS 上却一切正常。jsdom 没有布局，这里给四列
+ * 摆上假的几何位置，走一遍「按下 → 拖过阈值 → 在别的列松手」。
+ */
+describe("看板 · 拖拽", () => {
+  it("把卡片拖进另一列，写回的是底层字段，并且能撤销", async () => {
+    const store = await openBoard();
+    const cols = [...document.querySelectorAll<HTMLElement>("[data-board-column]")];
+    expect(cols).toHaveLength(4);
+    cols.forEach((el, i) => {
+      el.getBoundingClientRect = () =>
+        ({ left: i * 300, right: i * 300 + 280, top: 0, bottom: 800, x: i * 300, y: 0, width: 280, height: 800 }) as DOMRect;
+    });
+    const todo = cols.findIndex((el) => el.dataset.boardColumn === "todo");
+    const at = { clientX: todo * 300 + 100, clientY: 200 };
+
+    fireEvent.pointerDown(screen.getByText("设备安装"), { button: 0, clientX: 310, clientY: 100 });
+    // 没挪过阈值只是点选，不进入拖拽态
+    fireEvent.pointerMove(window, { clientX: 312, clientY: 101 });
+    expect(screen.getAllByText("设备安装")).toHaveLength(1);
+
+    await act(async () => {
+      fireEvent.pointerMove(window, at);
+    });
+    // 跟手的小标签出来了
+    expect(screen.getAllByText("设备安装")).toHaveLength(2);
+
+    await act(async () => {
+      fireEvent.pointerUp(window, at);
+    });
+    const task = store.getState().tasks.get(1)!;
+    expect(task.progress).toBe(0);
+    expect(task.actualStartDay).toBeNull();
+    expect(store.getState().stack!.undoLabel).toMatch(/^移到「/);
+    expect(screen.getAllByText("设备安装")).toHaveLength(1);
+
+    act(() => store.getState().undo());
+    expect(store.getState().tasks.get(1)!.progress).toBe(0.5);
+  });
+
+  it("松手时不在任何一列上，什么都不改", async () => {
+    const store = await openBoard();
+    for (const el of document.querySelectorAll<HTMLElement>("[data-board-column]")) {
+      el.getBoundingClientRect = () =>
+        ({ left: 0, right: 280, top: 0, bottom: 800, x: 0, y: 0, width: 280, height: 800 }) as DOMRect;
+    }
+
+    fireEvent.pointerDown(screen.getByText("设备安装"), { button: 0, clientX: 100, clientY: 100 });
+    await act(async () => {
+      fireEvent.pointerMove(window, { clientX: 900, clientY: 900 });
+      fireEvent.pointerUp(window, { clientX: 900, clientY: 900 });
+    });
+    expect(store.getState().stack!.canUndo).toBe(false);
+    expect(store.getState().tasks.get(1)!.progress).toBe(0.5);
+  });
+});

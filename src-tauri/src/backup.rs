@@ -68,18 +68,42 @@ pub fn rotate(
         return Ok(dest);
     }
 
-    let mut target = Connection::open(&dest)?;
+    snapshot(conn, &dest)?;
+    prune(&backup_dir, stem, keep)?;
+    Ok(dest)
+}
+
+/// 把活动连接整份拷成 dest 这一个文件。
+///
+/// 滚动备份、「导出数据库」、整库导入前的保险都走这里 —— 三处要的是同一个
+/// 东西：一个包含 WAL 里全部提交、自己就是完整数据的单文件。
+///
+/// 先写到同目录的 `.part` 再改名：目标可能在云盘或 U 盘上，写到一半失败
+/// 留下一个大小像样、内容残缺的 .db，比没有文件危险得多。
+pub fn snapshot(conn: &Connection, dest: &Path) -> Result<(), BackupError> {
+    let part = dest.with_file_name(format!(
+        "{}.part",
+        dest.file_name().and_then(|n| n.to_str()).unwrap_or("gantt.db")
+    ));
+    let _ = fs::remove_file(&part);
+
+    let mut target = Connection::open(&part)?;
     {
         let backup = Backup::new(conn, &mut target)?;
         // step(-1) = 一次拷完所有页
         backup.step(-1)?;
     }
-    // 备份库本身也别留 WAL 副产物，让它就是一个干净的单文件
+    // 备份库本身也别留 WAL 副产物，让它就是一个干净的单文件 ——
+    // 拷到另一台电脑时只需要带这一个文件
     target.pragma_update(None, "journal_mode", "DELETE")?;
     drop(target);
 
-    prune(&backup_dir, stem, keep)?;
-    Ok(dest)
+    // Windows 上 rename 覆盖已有文件是可以的（MoveFileEx + REPLACE_EXISTING），
+    // 但目标被别的程序占着时会失败 —— 那就如实报错，不留 .part 垃圾
+    fs::rename(&part, dest).inspect_err(|_| {
+        let _ = fs::remove_file(&part);
+    })?;
+    Ok(())
 }
 
 /// 按文件名倒序（日期串本身可比较），保留最新的 keep 份。

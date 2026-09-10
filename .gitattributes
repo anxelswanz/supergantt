@@ -1,0 +1,10 @@
+# 统一用 LF 入库、LF 检出。
+#
+# Windows 上 git 默认 core.autocrlf=true，会把检出的文本全换成 CRLF：
+# 在 Windows 上改一行再提交，diff 里就是整个文件 —— 两台电脑来回改同一个仓库时
+# 这类噪音会把真正的改动淹掉。
+* text=auto eol=lf
+
+*.png  binary
+*.ico  binary
+*.icns binary

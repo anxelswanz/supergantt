@@ -17,6 +17,7 @@ import { RiskRow } from "./RiskRow";
 import { resolve, type ResolvedTask } from "../gantt/model";
 import { today } from "../gantt/time";
 import { useAppStore } from "../store/useAppStore";
+import { shortcut } from "../core/keys";
 
 export function RiskPanel({ onClose }: { onClose: () => void }) {
   const risks = useAppStore((s) => s.projectRisks);
@@ -201,7 +202,7 @@ function Composer({
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit();
         }}
         rows={2}
-        placeholder="这条活可能出什么问题？（⌘↵ 保存）"
+        placeholder={`这条活可能出什么问题？（${shortcut("mod", "↵")} 保存）`}
         className="w-full resize-none rounded-lg border border-[var(--rule)] bg-[var(--surface)] px-2 py-1.5 text-[11px] leading-relaxed text-[var(--text)] outline-none focus:border-[var(--accent)]"
       />
 

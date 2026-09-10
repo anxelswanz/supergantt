@@ -514,6 +514,9 @@ Tauri 用**系统 WebView**（macOS = WKWebView / Safari 内核；Windows = WebV
 3. **快捷键从第一行起就用 `mod` 抽象**（`Cmd` ↔ `Ctrl`），不硬编码
 4. 桌面端拿不到触觉反馈 —— 多感官实际只剩视觉 + 听觉，音效设计因此承担更多权重
 5. **不能交叉编译**：双平台出包需 GitHub Actions 跑双平台构建
+6. **应用内拖拽不用 HTML5 draggable，一律用指针事件**：Windows 上 Tauri 默认接管窗口的拖放
+   （项目列表要接住从资源管理器拖进来的 .ganttproj / .db），代价是网页里的 HTML5 拖拽整个失效；
+   macOS 上却一切正常，这类 bug 只有换到另一台机器才看得见
 
 ---
 

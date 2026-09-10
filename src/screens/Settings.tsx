@@ -8,6 +8,8 @@ import {
   type RowHeightKey,
 } from "../gantt/theme";
 import { PROJECT_COLORS, useAppStore } from "../store/useAppStore";
+import { REVEAL_LABEL } from "../core/keys";
+import { exportDatabaseFile } from "../transfer/projectFile";
 import { Avatar, fileToAvatarDataUrl } from "./Avatar";
 import { CalendarPane } from "./CalendarSettings";
 
@@ -429,27 +431,43 @@ function DataPane() {
         {dir || "读取中…"}
       </div>
 
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
         <button
           onClick={() => void api.revealDataDir().catch(() => {})}
           className="rounded-lg border border-[var(--rule)] px-3 py-1.5 text-xs font-medium text-[var(--text-dim)] hover:text-[var(--text)]"
         >
-          在访达中显示
+          {REVEAL_LABEL}
         </button>
         <button
           onClick={() =>
             void api
               .backupNow()
-              .then((p) => setMessage(`已备份到 ${p.split("/").pop()}`))
+              // Windows 的路径分隔符是 \，只按 / 切会把整条路径原样摆出来
+              .then((p) => setMessage(`已备份到 ${p.split(/[/\\]/).pop()}`))
               .catch((e) => setMessage(`备份失败：${e}`))
           }
           className="rounded-lg border border-[var(--rule)] px-3 py-1.5 text-xs font-medium text-[var(--text-dim)] hover:text-[var(--text)]"
         >
           立即备份
         </button>
+        <button
+          onClick={() =>
+            void exportDatabaseFile()
+              .then(({ path }) => {
+                if (path) setMessage(`已导出到 ${path}`);
+              })
+              .catch((e) => setMessage(`导出失败：${e}`))
+          }
+          title="把全部项目和负责人导出成一个 .db 文件，拿到另一台电脑（Mac 或 Windows）上导入"
+          className="rounded-lg border border-[var(--rule)] px-3 py-1.5 text-xs font-medium text-[var(--text-dim)] hover:text-[var(--text)]"
+        >
+          导出数据库…
+        </button>
       </div>
 
-      {message && <div className="mt-2 text-[10px] text-[var(--text-dim)]">{message}</div>}
+      {message && (
+        <div className="mt-2 break-all text-[10px] text-[var(--text-dim)]">{message}</div>
+      )}
 
       <IntegrityCheck />
 
@@ -459,6 +477,9 @@ function DataPane() {
         直接复制 .db 文件会漏掉最近的提交。
         <br />
         头像也存在这个文件里，所以复制它一份就是完整的数据副本。
+        <br />
+        换电脑（包括 Mac 和 Windows 之间）：点「导出数据库…」，把得到的 .db 拷过去，
+        在那边的项目列表点「导入项目」选中它即可。本机独有的项目不会被抹掉。
       </p>
     </Section>
   );

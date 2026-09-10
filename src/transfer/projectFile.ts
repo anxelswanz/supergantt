@@ -12,12 +12,31 @@
 
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { api, type ImportOutcome, type ImportPreview } from "../db/api";
+import {
+  api,
+  type DbImportOutcome,
+  type DbImportPreview,
+  type ImportOutcome,
+  type ImportPreview,
+} from "../db/api";
 
 export const PROJECT_FILE_EXT = "ganttproj";
 export const PROJECT_FILE_FILTER = {
   name: "Gantt 项目文件",
   extensions: [PROJECT_FILE_EXT],
+};
+
+/**
+ * 整库文件（.db）：另一台电脑上 Gantt 的全部数据。
+ *
+ * 可以是那边「设置 → 数据 → 导出数据库」导出的文件，也可以是它 backups/
+ * 里的自动备份，或者直接拷过来的 gantt.db —— 三者都是同一种 SQLite 文件，
+ * 而 SQLite 的格式不分 Mac 和 Windows。
+ */
+export const DATABASE_FILE_EXT = "db";
+export const DATABASE_FILE_FILTER = {
+  name: "Gantt 数据库",
+  extensions: [DATABASE_FILE_EXT],
 };
 
 /**
@@ -88,20 +107,70 @@ export async function exportProjectFile(
   return { path: written };
 }
 
-/** 弹文件选择框。返回 null = 用户取消了。 */
+/**
+ * 弹文件选择框，.ganttproj 和 .db 都能选。返回 null = 用户取消了。
+ *
+ * 第一个过滤器同时认两种扩展名：Windows 的对话框默认只显示第一个过滤器
+ * 匹配的文件，只放 .ganttproj 的话，用户拷过来的 .db 在对话框里是隐形的。
+ */
 export async function pickProjectFile(): Promise<string | null> {
   const lastDir = (await api.getSetting(LAST_DIR_KEY)) ?? undefined;
   const picked = await open({
     multiple: false,
     directory: false,
     defaultPath: lastDir,
-    filters: [PROJECT_FILE_FILTER],
+    filters: [
+      { name: "Gantt 项目文件或数据库", extensions: [PROJECT_FILE_EXT, DATABASE_FILE_EXT] },
+      PROJECT_FILE_FILTER,
+      DATABASE_FILE_FILTER,
+    ],
   });
   return typeof picked === "string" ? picked : null;
 }
 
 export function isProjectFile(path: string): boolean {
   return path.toLowerCase().endsWith(`.${PROJECT_FILE_EXT}`);
+}
+
+export function isDatabaseFile(path: string): boolean {
+  return path.toLowerCase().endsWith(`.${DATABASE_FILE_EXT}`);
+}
+
+/** 拖进窗口、或者从对话框里选中的，是不是这个软件能导入的东西 */
+export function isImportable(path: string): boolean {
+  return isProjectFile(path) || isDatabaseFile(path);
+}
+
+/** 整库文件的默认名。带日期：云盘里放几份不同时间的库时，不用点开就分得清。 */
+export function databaseFileName(at: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `Gantt-数据库-${at.getFullYear()}-${p(at.getMonth() + 1)}-${p(at.getDate())}.${DATABASE_FILE_EXT}`;
+}
+
+/**
+ * 导出整个库。和导出项目文件共用「上次的目录」—— 两者去的通常是同一个
+ * 云盘或 U 盘目录，都是为了拿到另一台电脑上去。
+ */
+export async function exportDatabaseFile(): Promise<ExportResult> {
+  const lastDir = (await api.getSetting(LAST_DIR_KEY)) ?? "";
+  const path = await save({
+    defaultPath: joinPath(lastDir, databaseFileName(new Date())),
+    filters: [DATABASE_FILE_FILTER],
+  });
+  if (!path) return { path: null };
+
+  const written = await api.exportDatabase(path);
+  const dir = dirOf(written);
+  if (dir && dir !== lastDir) await api.setSetting(LAST_DIR_KEY, dir);
+  return { path: written };
+}
+
+export function inspectDatabase(path: string): Promise<DbImportPreview> {
+  return api.inspectDbImport(path);
+}
+
+export function commitDatabase(path: string): Promise<DbImportOutcome> {
+  return api.commitDbImport(path, backupStamp(new Date()));
 }
 
 export function inspect(path: string): Promise<ImportPreview> {
@@ -137,9 +206,9 @@ export function onProjectFileDrop(handlers: {
         if (p.type === "enter" || p.type === "over") handlers.onHover(true);
         else if (p.type === "drop") {
           handlers.onHover(false);
-          // 拖一把文件进来时认第一个项目文件；一个都没有就把第一个交上去，
+          // 拖一把文件进来时认第一个能导入的；一个都没有就把第一个交上去，
           // 好让用户看到「你拖的东西不对」而不是什么都没发生
-          const file = p.paths.find(isProjectFile) ?? p.paths[0];
+          const file = p.paths.find(isImportable) ?? p.paths[0];
           if (file) handlers.onDrop(file);
         } else handlers.onHover(false);
       })

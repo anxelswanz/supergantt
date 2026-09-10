@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ALT_LABEL, IS_MAC, shortcut } from "../core/keys";
 import { dayToIso, today } from "../gantt/time";
 
 /**
@@ -193,7 +194,7 @@ describe("详情抽屉", () => {
     });
     await screen.findByText("评论");
 
-    const box = screen.getByPlaceholderText("写点什么…（⌘Enter 提交）");
+    const box = screen.getByPlaceholderText(`写点什么…（${shortcut("mod", "Enter")} 提交）`);
     fireEvent.change(box, { target: { value: "和后端约了周三联调" } });
 
     // 单独 Enter 只换行，不提交 —— 直接看有没有发出写库命令，
@@ -204,7 +205,7 @@ describe("详情抽屉", () => {
     expect(invoke.mock.calls.some(([cmd]) => cmd === "add_comment")).toBe(false);
 
     await act(async () => {
-      fireEvent.keyDown(box, { key: "Enter", metaKey: true });
+      fireEvent.keyDown(box, { key: "Enter", metaKey: IS_MAC, ctrlKey: !IS_MAC });
     });
     expect(await screen.findByText("和后端约了周三联调")).toBeTruthy();
   });
@@ -259,7 +260,7 @@ describe("详情抽屉", () => {
     await act(async () => {
       useAppStore.getState().openDetail(1);
     });
-    expect(await screen.findByText(/按住 ⌥ 拖一段/)).toBeTruthy();
+    expect(await screen.findByText(new RegExp(`按住 ${ALT_LABEL} 拖一段`))).toBeTruthy();
   });
 
   it("阻碍列出区间、天数和原因，且删除可撤销", async () => {
