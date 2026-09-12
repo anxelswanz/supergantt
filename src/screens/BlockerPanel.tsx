@@ -18,7 +18,7 @@ import {
   reasonLabel,
   type BlockReason,
 } from "../core/blocked";
-import { isInProgress } from "../core/board";
+import { canRecordBlocker } from "../core/board";
 import { dayToIso, today } from "../gantt/time";
 import { resolve, type ResolvedTask } from "../gantt/model";
 import { useAppStore } from "../store/useAppStore";
@@ -34,10 +34,19 @@ const FILTERS: { key: Filter; label: string }[] = [
 export function BlockerPanel({
   onClose,
   onCompose,
+  onOpenBlocked,
 }: {
   onClose: () => void;
   /** 新建走看板那个对话框 —— 选活、选原因、写说明，那套已经在了 */
   onCompose: () => void;
+  /**
+   * 点开某一条的详情（改日期、改归类、写结论）。
+   *
+   * 面板本身不渲染它：这个侧栏是带位移动画的，而详情是个 fixed 的模态 ——
+   * 挂在有 transform 的祖先里，fixed 会改成相对那个祖先定位，模态会被挤进
+   * 380px 的侧栏里。交给看板去渲染，和「新建阻碍」那个对话框同一层。
+   */
+  onOpenBlocked: (taskId: number, periodId: string) => void;
 }) {
   const taskMap = useAppStore((s) => s.tasks);
   const revision = useAppStore((s) => s.revision);
@@ -63,7 +72,8 @@ export function BlockerPanel({
   const liveCount = all.filter((b) => b.live).length;
   // 去重后的累计天数：同一天被两条记录盖住只能算一天
   const totalDays = tasks.reduce((sum, t) => sum + blockedDays(t.blocked), 0);
-  const canAdd = tasks.some((t) => !t.hasChildren && isInProgress(t, day));
+  // 已经开工的都能记，包括已完成的 —— 补记正是这张清单存在的理由
+  const canAdd = tasks.some((t) => !t.hasChildren && canRecordBlocker(t, day));
 
   /** 按原因分组的天数 —— 「这个月的时间都卡在什么上」只有这张表答得了 */
   const byReason = useMemo(() => {
@@ -93,7 +103,7 @@ export function BlockerPanel({
           <button
             onClick={onCompose}
             disabled={!canAdd}
-            title={canAdd ? "记一条此刻还没解决的阻碍" : "现在没有进行中的任务"}
+            title={canAdd ? "记一条阻碍：此刻卡着的，或者补记一段已经过去的" : "还没有开工的任务"}
             className="shrink-0 rounded-full border border-[var(--rule)] px-2.5 py-1 text-[10px] font-medium text-[var(--text-dim)] transition-colors hover:border-[#f43f5e] hover:text-[#f43f5e] disabled:pointer-events-none disabled:opacity-40"
           >
             ＋ 新建
@@ -161,6 +171,7 @@ export function BlockerPanel({
               entry={b}
               tasks={tasks}
               onOpenTask={() => openDetail(b.taskId)}
+              onOpenDetail={() => onOpenBlocked(b.taskId, b.period.id)}
               onClose={() => closeBlocker(b.taskId, b.period.id)}
             />
           ))}
@@ -174,11 +185,13 @@ function Row({
   entry,
   tasks,
   onOpenTask,
+  onOpenDetail,
   onClose,
 }: {
   entry: ReturnType<typeof collectBlockers>[number];
   tasks: ResolvedTask[];
   onOpenTask: () => void;
+  onOpenDetail: () => void;
   onClose: () => void;
 }) {
   const { period, days, live } = entry;
@@ -187,7 +200,9 @@ function Row({
 
   return (
     <div
-      className={`group rounded-md px-2 py-1.5 transition-colors hover:bg-[var(--row-hover)] ${
+      onClick={onOpenDetail}
+      title="点开详情：改日期、改归类、写结论"
+      className={`group cursor-pointer rounded-md px-2 py-1.5 transition-colors hover:bg-[var(--row-hover)] ${
         live ? "" : "opacity-70"
       }`}
       style={live ? { background: "rgba(244,63,94,0.06)" } : undefined}
@@ -200,7 +215,10 @@ function Row({
           {reasonLabel(period.reason)}
         </span>
         <button
-          onClick={onOpenTask}
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpenTask();
+          }}
           disabled={!alive}
           title={alive ? `${entry.taskName}　点击打开这条任务` : "任务已删除"}
           className="min-w-0 truncate text-[10px] text-[var(--text-dim)] hover:text-[var(--accent)] hover:underline disabled:no-underline disabled:hover:text-[var(--text-dim)]"
@@ -218,6 +236,12 @@ function Row({
       <div className="mt-0.5 text-[11px] leading-snug text-[var(--text)]">
         {describeBlocked(period)}
       </div>
+
+      {period.resolution && (
+        <div className="mt-0.5 text-[10px] leading-snug text-emerald-600">
+          结论：{period.resolution}
+        </div>
+      )}
 
       <div className="mt-0.5 flex items-center gap-1.5">
         <span className="font-mono text-[9px] tabular-nums text-[var(--text-dim)]">
@@ -240,7 +264,10 @@ function Row({
 
         {live && (
           <button
-            onClick={onClose}
+            onClick={(e) => {
+              e.stopPropagation();
+              onClose();
+            }}
             title="这条阻碍已解决"
             className="ml-auto shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium text-[var(--text-dim)] opacity-0 transition-opacity hover:text-emerald-600 group-hover:opacity-100"
           >

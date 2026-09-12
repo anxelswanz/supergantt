@@ -74,6 +74,18 @@ export interface BlockedPeriod {
    * 混成一个数，事后谁也说不清。
    */
   pushed?: number;
+  /**
+   * 这段卡住最后是怎么过去的。**可不填**，和风险那边刻意相反。
+   *
+   * 风险关闭时强制写处置说明：关一条风险是个**判断**（「它不会发生了」），
+   * 没有依据的判断，三个月后没人敢信。阻碍是既成事实，它的价值在于
+   * 「卡了几天、卡在什么上」—— 那两项已经记在区间和归类里了。这里再强制
+   * 填一句，只会让人为了关掉它而敷衍一句「好了」，反过来污染复盘。
+   *
+   * 所以它是给愿意多写一句的人准备的：「换了二号供应商，交期提前 5 天」
+   * 这种话，是下次遇到同类阻碍时唯一有用的东西。
+   */
+  resolution?: string;
 }
 
 /**
@@ -345,6 +357,7 @@ interface StoredPeriod {
   /** 只在未关闭时写出。缺省即已关闭，历史数据因此原样保持不变 */
   open?: boolean;
   pushed?: number;
+  resolution?: string;
 }
 
 export function serializeBlocked(periods: BlockedPeriod[]): string {
@@ -356,6 +369,7 @@ export function serializeBlocked(periods: BlockedPeriod[]): string {
     ...(p.note ? { note: p.note } : {}),
     ...(p.open ? { open: true } : {}),
     ...(p.pushed ? { pushed: p.pushed } : {}),
+    ...(p.resolution ? { resolution: p.resolution } : {}),
   }));
   return JSON.stringify(rows);
 }
@@ -398,6 +412,9 @@ export function parseBlocked(raw: string): BlockedPeriod[] {
       ...(row.open === true ? { open: true } : {}),
       ...(typeof row.pushed === "number" && row.pushed > 0
         ? { pushed: Math.floor(row.pushed) }
+        : {}),
+      ...(typeof row.resolution === "string" && row.resolution.trim()
+        ? { resolution: row.resolution.trim() }
         : {}),
     });
   }

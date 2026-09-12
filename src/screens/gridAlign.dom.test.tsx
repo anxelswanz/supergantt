@@ -234,3 +234,49 @@ describe("行内下拉浮层", () => {
     expect(useAppStore.getState().tasks.size).toBe(before);
   });
 });
+
+/**
+ * 任务名列吃掉的是面板的剩余宽度，长名字必然被截断 —— 那时 title 是唯一
+ * 能把它看全的地方。这里原先只写「双击打开详情」，等于用一句操作提示占掉了
+ * 那个位置：名字越长，悬停越没用。
+ */
+describe("任务名太长时", () => {
+  const LONG = "三号厂房二层东侧配电室桥架安装与接地检测（含甲方复验）";
+
+  it("悬停能看到全名，操作提示也还在", async () => {
+    const { default: App } = await import("../App");
+    const { useAppStore } = await import("../store/useAppStore");
+
+    render(<App />);
+    await screen.findByText("我的项目");
+    await useAppStore.getState().openProject(7);
+    await screen.findByText("任务1");
+
+    await act(async () => {
+      useAppStore.getState().patchTask(1, { name: LONG }, "改名");
+    });
+
+    const cell = await screen.findByText(LONG);
+    // 全名在第一行：截断之后靠它看全
+    expect(cell.getAttribute("title")).toBe(`${LONG}\n双击打开详情`);
+    // 截断仍然保留 —— 长名字不该把右边的列挤走
+    expect(cell.className).toContain("truncate");
+  });
+
+  it("还没起名的行只显示操作提示，不把占位文字当成名字", async () => {
+    const { default: App } = await import("../App");
+    const { useAppStore } = await import("../store/useAppStore");
+
+    render(<App />);
+    await screen.findByText("我的项目");
+    await useAppStore.getState().openProject(7);
+    await screen.findByText("任务1");
+
+    await act(async () => {
+      useAppStore.getState().patchTask(1, { name: "" }, "清空名字");
+    });
+
+    const cell = await screen.findByText("未命名任务");
+    expect(cell.getAttribute("title")).toBe("双击打开详情");
+  });
+});

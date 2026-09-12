@@ -591,7 +591,15 @@ function Row({
               className={`min-w-0 flex-1 truncate ${
                 task.hasChildren ? "font-semibold text-[var(--text)]" : "text-[var(--text)]"
               } ${task.name ? "" : "italic text-[var(--text-dim)]"}`}
-              title="双击打开详情"
+              /*
+               * 全名放在第一行。
+               *
+               * 名字列吃掉的是面板的剩余宽度，长名字必然被截断，而 title 是
+               * 唯一能把它看全的地方 —— 原先这里只写「双击打开详情」，等于
+               * 用一句操作提示占掉了那个位置：名字越长，悬停越没用。
+               * 里程碑的 ◆ 是装饰，不进 tooltip。
+               */
+              title={task.name ? `${task.name}\n双击打开详情` : "双击打开详情"}
             >
               {task.milestone ? "◆ " : ""}
               {task.name || "未命名任务"}

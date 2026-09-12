@@ -164,17 +164,32 @@ export function moveToColumn(
 /**
  * 新开一条阻碍。
  *
- * 一律是**未关闭**的：新建阻碍描述的是此刻正卡着的事，它要一直跟着往后长
- * 到有人来关掉它（见 blocked.ts 的 extendOpenBlocks）。
- * 需要记一段已经过去的受阻，走甘特条上的 ⌥ 拖 —— 那条路产出的是历史标注。
+ * 默认是**未关闭**的、从今天起算：把卡片拖进受阻列走的就是这条路，
+ * 那个手势描述的是此刻正卡着的事，它要一直跟着往后长到有人来关掉它
+ * （见 blocked.ts 的 extendOpenBlocks）。
+ *
+ * `span` 和 `live` 是给**补记**用的：上个月那条活卡了三天，人往往是在
+ * 它做完之后的复盘会上才想起来记 —— 那时既不该从今天起算，也不该让它
+ * 继续往后长。两个参数都不传时行为和以前一模一样。
+ *
+ * 持续中的那条终点一律顶到今天，和 fitBlocked 同一套口径：
+ * 「一直卡到我手动关掉」的起码含义就是「到此刻为止都还卡着」。
  */
-export function newBlocker(today: number, reason: BlockReason, note?: string): BlockedPeriod {
+export function newBlocker(
+  today: number,
+  reason: BlockReason,
+  note?: string,
+  span?: { from: number; to: number },
+  live = true,
+): BlockedPeriod {
+  const from = Math.floor(span?.from ?? today);
+  const filled = Math.max(from, Math.floor(span?.to ?? today));
   return {
     id: newBlockId(),
-    from: today,
-    to: today,
+    from,
+    to: live ? Math.max(filled, today) : filled,
     reason,
-    open: true,
+    ...(live ? { open: true } : {}),
     ...(note?.trim() ? { note: note.trim() } : {}),
   };
 }
@@ -193,15 +208,38 @@ export function openBlockerOn(
   today: number,
   reason: BlockReason,
   note?: string,
+  span?: { from: number; to: number },
+  live = true,
 ): Partial<Task> {
+  const period = newBlocker(today, reason, note, span, live);
+  // 拉到这条阻碍的终点，而不是一律拉到今天：补记一段上个月的受阻，
+  // 不该把一条早就做完的活的计划结束日拽到今天
+  const reach = period.to;
   return {
-    blocked: [...task.blocked, newBlocker(today, reason, note)],
-    ...(task.endDay < today ? { endDay: today } : {}),
-    ...(task.actualEndDay != null && task.actualEndDay < today
-      ? { actualEndDay: today }
+    blocked: [...task.blocked, period],
+    ...(task.endDay < reach ? { endDay: reach } : {}),
+    ...(task.actualEndDay != null && task.actualEndDay < reach
+      ? { actualEndDay: reach }
       : {}),
   };
 }
+
+/**
+ * 能不能给这条活记一条阻碍 —— 只管**阻碍**这一个入口。
+ *
+ * 比 isInProgress 宽一格：**已完成的活也能记**。补记是真实需求 —— 上个月
+ * 那条活卡了三天，人往往是在它做完之后的复盘会上才想起来记，而那时它已经
+ * 在「已完成」列里了。挡住它等于逼用户先把进度调回 99% 记一条、再调回去。
+ *
+ * 仍然排除「还没开工」：那个阶段谈不上「推不动」，该改的是计划日期。
+ *
+ * 风险那边继续用 isInProgress，没有跟着放宽：风险说的是「接下来可能出问题」，
+ * 给一条已经做完的活记一条未来的风险，本身就不成立。
+ */
+export const canRecordBlocker = (
+  task: Pick<Task, "progress" | "actualStartDay" | "blocked">,
+  today: number,
+): boolean => columnOf(task, today) !== "todo";
 
 /**
  * 看板只放叶子任务。

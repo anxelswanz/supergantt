@@ -350,25 +350,30 @@ describe("详情抽屉", () => {
       expect(only.open).toBeUndefined();
     });
 
-    it("终止日期填不过任务结束日 —— 越界的一律夹回去", async () => {
+    it("终止日期可以填到任务结束日之后，任务跟着顺延 —— 而不是夹回去", async () => {
+      // 夹回去的表现是「日期选不动」：用户不知道是被规则挡了还是软件坏了。
+      // 而一件事卡过了原计划恰恰是最常见的情况，那时该让位的是计划，不是事实
       const useAppStore = await openPanel();
       const task = useAppStore.getState().tasks.get(1)!;
 
       fireEvent.click(screen.getByText("持续中"));
       const until = untilInput();
-      // date 控件的 max 只挡得住点选，手打的照样进得来，所以要在代码里夹
-      expect(until.getAttribute("max")).toBe(dayToIso(task.endDay));
+      // 往后不设上限，只挡「早于起始日」
+      expect(until.getAttribute("max")).toBeNull();
+      expect(until.getAttribute("min")).toBe(dayToIso(task.blocked[0].from));
 
-      fireEvent.change(until, { target: { value: dayToIso(task.endDay + 40) } });
-      expect(until.value).toBe(dayToIso(task.endDay));
+      const target = task.endDay + 40;
+      fireEvent.change(until, { target: { value: dayToIso(target) } });
+      expect(until.value).toBe(dayToIso(target));
+      // 保存前就把后果说清楚，而不是等回到甘特图上才发现条子变长了
+      expect(screen.getByText(/保存时会把计划结束日顺延到/)).toBeTruthy();
 
       await act(async () => {
         fireEvent.click(screen.getByRole("button", { name: "保存" }));
       });
       const after = useAppStore.getState().tasks.get(1)!;
-      expect(after.blocked[0].to).toBe(task.endDay);
-      // 手填不会把任务撑长，只有「持续中」才会顺延工期
-      expect(after.endDay).toBe(task.endDay);
+      expect(after.blocked[0].to).toBe(target);
+      expect(after.endDay).toBe(target);
     });
 
     it("倒着填（终止早于起始）收成一天，不留负区间", async () => {

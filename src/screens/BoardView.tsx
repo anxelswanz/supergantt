@@ -20,8 +20,8 @@ import { motion } from "motion/react";
 import {
   BOARD_COLUMNS,
   boardTasks,
+  canRecordBlocker,
   columnOf,
-  isInProgress,
   moveToColumn,
   type BoardColumn,
 } from "../core/board";
@@ -36,6 +36,7 @@ import { RISK_COLORS, riskFlags, riskLevelLabel, type RiskFlag } from "../core/r
 import { withAlpha } from "../gantt/coloring";
 import { RiskPanel } from "./RiskPanel";
 import { BlockerPanel } from "./BlockerPanel";
+import { BlockedDetail } from "./BlockedDetail";
 import { AnimatePresence } from "motion/react";
 import { today } from "../gantt/time";
 import { resolve, type ResolvedTask } from "../gantt/model";
@@ -43,7 +44,7 @@ import { useAppStore } from "../store/useAppStore";
 import type { Person } from "../db/api";
 import { Avatar } from "./Avatar";
 import { PRIORITY_COLORS } from "../gantt/theme";
-import { dayToIso } from "../gantt/time";
+import { dayToIso, isoToDay } from "../gantt/time";
 
 /** 列头的颜色。受阻用红，其余走中性 —— 只有一件事需要被一眼看到 */
 const COLUMN_TINT: Record<BoardColumn, string> = {
@@ -100,9 +101,13 @@ export function BoardView() {
   /** taskId → 未关闭的风险。卡片角标按它显示，和受阻是两个独立标识 */
   const flags = useMemo(() => riskFlags(projectRisks), [projectRisks]);
 
-  /** 能新开阻碍的活：进行中的（含已经卡住的，一条活可以同时卡在两件事上） */
+  /**
+   * 能记阻碍的活：已经开工的都算 —— 进行中的、卡住的，以及**已经做完的**。
+   * 最后一种是补记：复盘会上想起来「上个月这条活等了三天料」，
+   * 那时它早就在已完成列里了（core/board.canRecordBlocker）。
+   */
   const blockable = useMemo(
-    () => tasks.filter((t) => isInProgress(t, day)),
+    () => tasks.filter((t) => canRecordBlocker(t, day)),
     [tasks, day],
   );
 
@@ -111,6 +116,19 @@ export function BoardView() {
   const [panel, setPanel] = useState<"blockers" | "risks" | null>(null);
   /** 拖进"卡住"列时要先问清原因 —— 不问就只能记成「其他」，归因视图里等于没记 */
   const [askReason, setAskReason] = useState<number | null>(null);
+  /**
+   * 从阻碍清单点开的那一条。存 id 不存对象 —— 对象在编辑之后就是旧的了
+   * （和 TaskDetail 同一套）。那条记录被删掉或整段丢掉时，这里查不到，
+   * 面板自然不渲染
+   */
+  const [blockedDetail, setBlockedDetail] = useState<
+    { taskId: number; periodId: string } | null
+  >(null);
+  const blockedPeriod = blockedDetail
+    ? (taskMap
+        .get(blockedDetail.taskId)
+        ?.blocked.find((p) => p.id === blockedDetail.periodId) ?? null)
+    : null;
 
   const drop = (taskId: number, column: BoardColumn) => {
     const task = taskMap.get(taskId);
@@ -255,6 +273,7 @@ export function BoardView() {
           <BlockerPanel
             onClose={() => setPanel(null)}
             onCompose={() => setComposing(true)}
+            onOpenBlocked={(taskId, periodId) => setBlockedDetail({ taskId, periodId })}
           />
         )}
         {panel === "risks" && <RiskPanel onClose={() => setPanel(null)} />}
@@ -263,11 +282,20 @@ export function BoardView() {
       {composing && (
         <BlockerComposer
           candidates={blockable}
-          onSubmit={(taskId, reason, note) => {
-            addBlocker(taskId, reason, note);
+          day={day}
+          onSubmit={(taskId, reason, note, span, live) => {
+            addBlocker(taskId, reason, note, span, live);
             setComposing(false);
           }}
           onCancel={() => setComposing(false)}
+        />
+      )}
+
+      {blockedDetail && blockedPeriod && (
+        <BlockedDetail
+          taskId={blockedDetail.taskId}
+          period={blockedPeriod}
+          onClose={() => setBlockedDetail(null)}
         />
       )}
 
@@ -533,11 +561,19 @@ function Card({
  */
 function BlockerComposer({
   candidates,
+  day,
   onSubmit,
   onCancel,
 }: {
   candidates: ResolvedTask[];
-  onSubmit: (taskId: number, reason: BlockReason, note?: string) => void;
+  day: number;
+  onSubmit: (
+    taskId: number,
+    reason: BlockReason,
+    note: string | undefined,
+    span: { from: number; to: number },
+    live: boolean,
+  ) => void;
   onCancel: () => void;
 }) {
   const [taskId, setTaskId] = useState<number | null>(null);
@@ -545,6 +581,32 @@ function BlockerComposer({
   const [note, setNote] = useState("");
 
   const target = taskId ?? candidates[0]?.id ?? null;
+  const task = candidates.find((t) => t.id === target) ?? null;
+
+  /**
+   * 两种默认值，按选中的那条活自己决定：
+   *
+   *   · 还在做的  —— 「此刻卡着」：从今天起算，持续中开着（原来的行为）
+   *   · 已经做完的 —— 「补记」：持续中关掉，日期落在它自己的区间末尾。
+   *     补记的是过去的事，从今天起算会凭空把一条做完的活拽回受阻列
+   */
+  const [live, setLive] = useState(true);
+  const [from, setFrom] = useState(day);
+  const [until, setUntil] = useState(day);
+
+  // 换一条活就重算默认值 —— 把上一条活的日期留在这儿，多半是错的
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!task) return;
+    const done = task.progress >= 1;
+    const anchor = done ? (task.actualEndDay ?? task.endDay) : day;
+    setLive(!done);
+    setFrom(anchor);
+    setUntil(anchor);
+  }, [task?.id, day]);
+
+  // 和阻碍详情面板同一套口径：持续中的终点就是今天，手填的只夹前面那一头
+  const to = live ? Math.max(from, day) : Math.max(from, until);
 
   return (
     <div className="fixed inset-0 z-40 grid place-items-center bg-black/30" onClick={onCancel}>
@@ -554,10 +616,13 @@ function BlockerComposer({
         onClick={(e) => e.stopPropagation()}
         className="w-[340px] rounded-xl border border-[var(--rule)] bg-[var(--surface)] p-3.5 shadow-xl"
       >
-        <div className="text-xs font-semibold text-[var(--text)]">新建阻碍</div>
+        <div className="text-xs font-semibold text-[var(--text)]">
+          {live ? "新建阻碍" : "补记阻碍"}
+        </div>
         <div className="mt-0.5 mb-2.5 text-[10px] leading-relaxed text-[var(--text-dim)]">
-          从今天算起，每天自动加一天，并同步顺延这条活的计划结束日 ——
-          直到有人手动关掉它。
+          {live
+            ? "持续中：终止日每天自动跟到今天，并同步顺延这条活的计划结束日，直到有人手动关掉它。"
+            : "已经过去的一段：按下面填的日期记下来，不再自动延长。"}
         </div>
 
         <label className="mb-1 block text-[10px] font-medium text-[var(--text-dim)]">
@@ -571,9 +636,77 @@ function BlockerComposer({
           {candidates.map((t) => (
             <option key={t.id} value={t.id}>
               {t.name || "未命名"}
+              {t.progress >= 1 ? "（已完成）" : ""}
             </option>
           ))}
         </select>
+
+        {/* 日期。已完成的活默认填好它自己的区间末尾，改不改都行 */}
+        <div className="mb-2.5 flex items-end gap-2">
+          <div className="min-w-0 flex-1">
+            <label className="mb-1 block text-[10px] font-medium text-[var(--text-dim)]">
+              从哪天起
+            </label>
+            <input
+              type="date"
+              value={dayToIso(from)}
+              title="这段受阻的第一天"
+              onChange={(e) => {
+                if (!e.target.value) return;
+                setFrom(isoToDay(e.target.value));
+              }}
+              className="w-full rounded-lg border border-[var(--rule)] bg-[var(--surface)] px-2 py-1.5 text-[11px] text-[var(--text)]"
+            />
+          </div>
+          <div className="min-w-0 flex-1">
+            <label className="mb-1 block text-[10px] font-medium text-[var(--text-dim)]">
+              到哪天为止
+            </label>
+            <input
+              type="date"
+              value={dayToIso(to)}
+              min={dayToIso(from)}
+              disabled={live}
+              title={
+                live
+                  ? "持续中：终点就是今天，明天会自动变成明天"
+                  : "这段受阻的最后一天"
+              }
+              onChange={(e) => {
+                if (!e.target.value) return;
+                setUntil(Math.max(from, isoToDay(e.target.value)));
+              }}
+              className="w-full rounded-lg border border-[var(--rule)] bg-[var(--surface)] px-2 py-1.5 text-[11px] text-[var(--text)] disabled:opacity-55"
+            />
+          </div>
+        </div>
+
+        {/* 持续中开关。已完成的活默认关着 —— 补记一段历史不该让它重新卡住 */}
+        <button
+          onClick={() => {
+            if (live) setUntil(Math.max(from, day));
+            setLive((v) => !v);
+          }}
+          className="mb-2.5 flex w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left transition-colors"
+          style={{
+            borderColor: live ? "#f43f5e" : "var(--rule)",
+            background: live ? "rgba(244,63,94,0.06)" : "transparent",
+          }}
+        >
+          <span
+            className="grid h-4 w-7 shrink-0 items-center rounded-full px-0.5 transition-colors"
+            style={{ background: live ? "#f43f5e" : "var(--rule)" }}
+          >
+            <span
+              className="block size-3 rounded-full bg-white transition-transform"
+              style={{ transform: live ? "translateX(12px)" : "translateX(0)" }}
+            />
+          </span>
+          <span className="text-[11px] font-medium text-[var(--text)]">持续中</span>
+          <span className="ml-auto font-mono text-[10px] tabular-nums text-[var(--text-dim)]">
+            共 {to - from + 1} 天
+          </span>
+        </button>
 
         <label className="mb-1 block text-[10px] font-medium text-[var(--text-dim)]">
           卡在什么上
@@ -611,7 +744,9 @@ function BlockerComposer({
             取消
           </button>
           <button
-            onClick={() => target != null && onSubmit(target, reason, note)}
+            onClick={() =>
+              target != null && onSubmit(target, reason, note, { from, to }, live)
+            }
             disabled={target == null}
             className="rounded-lg px-3 py-1 text-[11px] font-medium text-white disabled:opacity-40"
             style={{ background: "#f43f5e" }}

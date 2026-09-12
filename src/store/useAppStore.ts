@@ -22,7 +22,7 @@ import {
   type BlockedPeriod,
   type BlockReason,
 } from "../core/blocked";
-import { isInProgress, openBlockerOn } from "../core/board";
+import { canRecordBlocker, openBlockerOn } from "../core/board";
 import { riskFlags, type RiskFlag } from "../core/risks";
 import type { Span, ViewMode } from "../core/viewMode";
 import { isAppView, type AppView } from "../core/views";
@@ -172,8 +172,19 @@ interface AppState {
   assignPerson: (taskId: number, personId: number | null) => void;
   setPriority: (taskId: number, priority: 0 | 1 | 2 | 3) => void;
   addBlocked: (taskId: number, period: BlockedPeriod) => void;
-  /** 新开一条**未关闭**的阻碍。只允许挂在进行中的任务上 */
-  addBlocker: (taskId: number, reason: BlockReason, note?: string) => void;
+  /**
+   * 新记一条阻碍。默认是未关闭的、从今天起算（把卡片拖进受阻列走的也是它）。
+   *
+   * `span` / `live` 是补记用的：一条上个月卡过三天、现在已经做完的活，
+   * 既不该从今天起算，也不该继续往后长。
+   */
+  addBlocker: (
+    taskId: number,
+    reason: BlockReason,
+    note?: string,
+    span?: { from: number; to: number },
+    live?: boolean,
+  ) => void;
   /** 手动关掉一条阻碍 —— 未关闭的阻碍只有这一个出口 */
   closeBlocker: (taskId: number, periodId: string) => void;
   /**
@@ -708,14 +719,19 @@ export const useAppStore = create<AppState>((set, get) => {
      * 新建阻碍。走命令栈，所以误点一下可以 ⌘Z ——
      * 它是用户主动开的，和自动延长不是一回事。
      */
-    addBlocker(taskId, reason, note) {
+    addBlocker(taskId, reason, note, span, live = true) {
       const task = get().tasks.get(taskId);
       if (!task) return;
       // 准入判据在 core 里，这里再挡一次：UI 会禁用按钮，但 store 是
-      // 唯一的写入口，规则只写在界面上等于没写
+      // 唯一的写入口，规则只写在界面上等于没写。
+      // 注意它比风险那边宽一格 —— 已完成的活允许补记（canRecordBlocker）
       const day = today();
-      if (!isInProgress(task, day)) return;
-      get().patchTask(taskId, openBlockerOn(task, day, reason, note), "新建阻碍");
+      if (!canRecordBlocker(task, day)) return;
+      get().patchTask(
+        taskId,
+        openBlockerOn(task, day, reason, note, span, live),
+        live ? "新建阻碍" : "补记阻碍",
+      );
     },
 
     closeBlocker(taskId, periodId) {

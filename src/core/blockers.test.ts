@@ -20,6 +20,7 @@ import {
   type BlockedPeriod,
 } from "./blocked";
 import {
+  canRecordBlocker,
   columnOf,
   isBlockedOn,
   isInProgress,
@@ -373,5 +374,119 @@ describe("阻碍清单的排序", () => {
 
   it("一条阻碍都没有时是空表，不是抛错", () => {
     expect(collectBlockers([of(1, "甲", [])], TODAY)).toEqual([]);
+  });
+});
+
+/**
+ * 补记：一段已经过去的受阻，往往是在活做完之后的复盘会上才被想起来。
+ *
+ * 这条路和「此刻卡着」共用一个入口，但两者的后果完全相反：前者一天日期都
+ * 不该动，后者要把区间拉到今天并顺延工期。混在一起写，迟早有一条会跟着
+ * 另一条变 —— 所以两种都在这里逐条钉死。
+ */
+describe("能不能给这条活记阻碍", () => {
+  it("已完成的活也能记 —— 挡住它等于逼用户把进度调回 99% 记完再调回去", () => {
+    expect(canRecordBlocker(task({ progress: 1, blocked: [] }), TODAY)).toBe(true);
+  });
+
+  it("还没开工的不行：那个阶段谈不上「推不动」，该改的是计划日期", () => {
+    expect(
+      canRecordBlocker(task({ progress: 0, actualStartDay: null, blocked: [] }), TODAY),
+    ).toBe(false);
+  });
+
+  it("进行中的、已经卡住的，都行", () => {
+    expect(canRecordBlocker(task({ progress: 0.5, blocked: [] }), TODAY)).toBe(true);
+    expect(canRecordBlocker(task({ blocked: [openBlock(TODAY - 1, TODAY)] }), TODAY)).toBe(true);
+  });
+
+  it("只比风险那条判据宽在「已完成」这一格上", () => {
+    const done = task({ progress: 1, blocked: [] });
+    // 风险说的是「接下来可能出问题」，给一条做完的活记未来的风险本身就不成立
+    expect(isInProgress(done, TODAY)).toBe(false);
+    expect(canRecordBlocker(done, TODAY)).toBe(true);
+  });
+});
+
+describe("补记一段过去的阻碍", () => {
+  it("按填的日期记，不顶到今天，也不写 open", () => {
+    const t = task({ progress: 1, endDay: TODAY - 1, blocked: [] });
+    const out = openBlockerOn(
+      t, TODAY, "equipment", "等厂家", { from: TODAY - 9, to: TODAY - 7 }, false,
+    );
+    const p = out.blocked!.at(-1)!;
+
+    expect(p).toMatchObject({ from: TODAY - 9, to: TODAY - 7, reason: "equipment", note: "等厂家" });
+    expect(p.open).toBeUndefined();
+    // 补记一段过去的事，不该把一条早就做完的活的计划结束日拽到今天
+    expect(out.endDay).toBeUndefined();
+  });
+
+  it("补记的终点超出任务尾部时，任务跟着变长 —— 和手改区间同一套口径", () => {
+    const t = task({ progress: 1, endDay: TODAY - 5, blocked: [] });
+    const out = openBlockerOn(t, TODAY, "other", undefined, { from: TODAY - 4, to: TODAY - 2 }, false);
+    expect(out.endDay).toBe(TODAY - 2);
+  });
+
+  it("持续中的那条仍然顶到今天，并把任务拉过来", () => {
+    const t = task({ endDay: TODAY - 3, blocked: [] });
+    const out = openBlockerOn(t, TODAY, "material", undefined, { from: TODAY - 6, to: TODAY - 5 }, true);
+    const p = out.blocked!.at(-1)!;
+
+    // 「一直卡到我手动关掉」的起码含义就是「到此刻为止都还卡着」
+    expect(p).toMatchObject({ from: TODAY - 6, to: TODAY, open: true });
+    expect(out.endDay).toBe(TODAY);
+  });
+
+  it("倒着填收成一天，不留负区间", () => {
+    const p = newBlocker(TODAY, "other", undefined, { from: TODAY - 2, to: TODAY - 9 }, false);
+    expect(p.to).toBe(p.from);
+  });
+
+  it("不传 span / live 时行为原样不变：今天起算、持续中", () => {
+    expect(newBlocker(TODAY, "material")).toMatchObject({ from: TODAY, to: TODAY, open: true });
+  });
+});
+
+/**
+ * 结论：一句「最后是怎么过去的」。可不填 —— 和风险那边强制写处置说明刻意相反，
+ * 理由见 blocked.BlockedPeriod.resolution。
+ */
+describe("阻碍的结论", () => {
+  it("写了就存得住，序列化往返之后还在", () => {
+    const json = serializeBlocked([
+      { id: "b1", from: 1, to: 3, reason: "material", resolution: "换了二号供应商" },
+    ]);
+    expect(parseBlocked(json)[0].resolution).toBe("换了二号供应商");
+  });
+
+  it("没写就不写出这个字段 —— 历史数据原样保持不变", () => {
+    const json = serializeBlocked([{ id: "b1", from: 1, to: 2, reason: "other" }]);
+    expect(json).not.toContain("resolution");
+  });
+
+  it("只有空白的不落库", () => {
+    const json = serializeBlocked([
+      { id: "b1", from: 1, to: 2, reason: "other", resolution: "   " },
+    ]);
+    expect(parseBlocked(json)[0].resolution).toBeUndefined();
+  });
+
+  it("关掉一条阻碍不会把已经写好的结论抹掉", () => {
+    // 关闭只该改「还卡不卡着」，顺手清掉用户写过的话是最招人恨的那类 bug
+    const periods: BlockedPeriod[] = [
+      { id: "b1", from: TODAY - 3, to: TODAY, reason: "material", open: true, resolution: "到料了" },
+    ];
+    const [out] = closeBlocked(periods, "b1", TODAY);
+    expect(out.resolution).toBe("到料了");
+    expect(out.open).toBeUndefined();
+  });
+
+  it("改区间时结论跟着走", () => {
+    const t = task({
+      blocked: [{ id: "b1", from: TODAY - 3, to: TODAY - 1, reason: "other", resolution: "解决了" }],
+    });
+    const out = fitBlocked(t, { ...t.blocked[0], to: TODAY }, TODAY)!;
+    expect(out.blocked[0].resolution).toBe("解决了");
   });
 });

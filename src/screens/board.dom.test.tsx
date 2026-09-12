@@ -9,6 +9,7 @@ import {
   within,
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { dayToIso } from "../gantt/time";
 
 /**
  * 看板上的阻碍与风险，走一遍用户真会做的那条路。
@@ -180,18 +181,66 @@ describe("看板 · 阻碍", () => {
     await waitFor(() => expect(screen.queryByText(/等钢筋/)).toBeNull());
   });
 
-  it("没有进行中的任务时，新建是禁用的", async () => {
+  it("已完成的活也能补记，只有还没开工的不行", async () => {
     const store = await openBoard();
+    fireEvent.click(screen.getByRole("button", { name: /阻碍清单/ }));
+
+    // 做完了也要能记：「上个月这条活等了三天料」是复盘会上才想起来的，
+    // 那时它早就在已完成列里了
     await act(async () => {
       store.getState().patchTask(1, { progress: 1 }, "完成");
     });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "＋ 新建" }).hasAttribute("disabled"),
+      ).toBe(false),
+    );
 
-    fireEvent.click(screen.getByRole("button", { name: /阻碍清单/ }));
+    // 退回未开始就不行了 —— 那个阶段谈不上「推不动」，该改的是计划日期
+    await act(async () => {
+      store
+        .getState()
+        .patchTask(1, { progress: 0, actualStartDay: null, actualEndDay: null }, "退回");
+    });
     await waitFor(() =>
       expect(
         screen.getByRole("button", { name: "＋ 新建" }).hasAttribute("disabled"),
       ).toBe(true),
     );
+  });
+
+  it("给已完成的活补记一段过去的阻碍：日期按填的来，不把工期撑长", async () => {
+    const store = await openBoard();
+    const before = store.getState().tasks.get(1)!;
+    await act(async () => {
+      store.getState().patchTask(1, { progress: 1 }, "完成");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /阻碍清单/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "＋ 新建" }));
+
+    // 已完成的活默认就是补记：持续中是关掉的，终止日可以自己填
+    await screen.findByText("补记阻碍");
+    const until = screen.getByTitle("这段受阻的最后一天") as HTMLInputElement;
+    expect(until.disabled).toBe(false);
+
+    const from = dayToIso(before.startDay);
+    const to = dayToIso(before.startDay + 2);
+    fireEvent.click(screen.getByRole("button", { name: "设备故障" }));
+    fireEvent.change(screen.getByTitle("这段受阻的第一天"), { target: { value: from } });
+    fireEvent.change(until, { target: { value: to } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "记下来" }));
+    });
+
+    const [only] = store.getState().tasks.get(1)!.blocked;
+    expect(dayToIso(only.from)).toBe(from);
+    expect(dayToIso(only.to)).toBe(to);
+    // 不是持续中：明天不会再自动加一天，卡片也不会回到受阻列
+    expect(only.open).toBeUndefined();
+    expect(only.reason).toBe("equipment");
+    // 补记一段过去的事，不该顺延计划结束日
+    expect(store.getState().tasks.get(1)!.endDay).toBe(before.endDay);
   });
 
   it("自动延长会把未关闭的阻碍推到今天，并顺延计划结束日", async () => {
@@ -455,6 +504,59 @@ describe("看板 · 阻碍清单", () => {
     fireEvent.click(screen.getByRole("button", { name: /阻碍清单/ }));
     expect(await screen.findByText("设备故障 3 天")).toBeTruthy();
     expect(screen.getByText("等料 1 天")).toBeTruthy();
+  });
+
+  it("点清单里的一条就进详情；关掉之后能补一句结论（可不填）", async () => {
+    const store = await openBoard();
+    await act(async () => {
+      store.getState().addBlocker(1, "material", "等钢筋");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /阻碍清单/ }));
+    const panel = (await screen.findByText("阻碍清单")).closest("aside")!;
+    await act(async () => {
+      fireEvent.click(within(panel).getByTitle(/点开详情/));
+    });
+
+    await screen.findByText("阻碍详情");
+    // 还卡着的时候谈不上「最后怎么过去的」，所以这时没有结论框
+    expect(screen.queryByPlaceholderText(/最后是怎么过去的/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /一直卡到手动关掉为止/ }));
+    fireEvent.change(screen.getByPlaceholderText(/最后是怎么过去的/), {
+      target: { value: "换了二号供应商，交期提前 5 天" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    });
+
+    const [only] = store.getState().tasks.get(1)!.blocked;
+    expect(only.resolution).toBe("换了二号供应商，交期提前 5 天");
+    expect(only.open).toBeUndefined();
+    // 写了就得看得见，否则等于没写
+    expect(await screen.findByText(/换了二号供应商/)).toBeTruthy();
+  });
+
+  it("结论不是必填 —— 不写也能关掉，清单里就是没有那一行", async () => {
+    const store = await openBoard();
+    await act(async () => {
+      store.getState().addBlocker(1, "equipment", "三号机异响");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /阻碍清单/ }));
+    const panel = (await screen.findByText("阻碍清单")).closest("aside")!;
+    await act(async () => {
+      fireEvent.click(within(panel).getByTitle(/点开详情/));
+    });
+    await screen.findByText("阻碍详情");
+
+    fireEvent.click(screen.getByRole("button", { name: /一直卡到手动关掉为止/ }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    });
+
+    expect(store.getState().tasks.get(1)!.blocked[0].resolution).toBeUndefined();
+    expect(screen.queryByText(/^结论：/)).toBeNull();
   });
 
   it("两个面板一次只开一个 —— 并排会把看板挤没", async () => {
