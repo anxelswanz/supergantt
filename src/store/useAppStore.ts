@@ -22,6 +22,7 @@ import {
   type BlockedPeriod,
   type BlockReason,
 } from "../core/blocked";
+import { rolloverOverdue } from "../core/rollover";
 import { canRecordBlocker, openBlockerOn } from "../core/board";
 import { riskFlags, type RiskFlag } from "../core/risks";
 import type { Span, ViewMode } from "../core/viewMode";
@@ -95,6 +96,14 @@ interface AppState {
   viewMode: ViewMode;
   /** 实施侧是否叠加显示计划条 */
   compareOn: boolean;
+  /**
+   * 实施逾期自动顺延（core/rollover.ts）。默认关。
+   *
+   * 开了之后，每天跨天时把「已开工、没干完、计划结束日已过」的叶子任务的
+   * 计划结束日推到今天 —— 计划跟着事实走。关着就什么都不动，逾期只能靠
+   * 用户手动改或标阻碍来表达。
+   */
+  autoRollover: boolean;
 
   /**
    * 负责人。全局共享，不按项目隔离 —— 同一个人通常同时出现在多个项目里。
@@ -206,6 +215,8 @@ interface AppState {
   setActiveView: (view: AppView) => void;
   setViewMode: (mode: ViewMode) => void;
   setCompareOn: (on: boolean) => void;
+  /** 开关实施逾期自动顺延（core/rollover.ts） */
+  setAutoRollover: (on: boolean) => void;
   setActualSpan: (taskId: number, span: Span | null, label?: string) => void;
   adoptPlanDates: (taskId: number) => void;
   moveTask: (id: number, delta: -1 | 1) => void;
@@ -247,6 +258,7 @@ const COLOR_BY_KEY = "bar_color_by";
 const ROW_HEIGHT_KEY = "row_height";
 const VIEW_MODE_KEY = "view_mode";
 const ACTIVE_VIEW_KEY = "active_view";
+const AUTO_ROLLOVER_KEY = "auto_rollover";
 
 export const useAppStore = create<AppState>((set, get) => {
   /**
@@ -347,6 +359,7 @@ export const useAppStore = create<AppState>((set, get) => {
     activeView: "gantt",
     viewMode: "plan",
     compareOn: false,
+    autoRollover: false,
     people: [],
     selectedId: null,
     detailId: null,
@@ -360,11 +373,12 @@ export const useAppStore = create<AppState>((set, get) => {
     saveError: null,
 
     async loadSettings() {
-      const [color, row, view, active] = await Promise.all([
+      const [color, row, view, active, rollover] = await Promise.all([
         api.getSetting(COLOR_BY_KEY).catch(() => null),
         api.getSetting(ROW_HEIGHT_KEY).catch(() => null),
         api.getSetting(VIEW_MODE_KEY).catch(() => null),
         api.getSetting(ACTIVE_VIEW_KEY).catch(() => null),
+        api.getSetting(AUTO_ROLLOVER_KEY).catch(() => null),
       ]);
       if (color && ["stage", "assignee", "priority", "none"].includes(color)) {
         set({ colorBy: color as ColorBy });
@@ -372,6 +386,9 @@ export const useAppStore = create<AppState>((set, get) => {
       if (row && row in ROW_HEIGHTS) set({ rowHeightKey: row as RowHeightKey });
       if (view === "plan" || view === "actual") set({ viewMode: view });
       if (isAppView(active)) set({ activeView: active });
+      // 只有明确写成 "1" 才算开 —— 读不到、读坏了都退回默认的关，
+      // 免得一个读写异常就把全项目的排期默默改了
+      set({ autoRollover: rollover === "1" });
     },
 
     setColorBy(mode) {
@@ -445,6 +462,11 @@ export const useAppStore = create<AppState>((set, get) => {
 
     setCompareOn(on) {
       set({ compareOn: on });
+    },
+
+    setAutoRollover(on) {
+      set({ autoRollover: on });
+      void api.setSetting(AUTO_ROLLOVER_KEY, on ? "1" : "0").catch(() => {});
     },
 
     /**
@@ -745,24 +767,52 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     /**
-     * 每日跨天：没关掉的阻碍往后长一天，任务的计划结束日跟着顺延。
+     * 每日跨天：没关掉的阻碍往后长一天，任务的计划结束日跟着顺延；
+     * 开了「实施逾期自动顺延」的话，逾期未完工的叶子任务也一并推。
      *
      * 全项目一次算完、一条命令落地：一条一条写会让持久化层被触发 N 次，
      * 而它每次都是整项目全量写回。
+     *
+     * 两条路径可以同时命中同一条任务（既标了阻碍、又单纯逾期），所以这里
+     * **先各自算、再取最大值合并**，而不是把两个 patch 依次叠上去 ——
+     * 叠上去的话同一天会被算两次，工期凭空多一倍。这和 blocked.ts 里
+     * 「两段阻碍同时开着取最大值不求和」是同一条规矩。
      */
     extendOpenBlockers() {
-      const { tasks, stack } = get();
+      const { tasks, stack, autoRollover } = get();
       if (!stack) return;
       const day = today();
 
+      // 只有叶子任务能推计划结束日：父任务的日期是子任务汇总出来的
+      // （model.resolve），推它下一轮汇总就覆盖回去，等于没改
+      let parents: Set<number> | null = null;
+      if (autoRollover) {
+        parents = new Set<number>();
+        for (const task of tasks.values()) {
+          if (task.parentId != null) parents.add(task.parentId);
+        }
+      }
+
       const changes: Array<{ id: number; changes: Partial<Task> }> = [];
       for (const task of tasks.values()) {
-        const patch = extendOpenBlocks(task, day);
-        if (patch) changes.push({ id: task.id, changes: patch });
+        // 目标结束日：两条路径都想推时取最靠后的那个
+        const blockerPatch = extendOpenBlocks(task, day);
+        const overduePatch =
+          autoRollover && !parents!.has(task.id) ? rolloverOverdue(task, day) : null;
+        if (!blockerPatch && !overduePatch) continue;
+
+        const end = Math.max(
+          blockerPatch?.endDay ?? task.endDay,
+          overduePatch?.endDay ?? task.endDay,
+        );
+        const merged: Partial<Task> = { ...blockerPatch, ...overduePatch, endDay: end };
+        // actualEndDay 只有阻碍那条路径会写；逾期顺延不动实施日期
+        if (blockerPatch?.actualEndDay != null) merged.actualEndDay = blockerPatch.actualEndDay;
+        changes.push({ id: task.id, changes: merged });
       }
       if (changes.length === 0) return;
 
-      stack.applySystem(makeCommand("自动延长阻碍", tasks, changes));
+      stack.applySystem(makeCommand("自动顺延排期", tasks, changes));
       bump();
     },
 

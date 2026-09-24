@@ -20,10 +20,11 @@ import { CalendarPane } from "./CalendarSettings";
  * 负责人偶尔维护，数据文件几乎不碰但出事时必须找得到。
  */
 
-type Tab = "appearance" | "people" | "calendar" | "data";
+type Tab = "appearance" | "schedule" | "people" | "calendar" | "data";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "appearance", label: "外观" },
+  { id: "schedule", label: "排期" },
   { id: "people", label: "负责人" },
   { id: "calendar", label: "工作日历" },
   { id: "data", label: "数据" },
@@ -84,6 +85,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
         <div className="min-w-0 flex-1 overflow-y-auto p-5">
           {tab === "appearance" && <AppearancePane />}
+          {tab === "schedule" && <SchedulePane />}
           {tab === "people" && <PeoplePane />}
           {tab === "calendar" && <CalendarPane />}
           {tab === "data" && <DataPane />}
@@ -183,6 +185,57 @@ function RowHeightPicker() {
         </button>
       ))}
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* 排期                                                                */
+/* ------------------------------------------------------------------ */
+
+function SchedulePane() {
+  const autoRollover = useAppStore((s) => s.autoRollover);
+  const setAutoRollover = useAppStore((s) => s.setAutoRollover);
+
+  return (
+    <Section
+      title="实施逾期自动顺延"
+      desc="开了之后，每天跨天时把「已开工、还没干完、计划结束日已过」的任务，计划结束日自动推到今天 —— 计划跟着实际走，逾期的活不会一直停在过去。"
+    >
+      <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-[var(--rule)] p-3.5 hover:border-[var(--text-dim)]">
+        <button
+          type="button"
+          role="switch"
+          aria-checked={autoRollover}
+          onClick={() => setAutoRollover(!autoRollover)}
+          className={`relative mt-0.5 h-5 w-9 shrink-0 rounded-full transition-colors ${
+            autoRollover ? "bg-[var(--accent)]" : "bg-[var(--rule)]"
+          }`}
+        >
+          <span
+            className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${
+              autoRollover ? "translate-x-4" : "translate-x-0.5"
+            }`}
+          />
+        </button>
+        <span className="min-w-0">
+          <span className="block text-xs font-semibold text-[var(--text)]">
+            开启自动顺延
+          </span>
+          <span className="mt-1 block text-[10px] leading-relaxed text-[var(--text-dim)]">
+            默认关闭。计划结束日是排期的锚，改动它有代价 —— 所以要不要让计划自动
+            让位给事实，交给你决定，而不是替你默认。
+          </span>
+        </span>
+      </label>
+
+      <ul className="mt-4 space-y-1.5 text-[10px] leading-relaxed text-[var(--text-dim)]">
+        <li>· 只推<b>没有子任务</b>的叶子任务；父任务的日期由子任务汇总，推它没意义。</li>
+        <li>· 只推<b>已开工</b>（填了实施起始日）的任务；没开工的逾期是「还没排上」，不是「干超时」。</li>
+        <li>· 已标完成（进度 100%）的任务不再顺延。</li>
+        <li>· 和「标了阻碍」的自动延长共用同一套跨天检查，两者取最大值、不会重复叠加。</li>
+        <li>· 自动顺延不进撤销栈 —— 它不是你的操作，下次跨天还会回来。</li>
+      </ul>
+    </Section>
   );
 }
 
