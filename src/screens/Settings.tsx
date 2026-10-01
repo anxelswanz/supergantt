@@ -754,11 +754,19 @@ function KindRow({
         title="标签颜色"
         className="size-5 shrink-0 cursor-pointer rounded border-0 bg-transparent p-0"
       />
+      {/*
+        限 12 字。类型名是**行上那个小标签**里的字 —— 一个叫
+        「等客户确认图纸并回签」的类型在清单里会被截成「等客户确…」，
+        那时这个名字就不再起作用了。在入口处限住，比在五个显示它的地方
+        各截一次好。
+      */}
       <input
         value={label}
         onChange={(e) => setLabel(e.target.value)}
         placeholder="类型名称"
+        maxLength={12}
         autoFocus={draft}
+        title="类型名会显示成事项行上的小标签，所以限 12 字"
         className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 text-xs text-[var(--text)] outline-none hover:border-[var(--rule)] focus:border-[var(--accent)]"
       />
 

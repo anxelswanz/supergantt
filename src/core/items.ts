@@ -90,6 +90,79 @@ export function kindColor(key: string | null, kinds: ItemKind[]): string {
 }
 
 /* ------------------------------------------------------------------ */
+/* 类型多起来之后                                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 超过这个数就认为「类型多了」，分拣菜单和筛选器开始给搜索框和「常用」分组。
+ *
+ * 取 8 不是因为 8 有什么道理，是因为**阈值本身必须存在**：三五个类型的时候
+ * 摆一个搜索框是纯噪音，而二十个类型的时候不摆就得滚着找。一个数把两种
+ * 规模分开，比让界面一直按最坏情况长要好。
+ */
+export const MANY_KINDS = 8;
+
+/**
+ * 按「这个项目里用了多少条」给类型排个序，取前几个当「常用」。
+ *
+ * ## 为什么需要它
+ *
+ * 类型是全局的，而一个项目通常只真的用到其中几个 —— 产线项目用「待验收」，
+ * 软件项目用「待评审」，两边都在同一张清单里。二十个类型平铺的菜单里，
+ * 你要找的那三个藏在十七个用不上的中间。
+ *
+ * ## 为什么不直接把整个菜单按使用频次排
+ *
+ * 那样菜单的顺序每天都在变，肌肉记忆建不起来 —— 用户记住「问题在第二个」
+ * 之后，某天它跳到第五个，而他看不出发生了什么。所以是**「常用」单独一组
+ * 放在上面，下面那份完整清单顺序不变**。两边都在，但常用的那几个不用找。
+ *
+ * ## 统计范围只有当前项目
+ *
+ * 这是刻意的：全局统计会让一个项目的习惯污染另一个项目的菜单。
+ * 代价是刚打开一个新项目时没有常用（返回空数组，界面据此不显示那一组）——
+ * 那种情况下完整清单本来也够用。
+ */
+export function frequentKinds(
+  kinds: ItemKind[],
+  notes: ItemNote[],
+  limit = 4,
+): ItemKind[] {
+  const used = new Map<string, number>();
+  for (const n of notes) {
+    // 和导出那边同一个判据（export/itemKinds.countByKind）：未分拣的不属于
+    // 任何一类，已晋升成实体的身份由实体表达
+    if (n.kind == null || n.promotedKind != null) continue;
+    used.set(n.kind, (used.get(n.kind) ?? 0) + 1);
+  }
+  if (used.size === 0) return [];
+
+  return kinds
+    .filter((k) => used.has(k.key))
+    .sort(
+      (a, b) =>
+        (used.get(b.key) ?? 0) - (used.get(a.key) ?? 0) ||
+        // 用得一样多时按清单原序，不按 key 的字典序 —— 后者会让两个
+        // 同样常用的类型以一个用户看不出理由的顺序排列
+        a.sortOrder - b.sortOrder ||
+        a.key.localeCompare(b.key),
+    )
+    .slice(0, limit);
+}
+
+/**
+ * 按关键词筛类型。名称和 key 都参与匹配 —— key 里带着 `custom:` 前缀，
+ * 用户搜「custom」能把自定义的那些一次捞出来。
+ */
+export function searchKinds(kinds: ItemKind[], query: string): ItemKind[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return kinds;
+  return kinds.filter(
+    (k) => k.label.toLowerCase().includes(q) || k.key.toLowerCase().includes(q),
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* 引用编码                                                            */
 /* ------------------------------------------------------------------ */
 

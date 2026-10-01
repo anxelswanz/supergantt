@@ -547,3 +547,93 @@ describe("设置 → 事项类型", () => {
     expect(await screen.findByText(/为什么这里没有「阻碍」和「风险」/)).toBeTruthy();
   });
 });
+
+describe("类型多起来之后", () => {
+  const twenty = Array.from({ length: 20 }, (_, i) => ({
+    key: `custom:k${i}`,
+    label: `类型${String(i).padStart(2, "0")}`,
+    color: "#0ea5e9",
+    requiresNote: false,
+    builtin: false,
+    sortOrder: i,
+  }));
+
+  /**
+   * 不限高的话二十个类型会让菜单比屏幕还高，而底下那句「新建类型…」
+   * 就永远点不到了 —— 那是这个菜单在类型多时唯一还需要的出口。
+   */
+  it("分拣菜单限高滚动，底部的「新建类型…」仍然在", async () => {
+    manyKinds = twenty;
+    const store = await openWorkspace();
+    store.getState().setActiveView("items");
+    await screen.findByText("下周一确认夹具方案");
+
+    fireEvent.click(screen.getByText("加入到事项 ▾"));
+    const first = await screen.findByText("类型00");
+    const list = first.closest("div.max-h-\\[184px\\]");
+    expect(list).toBeTruthy();
+    expect(list!.className).toContain("overflow-y-auto");
+    expect(screen.getByText("新建类型…")).toBeTruthy();
+  });
+
+  it("超过 8 个才给搜索框，搜了能筛出来", async () => {
+    manyKinds = twenty;
+    const store = await openWorkspace();
+    store.getState().setActiveView("items");
+    await screen.findByText("下周一确认夹具方案");
+
+    fireEvent.click(screen.getByText("加入到事项 ▾"));
+    const box = await screen.findByPlaceholderText("搜类型…");
+    fireEvent.change(box, { target: { value: "型17" } });
+
+    await waitFor(() => expect(screen.getByText("类型17")).toBeTruthy());
+    expect(screen.queryByText("类型00")).toBe(null);
+  });
+
+  it("只有两个类型时菜单不给搜索框", async () => {
+    const store = await openWorkspace();
+    store.getState().setActiveView("items");
+    await screen.findByText("下周一确认夹具方案");
+
+    fireEvent.click(screen.getByText("加入到事项 ▾"));
+    await screen.findByText("代办");
+    expect(screen.queryByPlaceholderText("搜类型…")).toBe(null);
+  });
+
+  /**
+   * 「常用」单独一组，下面那份完整清单顺序不变 —— 整个菜单按频次重排的话，
+   * 用户记住「问题在第二个」之后某天它会跳走，而他看不出发生了什么。
+   */
+  it("这个项目用过的类型单独排一组在上面", async () => {
+    manyKinds = twenty;
+    const store = await openWorkspace();
+    store.getState().setActiveView("items");
+    await screen.findByText("下周一确认夹具方案");
+    // 让 custom:k17 成为「用过的」
+    await store.getState().patchItemNote(1, { kind: "custom:k17" });
+
+    fireEvent.click(screen.getAllByText("类型17 ▾")[0]);
+    expect(await screen.findByText("这个项目常用")).toBeTruthy();
+    // 常用组 + 完整清单里各有一个，共两处
+    expect(screen.getAllByText("类型17")).toHaveLength(2);
+  });
+
+  /** 类型名是行上那个小标签里的字，所以在入口处就限长 */
+  it("设置里类型名限 12 字", async () => {
+    const store = await openWorkspace();
+    store.getState().openSettings("kinds");
+    const input = (await screen.findAllByDisplayValue("代办"))[0] as HTMLInputElement;
+    expect(input.maxLength).toBe(12);
+  });
+
+  /** 筛选器的选项多了也给搜索 —— 滚着找三十项里那一个，和没有筛选器差不多 */
+  it("类型筛选器在选项多时给搜索框", async () => {
+    manyKinds = twenty;
+    const store = await openWorkspace();
+    store.getState().setActiveView("items");
+    await screen.findByText("下周一确认夹具方案");
+
+    fireEvent.click(screen.getByText("类型 ▾"));
+    expect(await screen.findByPlaceholderText("搜类型…")).toBeTruthy();
+  });
+});

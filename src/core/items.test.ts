@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   BUILTIN_KINDS,
+  frequentKinds,
+  searchKinds,
   EMPTY_FILTER,
   blockerRef,
   closePolicy,
@@ -365,5 +367,96 @@ describe("kindLabel", () => {
   it("null 是「未分拣」，认不出来的 key 原样显示、不吞掉", () => {
     expect(kindLabel(null, BUILTIN_KINDS)).toBe("未分拣");
     expect(kindLabel("custom:gone", BUILTIN_KINDS)).toBe("custom:gone");
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* 类型多起来之后                                                       */
+/* ------------------------------------------------------------------ */
+
+const kindOf = (over: Partial<ItemKind> & { key: string }): ItemKind => ({
+  label: over.key,
+  color: "#000",
+  requiresNote: false,
+  builtin: false,
+  sortOrder: 0,
+  ...over,
+});
+
+describe("frequentKinds", () => {
+  const kinds = [
+    kindOf({ key: "a", sortOrder: 0 }),
+    kindOf({ key: "b", sortOrder: 1 }),
+    kindOf({ key: "c", sortOrder: 2 }),
+    kindOf({ key: "d", sortOrder: 3 }),
+    kindOf({ key: "e", sortOrder: 4 }),
+  ];
+
+  it("按用了多少条排，取前几个", () => {
+    const out = frequentKinds(
+      kinds,
+      [
+        note({ id: 1, kind: "c" }),
+        note({ id: 2, kind: "c" }),
+        note({ id: 3, kind: "c" }),
+        note({ id: 4, kind: "a" }),
+        note({ id: 5, kind: "a" }),
+        note({ id: 6, kind: "e" }),
+      ],
+      2,
+    );
+    expect(out.map((k) => k.key)).toEqual(["c", "a"]);
+  });
+
+  /** 没用过的类型不进常用 —— 常用是「这个项目在用的」，不是「清单的前几个」 */
+  it("一条都没用过的不进常用", () => {
+    const out = frequentKinds(kinds, [note({ id: 1, kind: "b" })]);
+    expect(out.map((k) => k.key)).toEqual(["b"]);
+  });
+
+  it("用得一样多时按清单原序，不按 key 的字典序", () => {
+    const out = frequentKinds(
+      [kindOf({ key: "z", sortOrder: 0 }), kindOf({ key: "a", sortOrder: 1 })],
+      [note({ id: 1, kind: "z" }), note({ id: 2, kind: "a" })],
+    );
+    expect(out.map((k) => k.key)).toEqual(["z", "a"]);
+  });
+
+  /**
+   * 判据和导出那边一致（export/itemKinds.countByKind）：未分拣的不属于
+   * 任何一类，已晋升成实体的身份由实体表达。
+   */
+  it("未分拣的和已晋升的都不计入", () => {
+    expect(
+      frequentKinds(kinds, [
+        note({ id: 1 }),
+        note({ id: 2, kind: "a", promotedKind: "risk", promotedRef: "7" }),
+      ]),
+    ).toEqual([]);
+  });
+
+  /** 新开的项目还没有任何事项 —— 返回空，界面据此不显示「常用」那一组 */
+  it("没有数据时返回空数组，而不是清单的前几个", () => {
+    expect(frequentKinds(kinds, [])).toEqual([]);
+  });
+});
+
+describe("searchKinds", () => {
+  const kinds = [
+    kindOf({ key: "todo", label: "代办" }),
+    kindOf({ key: "custom:qc", label: "待验收" }),
+  ];
+
+  it("空词 = 全都要", () => {
+    expect(searchKinds(kinds, "  ")).toHaveLength(2);
+  });
+
+  it("按名称匹配", () => {
+    expect(searchKinds(kinds, "验收").map((k) => k.key)).toEqual(["custom:qc"]);
+  });
+
+  /** key 也参与匹配：搜 custom 能把自定义的那些一次捞出来 */
+  it("按 key 匹配", () => {
+    expect(searchKinds(kinds, "custom").map((k) => k.key)).toEqual(["custom:qc"]);
   });
 });

@@ -14,12 +14,15 @@ import {
   RISK_KIND,
   SORT_ACTION_LABEL,
   UNSORTED_KIND,
+  MANY_KINDS,
   closePolicy,
   filterItems,
+  frequentKinds,
   hasFilter,
   kindColor,
   kindLabel,
   mergeItems,
+  searchKinds,
   shortDate,
   sortItems,
   type ItemFilter,
@@ -328,7 +331,13 @@ function Filters({
   );
 }
 
-/** 一个多选筛选器。空选 = 不筛这一维 */
+/**
+ * 一个多选筛选器。空选 = 不筛这一维。
+ *
+ * 选项多了（> MANY_KINDS）就给搜索框。类型和负责人两维都会长 ——
+ * 类型是用户自己加的，负责人是全局表 —— 而滚着找三十项里的那一个，
+ * 和没有这个筛选器差不多。
+ */
 function Chips<T>({
   label,
   options,
@@ -342,13 +351,29 @@ function Chips<T>({
 }) {
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const [query, setQuery] = useState("");
   const on = selected.length > 0;
+  const many = options.length > MANY_KINDS;
+
+  const q = query.trim().toLowerCase();
+  const shown = q ? options.filter((o) => o.label.toLowerCase().includes(q)) : options;
+
+  const close = () => {
+    setOpen(false);
+    // 留着上次那个词，下次打开就是筛过的，而用户不记得自己筛过
+    setQuery("");
+  };
+
+  const toggle = (value: T) =>
+    onChange(
+      selected.includes(value) ? selected.filter((v) => v !== value) : [...selected, value],
+    );
 
   return (
     <>
       <button
         ref={setAnchor}
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => (open ? close() : setOpen(true))}
         className="rounded-full border px-2.5 py-0.5 text-[10px] font-medium transition-colors"
         style={
           on
@@ -359,20 +384,25 @@ function Chips<T>({
         {label}
         {on ? ` ${selected.length}` : " ▾"}
       </button>
-      <Popover anchor={anchor} open={open} onClose={() => setOpen(false)} width={160}>
-        <div className="max-h-64 overflow-y-auto">
-          {options.map((o) => {
+      <Popover anchor={anchor} open={open} onClose={close} width={172}>
+        {many && (
+          <div className="px-1.5 pb-1">
+            <input
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => e.stopPropagation()}
+              placeholder={`搜${label}…`}
+              className="w-full rounded border border-[var(--rule)] bg-[var(--surface-alt)] px-1.5 py-1 text-[10px] text-[var(--text)] outline-none focus:border-[var(--accent)]"
+            />
+          </div>
+        )}
+
+        <div className="max-h-56 overflow-y-auto">
+          {shown.map((o) => {
             const picked = selected.includes(o.value);
             return (
-              <MenuItem
-                key={String(o.value)}
-                active={picked}
-                onClick={() =>
-                  onChange(
-                    picked ? selected.filter((v) => v !== o.value) : [...selected, o.value],
-                  )
-                }
-              >
+              <MenuItem key={String(o.value)} active={picked} onClick={() => toggle(o.value)}>
                 <span className="flex items-center gap-2">
                   <span className="w-2 shrink-0 text-[9px]">{picked ? "✓" : ""}</span>
                   {o.color && (
@@ -386,7 +416,13 @@ function Chips<T>({
               </MenuItem>
             );
           })}
+          {shown.length === 0 && (
+            <div className="px-2.5 py-1.5 text-[10px] text-[var(--text-dim)]">
+              没有匹配的
+            </div>
+          )}
         </div>
+
         {on && (
           <>
             <MenuDivider />
@@ -727,11 +763,18 @@ function Row({
         <PriorityTag value={row.priority} onPick={setPriority} />
 
         {/*
-          固定宽度的槽位，标签本身保持自然宽度、靠右贴齐。
-          不给槽位的话，「加入到事项 ▾」比「阻碍」宽一倍多，右侧那几列
-          会被它顶得一行一个位置 —— 一列对不齐的数字比没有这一列更难读
+          固定宽度的槽位，标签靠右贴齐、**自己截断**。
+          
+          固定宽度的理由：「加入到事项 ▾」比「阻碍」宽一倍多，不给槽位的话
+          右侧那几列会被它顶得一行一个位置 —— 一列对不齐的数字比没有这一列
+          更难读。
+          
+          截断的理由：类型名是用户起的。一个叫「等客户确认图纸」的类型
+          本来会溢出槽位、压到行尾的 ⋯ 上。设置里那个输入框已经限了长度
+          （见 Settings.KindRow），这里是第二道 —— 旧数据和导入的数据不受
+          那个限制管。完整的名字在 title 里。
         */}
-        <span className="flex w-[66px] shrink-0 justify-end">
+        <span className="flex w-[76px] shrink-0 justify-end overflow-hidden">
           <KindButton
             ref={setSortAnchor}
             row={row}
@@ -901,7 +944,7 @@ const KindButton = forwardRef<
             ? `${kindLabel(row.kind, kinds)}：它在看板和复盘里也算数。点一下可以改类型（会拆掉这个实体）`
             : `${kindLabel(row.kind, kinds)}　点一下改分类`
       }
-      className="shrink-0 rounded-md px-1.5 py-[3px] text-[9px] font-semibold leading-none transition-colors hover:brightness-95"
+      className="max-w-full truncate rounded-md px-1.5 py-[3px] text-[9px] font-semibold leading-none transition-colors hover:brightness-95"
       style={
         unsorted
           ? { border: "1px dashed var(--rule)", color: "var(--text-dim)" }
@@ -1012,7 +1055,19 @@ function SortMenu({
 }) {
   const store = useAppStore;
   const openSettings = useAppStore((s) => s.openSettings);
+  const notes = useAppStore((s) => s.itemNotes);
   const entity = row.source !== "note";
+
+  const [query, setQuery] = useState("");
+  const many = kinds.length > MANY_KINDS;
+  const filtered = useMemo(() => searchKinds(kinds, query), [kinds, query]);
+  const frequent = useMemo(() => frequentKinds(kinds, notes), [kinds, notes]);
+
+  // 每次重开都从空搜索开始 —— 留着上次那个词，菜单一打开就是筛过的，
+  // 而用户不记得自己筛过
+  useEffect(() => {
+    if (!open) setQuery("");
+  }, [open]);
 
   /**
    * 拿到一个可以打类型的事项 id。
@@ -1091,17 +1146,70 @@ function SortMenu({
       <div className="px-2.5 pb-1 text-[9px] leading-snug text-[var(--text-dim)]">
         只是打上类型，留在事项里
       </div>
-      {kinds.map((k) => (
-        <MenuItem key={k.key} active={row.kind === k.key} onClick={() => void pickKind(k.key)}>
-          <span className="flex items-center gap-2">
-            <span className="size-1.5 rounded-full" style={{ background: k.color }} />
-            <span className="min-w-0 flex-1 truncate">{k.label}</span>
-            {k.requiresNote && (
-              <span className="shrink-0 text-[8px] text-[var(--text-dim)]">需结论</span>
-            )}
-          </span>
-        </MenuItem>
-      ))}
+
+      {/*
+        类型多了之后才给搜索框。三五个类型的时候它是纯噪音，
+        二十个的时候不给就得滚着找 —— 见 core/items.MANY_KINDS。
+      */}
+      {many && (
+        <div className="px-1.5 pb-1">
+          <input
+            autoFocus
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              // 不外泄：Esc 在 Popover 那层是关窗，Enter 在工作区是新建任务
+              e.stopPropagation();
+              if (e.key === "Enter" && filtered.length > 0) {
+                e.preventDefault();
+                void pickKind(filtered[0].key);
+              }
+            }}
+            placeholder="搜类型…"
+            className="w-full rounded border border-[var(--rule)] bg-[var(--surface-alt)] px-1.5 py-1 text-[10px] text-[var(--text)] outline-none focus:border-[var(--accent)]"
+          />
+        </div>
+      )}
+
+      {/*
+        「常用」单独一组放在上面，下面那份完整清单**顺序不变**。
+        整个菜单按频次重排的话，用户记住「问题在第二个」之后某天它会跳走，
+        而他看不出发生了什么（见 core/items.frequentKinds）。
+      */}
+      {many && !query && frequent.length > 0 && (
+        <>
+          <div className="px-2.5 pb-0.5 text-[9px] text-[var(--text-dim)]">
+            这个项目常用
+          </div>
+          {frequent.map((k) => (
+            <KindMenuItem
+              key={`freq-${k.key}`}
+              kind={k}
+              active={row.kind === k.key}
+              onClick={() => void pickKind(k.key)}
+            />
+          ))}
+          <MenuDivider />
+        </>
+      )}
+
+      {/* 限高 + 滚动。不加的话二十个类型会让菜单比屏幕还高，
+          而底下那句「新建类型…」就永远点不到了 */}
+      <div className="max-h-[184px] overflow-y-auto">
+        {filtered.map((k) => (
+          <KindMenuItem
+            key={k.key}
+            kind={k}
+            active={row.kind === k.key}
+            onClick={() => void pickKind(k.key)}
+          />
+        ))}
+        {filtered.length === 0 && (
+          <div className="px-2.5 py-1.5 text-[10px] text-[var(--text-dim)]">
+            没有匹配的类型
+          </div>
+        )}
+      </div>
 
       {/*
         自定义类型在「设置 → 事项类型」，而用户是在**这里**发现「没有我要的
@@ -1137,6 +1245,29 @@ function SortMenu({
         </>
       )}
     </Popover>
+  );
+}
+
+/** 分拣菜单里的一个类型。常用组和完整清单共用，免得两处各写一遍样式 */
+function KindMenuItem({
+  kind,
+  active,
+  onClick,
+}: {
+  kind: ItemKind;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <MenuItem active={active} onClick={onClick}>
+      <span className="flex items-center gap-2">
+        <span className="size-1.5 shrink-0 rounded-full" style={{ background: kind.color }} />
+        <span className="min-w-0 flex-1 truncate">{kind.label}</span>
+        {kind.requiresNote && (
+          <span className="shrink-0 text-[8px] text-[var(--text-dim)]">需结论</span>
+        )}
+      </span>
+    </MenuItem>
   );
 }
 
