@@ -1,0 +1,1 @@
+cd "D:/supergantt/supergantt" && npm run tauri dev

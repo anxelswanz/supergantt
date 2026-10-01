@@ -38,6 +38,32 @@ npm run tauri dev    # 启动
 2. 装 Rust 时选默认的 `x86_64-pc-windows-msvc` 工具链（[rustup.rs](https://rustup.rs)）。
 3. 然后和 macOS 一样：`npm install`、`npm run tauri dev`。
 
+#### 如果报 `can't find crate for ...`
+
+编译到一半忽然失败，报 `can't find crate for 'displaydoc'`（或 `zerotrie`、`tinystr`、
+`icu_collections` 一类 ICU 依赖），但那个 crate 明明编译成功了 —— 多半不是 Rust 或依赖的
+问题，是 **Smart App Control（智能应用控制）拦了 Rust 编出来的 DLL**。
+
+Windows 11 全新安装时默认开着 SAC。Rust 的 `proc-macro` 会在本地编成一个个未签名的
+`.dll` 再被 `rustc` 加载，而 SAC 会拦下没有信誉结论的 DLL，`rustc` 于是报「找不到 crate」。
+真正的错误藏在事件日志里（`Microsoft-Windows-CodeIntegrity/Operational`）：
+
+```
+rustc.exe attempted to load ...\displaydoc-....dll
+that did not meet the Enterprise signing level requirements
+```
+
+SAC 的判定是按文件内容异步做的：新编出来的 DLL 先放行，云端结论回来后拦，之后 cargo
+复用缓存产物就会挂。所以它是**偶发**的，同一个 hash 过一阵又可能放行。
+
+两种应对：
+
+- **绕过**：`cargo clean` 后重跑一次全量构建。结论有实效期，一次干净构建通常能在拦截生效前跑完。
+- **根治**：关掉 SAC（`设置 → 隐私和安全性 → Windows 安全中心 → 应用和浏览器控制 →
+  智能应用控制`）。注意这是**单向操作**，关闭之后除非重置 Windows 无法再开启。
+
+SAC 没有白名单，关不掉又不想关的话，就按第一种方式重试。
+
 和 macOS 的差别都已经处理掉了，这里记一下免得以后改回去：
 
 - 快捷键 `⌘` → `Ctrl`、`⌥` → `Alt`，界面上的提示也会显示成 `Ctrl+]`、`Alt+↑`
@@ -208,6 +234,58 @@ SQLite 文件本身不分 Mac 和 Windows，所以这几种 `.db` 都能导：
 
 Windows 上 `⌘` 一律对应 `Ctrl`、`⌥` 对应 `Alt` —— 快捷键和界面上的提示文案都走了
 平台抽象（`src/core/keys.ts`），没有硬编码。
+
+---
+
+## 命令行接口（给 AI 用）
+
+除了界面，Gantt 还有一个命令行工具 `gantt`，可以直接读写同一个数据库 ——
+建项目、建任务、设工期/优先级/负责人，输出稳定的 JSON。它是给 Skill / Agent / 脚本用的，
+让「帮我在甘特图里排个期」这类话能被直接执行，而不用手点界面。
+
+### 编译
+
+```bash
+cd gantt-core && cargo build --release --bin gantt
+```
+
+产物在 `gantt-core/target/release/gantt`（Windows 上是 `gantt.exe`）。
+
+### 用
+
+```bash
+gantt project list --json
+gantt task create --project 3 --name "接口联调" --start today --duration 5d \
+    --priority P1 --assignee 张三 --json
+gantt task list --project 3 --json
+gantt help
+```
+
+日期只认 ISO（`2026-10-01`）、`today` 和相对写法（`+3d` / `-2w` / `+1m`）；工期写成
+`5d` / `2w`。**不要自己算结束日期**，让工具算。
+
+退出码：`0` 成功 / `1` 参数错 / `2` 数据校验失败 / `3` 应用占用 / `4` 数据库错误。
+
+### 和桌面应用的关系
+
+CLI 和桌面应用指向**同一个** `gantt.db`（路径规则见上面「数据文件在哪」）。
+`--data-dir` 和 `GANTT_DATA_DIR` 可以覆盖，一般不用。
+
+⚠️ **应用开着的时候 CLI 拒绝写入**（退出码 3）。原因在
+`src-tauri/src/lib.rs` 的 `setup` 注释里写得很直白：界面是「整个项目 400ms 防抖全量替换」，
+CLI 这会儿插进去的任务，下一帧就被界面上那份陈旧快照静默抹掉。所以 `setup` 会写一个
+`gantt.lock`（内容是 PID），CLI 写之前先看那个 PID 还活着没。读操作不受影响。
+
+要写就先把应用关掉。`--force` 能绕过这道检查，但那是「应用闲置着、用户只是忘了关」的
+场景 —— 用户在界面上编辑着的时候用它，改动会互相覆盖。
+
+「写完之后用应用打开看」这条路径是通的：CLI 写完关掉进程，应用下次启动读到的就是新数据。
+
+### 给 AI 的说明文档
+
+`skill/gantt/` 是一份 Claude Skill：`SKILL.md` 讲使用规矩，`references/schema.md` 是完整
+字段表和校验规则，`references/examples.md` 是端到端示例。把整个 `skill/` 目录放进
+Claude 的 skills 目录，用户说「帮我在甘特图里建任务」时就会命中。
 
 ---
 

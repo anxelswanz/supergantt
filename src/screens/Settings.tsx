@@ -9,6 +9,15 @@ import {
 } from "../gantt/theme";
 import { PROJECT_COLORS, useAppStore } from "../store/useAppStore";
 import { REVEAL_LABEL } from "../core/keys";
+import { plugins } from "../plugins/registry";
+import type { PluginRecord, PluginSettingField } from "../plugins/types";
+import { useRegistry } from "../plugins/usePlugins";
+import {
+  resolveDark,
+  THEME_MODE_HINTS,
+  THEME_MODE_LABELS,
+  THEME_MODES,
+} from "../core/themeMode";
 import { exportDatabaseFile } from "../transfer/projectFile";
 import { Avatar, fileToAvatarDataUrl } from "./Avatar";
 import { CalendarPane } from "./CalendarSettings";
@@ -20,13 +29,15 @@ import { CalendarPane } from "./CalendarSettings";
  * 负责人偶尔维护，数据文件几乎不碰但出事时必须找得到。
  */
 
-type Tab = "appearance" | "schedule" | "people" | "calendar" | "data";
+type Tab = "appearance" | "people" | "calendar" | "plugins" | "data";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "appearance", label: "外观" },
-  { id: "schedule", label: "排期" },
   { id: "people", label: "负责人" },
   { id: "calendar", label: "工作日历" },
+  // 插件排在数据前面：它是「扩展这个软件」的地方，属于日常会来的，
+  // 而数据页是出事才来的
+  { id: "plugins", label: "插件" },
   { id: "data", label: "数据" },
 ];
 
@@ -85,13 +96,310 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
         <div className="min-w-0 flex-1 overflow-y-auto p-5">
           {tab === "appearance" && <AppearancePane />}
-          {tab === "schedule" && <SchedulePane />}
           {tab === "people" && <PeoplePane />}
           {tab === "calendar" && <CalendarPane />}
+          {tab === "plugins" && <PluginsPane />}
           {tab === "data" && <DataPane />}
         </div>
       </motion.div>
     </motion.div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* 插件                                                                */
+/* ------------------------------------------------------------------ */
+
+/** 三态在界面上的样子。「关掉的」和「坏的」要能一眼分开 */
+const PLUGIN_STATUS: Record<PluginRecord["status"], { label: string; cls: string }> = {
+  loaded: { label: "已启用", cls: "text-emerald-600" },
+  disabled: { label: "已停用", cls: "text-[var(--text-dim)]" },
+  error: { label: "出错", cls: "text-rose-500" },
+};
+
+/**
+ * 插件页。
+ *
+ * 这一页要回答三个问题，顺序就是它们在界面上的顺序：
+ *
+ *   1. 我的插件放哪？ —— 顶上那行路径 + 「打开插件目录」按钮。没有这一步，
+ *      用户看完这一页不知道接下来该干什么。
+ *   2. 现在装了哪些、哪个是坏的？ —— 列表。坏插件必须把原因写在这儿，
+ *      而不是只丢进控制台：作者不在调试器前面的时候，看不懂为什么没生效。
+ *   3. 某个插件有什么开关？ —— 挂在各自那张卡片下面。插件注册的设置项
+ *      不定长，所以不做成全局区块，跟插件走才不会张冠李戴。
+ *
+ * 页面上**没有**安装/卸载。装 = 把目录拷进插件目录，卸 = 删掉它 ——
+ * 这两件事用资源管理器做比在这画一个文件浏览器快得多，也不会被本程序
+ * 的权限边界绊住（插件目录是宿主唯一不会去写的地方，见 plugin.rs）。
+ */
+function PluginsPane() {
+  const { records, settingFields, booted, bootError } = useRegistry();
+
+  /** directory 的路径要和 bootError 分开放：一个常态，一个故障 */
+  const [dir, setDir] = useState("");
+  const [message, setMessage] = useState("");
+  /** 正在启用/停用/重载的插件 id。多个可以同时在飞，所以用集合 */
+  const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
+
+  useEffect(() => {
+    let live = true;
+    void api
+      .pluginsDir()
+      .then((p) => {
+        if (live) setDir(p);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  /**
+   * 包的层数不能省。
+   *
+   * 这里大部分调用链是「按钮 → async 函数 → 插件代码」，而插件代码是
+   * 唯一不由我们审查的代码。让它把异常抛到事件处理器外面，React 19 的
+   * 默认行为是整个根卸载 —— 用户看到的是白屏，且找不到任何原因。
+   * 命令那条路径已经在 registry.runCommand 里兜住了，这条得在这儿兜。
+   */
+  const run = (pluginId: string, fn: () => Promise<void>): void => {
+    setBusy((prev) => new Set(prev).add(pluginId));
+    void fn()
+      .catch((e: unknown) => setMessage(`${pluginId}：${(e as Error)?.message ?? e}`))
+      .finally(() => {
+        setBusy((prev) => {
+          const next = new Set(prev);
+          next.delete(pluginId);
+          return next;
+        });
+      });
+  };
+
+  return (
+    <Section
+      title="插件"
+      desc="插件是放在插件目录里的文件夹，改完代码不用重新构建 —— 到这儿点一下「重新加载」就生效。它们能往工具条上加视图，也能改任务数据（走命令栈，所以照样能撤销）。"
+    >
+      <div className="mb-3 break-all rounded-lg border border-[var(--rule)] bg-[var(--surface-alt)] p-2.5 font-mono text-[10px] text-[var(--text-dim)]">
+        {dir || "读取中…"}
+      </div>
+
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <button
+          onClick={() => void api.revealPluginsDir().catch(() => {})}
+          className="rounded-lg border border-[var(--rule)] px-3 py-1.5 text-xs font-medium text-[var(--text-dim)] hover:text-[var(--text)]"
+        >
+          {REVEAL_LABEL}
+        </button>
+        <span className="text-[10px] text-[var(--text-dim)]">
+          装一个插件 = 把一个文件夹拷进去；卸掉 = 删掉它
+        </span>
+      </div>
+
+      {message && (
+        <div className="mb-3 break-all rounded-lg border border-rose-400/40 bg-rose-500/5 p-2 text-[10px] text-rose-500">
+          {message}
+        </div>
+      )}
+
+      {/* 读不了插件目录是整页级别的问题，和单个插件坏掉不是一回事 */}
+      {bootError && (
+        <div className="mb-3 break-all rounded-lg border border-rose-400/40 bg-rose-500/5 p-2.5 text-[10px] leading-relaxed text-rose-500">
+          {bootError}
+        </div>
+      )}
+
+      {!booted && <p className="text-xs text-[var(--text-dim)]">正在扫描插件目录…</p>}
+
+      {booted && records.length === 0 && !bootError && (
+        <div className="rounded-lg border border-dashed border-[var(--rule)] p-4 text-xs leading-relaxed text-[var(--text-dim)]">
+          还没有插件。在插件目录里新建一个文件夹，放两个文件：
+          <div className="my-2 rounded bg-[var(--surface-alt)] p-2 font-mono text-[10px] leading-relaxed">
+            quicknote/manifest.json
+            <br />
+            quicknote/main.js
+          </div>
+          manifest 里写 id / name / version / apiVersion，
+          main.js 导出一个 <code>onload(api)</code>，用 <code>api.views.register(...)</code>
+          把界面挂上去。回这儿点「重新加载」就会出现在工具条里。
+        </div>
+      )}
+
+      <div className="space-y-2">
+        {records.map((r) => {
+          const status = PLUGIN_STATUS[r.status];
+          const isBusy = busy.has(r.manifest.id) || !booted;
+          const fields = settingFields.filter((f) => f.pluginId === r.manifest.id);
+
+          return (
+            <div
+              key={r.manifest.id}
+              className="rounded-xl border border-[var(--rule)] bg-[var(--surface-alt)] p-3"
+            >
+              <div className="flex items-start gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-baseline gap-2">
+                    <span className="truncate text-xs font-semibold text-[var(--text)]">
+                      {r.manifest.name}
+                    </span>
+                    <span className="shrink-0 font-mono text-[10px] text-[var(--text-dim)]">
+                      v{r.manifest.version}
+                    </span>
+                    <span className={`shrink-0 text-[10px] font-medium ${status.cls}`}>
+                      {status.label}
+                    </span>
+                  </div>
+                  {r.manifest.description && (
+                    <div className="mt-1 text-[10px] leading-relaxed text-[var(--text-dim)]">
+                      {r.manifest.description}
+                    </div>
+                  )}
+                  <div className="mt-1 font-mono text-[10px] text-[var(--text-dim)]">
+                    {r.manifest.id}
+                    {r.manifest.author ? ` · ${r.manifest.author}` : ""}
+                  </div>
+                </div>
+
+                <div className="flex shrink-0 items-center gap-1.5">
+                  {r.enabled && (
+                    <button
+                      onClick={() => run(r.manifest.id, () => plugins.reload(r.manifest.id))}
+                      disabled={isBusy}
+                      title="改完插件代码点这个，不用重启软件"
+                      className="rounded-lg border border-[var(--rule)] px-2.5 py-1 text-[10px] text-[var(--text-dim)] hover:text-[var(--text)] disabled:opacity-50"
+                    >
+                      {isBusy ? "…" : "重新加载"}
+                    </button>
+                  )}
+                  <button
+                    onClick={() =>
+                      run(r.manifest.id, () =>
+                        r.enabled ? plugins.disable(r.manifest.id) : plugins.enable(r.manifest.id),
+                      )
+                    }
+                    disabled={isBusy}
+                    className={`rounded-lg px-2.5 py-1 text-[10px] font-medium disabled:opacity-50 ${
+                      r.enabled
+                        ? "border border-[var(--rule)] text-[var(--text-dim)] hover:text-[var(--text)]"
+                        : "bg-[var(--accent)] text-white"
+                    }`}
+                  >
+                    {r.enabled ? "停用" : "启用"}
+                  </button>
+                </div>
+              </div>
+
+              {r.error && (
+                <div className="mt-2 break-all rounded-lg bg-rose-500/5 p-2 text-[10px] leading-relaxed text-rose-500">
+                  {r.error}
+                </div>
+              )}
+
+              {r.warnings.length > 0 && (
+                <ul className="mt-2 space-y-0.5">
+                  {r.warnings.map((w) => (
+                    <li key={w} className="text-[10px] leading-relaxed text-amber-600">
+                      ● {w}
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              {fields.length > 0 && (
+                <div className="mt-3 border-t border-[var(--rule)] pt-3">
+                  {fields.map(({ field }) => (
+                    <PluginFieldRow key={field.key} pluginId={r.manifest.id} field={field} />
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <p className="mt-4 text-[10px] leading-relaxed text-[var(--text-dim)]">
+        本软件提供的插件接口版本是{" "}
+        <span className="font-mono">
+          {plugins.hostVersion().major}.{plugins.hostVersion().minor}
+        </span>
+        。插件的 manifest 里 apiVersion 主版本要和它一致 —— 主版本不同会被直接拒绝，
+        次版本不同只给一条警告，和项目文件的版本策略是同一套。
+        <br />
+        插件跑在本程序里，看得到全部数据。装之前先确认来源。
+      </p>
+    </Section>
+  );
+}
+
+/**
+ * 插件注册的一个设置项。
+ *
+ * 值不经过任何本地 state —— 直接读写 settingCache。缓存在 registry 里，
+ * 插件读的也是它，中间不隔一层 React 状态，就不会出现「界面显示 A、
+ * 插件实际拿到 B」这种两份状态不同步的问题（那种 bug 只在点了别的按钮
+ * 触发重渲染时才暴露，极其难查）。
+ *
+ * bump 只用来在写入后强制重渲染 —— 缓存不是 useSyncExternalStore 的源，
+ * React 不会自己知道它变了。
+ */
+function PluginFieldRow({ pluginId, field }: { pluginId: string; field: PluginSettingField }) {
+  const [, bump] = useState(0);
+  const raw = plugins.settingValue(pluginId, field.key);
+
+  const write = (value: string) => {
+    // 缓存和落库都在这一个调用里，key 的前缀也由它拼 —— 这里别自己再写一遍
+    plugins.setSettingValue(pluginId, field.key, value);
+    bump((n) => n + 1);
+  };
+
+  const label = (
+    <div className="mb-1 text-[10px] font-medium text-[var(--text)]">{field.label}</div>
+  );
+
+  return (
+    <div className="mb-3 last:mb-0">
+      {label}
+      {field.kind === "text" && (
+        <input
+          value={raw ?? field.def ?? ""}
+          placeholder={field.placeholder}
+          onChange={(e) => write(e.target.value)}
+          className="w-full rounded-lg border border-[var(--rule)] bg-[var(--surface)] px-2.5 py-1.5 text-xs text-[var(--text)] outline-none focus:border-[var(--accent)]"
+        />
+      )}
+
+      {field.kind === "toggle" && (
+        <button
+          onClick={() => write(raw === "true" ? "false" : "true")}
+          className={`rounded-lg border px-2.5 py-1 text-[10px] font-medium ${
+            raw === "true"
+              ? "border-transparent bg-[var(--accent)] text-white"
+              : "border-[var(--rule)] text-[var(--text-dim)]"
+          }`}
+        >
+          {raw === "true" ? "开" : "关"}
+        </button>
+      )}
+
+      {field.kind === "select" && (
+        <select
+          value={raw ?? field.def ?? ""}
+          onChange={(e) => write(e.target.value)}
+          className="rounded-lg border border-[var(--rule)] bg-[var(--surface)] px-2.5 py-1.5 text-xs text-[var(--text)] outline-none focus:border-[var(--accent)]"
+        >
+          {field.options.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      )}
+
+      {field.desc && (
+        <div className="mt-1 text-[10px] leading-relaxed text-[var(--text-dim)]">{field.desc}</div>
+      )}
+    </div>
   );
 }
 
@@ -111,32 +419,41 @@ function AppearancePane() {
   };
 
   return (
-    <Section title="甘特条着色" desc="颜色由数据决定，不由行号决定 —— 这样每一个颜色都能被解释。">
-      <div className="grid grid-cols-2 gap-2">
-        {(Object.keys(COLOR_BY_LABELS) as ColorBy[]).map((mode) => (
-          <button
-            key={mode}
-            onClick={() => setColorBy(mode)}
-            className={`rounded-xl border p-3 text-left transition-colors ${
-              colorBy === mode
-                ? "border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_8%,transparent)]"
-                : "border-[var(--rule)] hover:border-[var(--text-dim)]"
-            }`}
-          >
-            <div className="text-xs font-semibold text-[var(--text)]">
-              {COLOR_BY_LABELS[mode]}
-            </div>
-            <div className="mt-1 text-[10px] leading-relaxed text-[var(--text-dim)]">
-              {hints[mode]}
-            </div>
-          </button>
-        ))}
-      </div>
+    <Section
+      title="主题"
+      desc="默认跟随系统。选了浅色或深色就一直用那一套，不再随系统切换 —— 排期的人常常希望几点打开都是同一副面孔。"
+    >
+      <ThemePicker />
 
-      <p className="mt-4 text-[10px] leading-relaxed text-[var(--text-dim)]">
-        进度不和色相抢通道：已完成部分是该色实心，未完成部分是同色 18% 透明。
-        紧急度只在甘特条上标 P0（左端红色小三角），完整的四档在左侧的「紧急」列。
-      </p>
+      <div className="mt-8">
+      <Section title="甘特条着色" desc="颜色由数据决定，不由行号决定 —— 这样每一个颜色都能被解释。">
+        <div className="grid grid-cols-2 gap-2">
+          {(Object.keys(COLOR_BY_LABELS) as ColorBy[]).map((mode) => (
+            <button
+              key={mode}
+              onClick={() => setColorBy(mode)}
+              className={`rounded-xl border p-3 text-left transition-colors ${
+                colorBy === mode
+                  ? "border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_8%,transparent)]"
+                  : "border-[var(--rule)] hover:border-[var(--text-dim)]"
+              }`}
+            >
+              <div className="text-xs font-semibold text-[var(--text)]">
+                {COLOR_BY_LABELS[mode]}
+              </div>
+              <div className="mt-1 text-[10px] leading-relaxed text-[var(--text-dim)]">
+                {hints[mode]}
+              </div>
+            </button>
+          ))}
+        </div>
+
+        <p className="mt-4 text-[10px] leading-relaxed text-[var(--text-dim)]">
+          进度不和色相抢通道：已完成部分是该色实心，未完成部分是同色 18% 透明。
+          紧急度只在甘特条上标 P0（左端红色小三角），完整的四档在左侧的「紧急」列。
+        </p>
+      </Section>
+      </div>
 
       <div className="mt-6">
         <h2 className="text-sm font-bold text-[var(--text)]">行高</h2>
@@ -147,6 +464,78 @@ function AppearancePane() {
         <RowHeightPicker />
       </div>
     </Section>
+  );
+}
+
+/**
+ * 主题三选一。
+ *
+ * 用竖排的单选列表而不是并排的三个色块：三档的差别是**行为**（跟不跟系统走），
+ * 不是外观，需要一句话说清楚。色块预览只对「浅色/深色」有意义，
+ * 「跟随系统」没有确定的外观可预览 —— 三个并排会诱导人按颜色挑，
+ * 而真正该被读的是那句说明。
+ */
+function ThemePicker() {
+  const themeMode = useAppStore((s) => s.themeMode);
+  const systemDark = useAppStore((s) => s.systemDark);
+  const setThemeMode = useAppStore((s) => s.setThemeMode);
+
+  return (
+    <div className="flex flex-col gap-2">
+      {THEME_MODES.map((mode) => {
+        // 每一档都画出它此刻实际会呈现的样子，用户不用切过去才知道
+        const previewDark = resolveDark(mode, systemDark);
+        const active = themeMode === mode;
+        return (
+          <button
+            key={mode}
+            onClick={() => setThemeMode(mode)}
+            className={`flex items-center gap-3 rounded-xl border p-3 text-left transition-colors ${
+              active
+                ? "border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_8%,transparent)]"
+                : "border-[var(--rule)] hover:border-[var(--text-dim)]"
+            }`}
+          >
+            <ThemeSwatch dark={previewDark} />
+            <span className="min-w-0 flex-1">
+              <span className="flex items-center gap-1.5 text-xs font-semibold text-[var(--text)]">
+                {THEME_MODE_LABELS[mode]}
+                {mode === "system" && (
+                  <span className="rounded px-1 py-px text-[9px] font-medium text-[var(--text-dim)] ring-1 ring-[var(--rule)]">
+                    系统当前{systemDark ? "深色" : "浅色"}
+                  </span>
+                )}
+              </span>
+              <span className="mt-0.5 block text-[10px] leading-relaxed text-[var(--text-dim)]">
+                {THEME_MODE_HINTS[mode]}
+              </span>
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** 一小块界面缩略：底色 + 两条"甘特条"，用固定色而非当前主题变量 —— 它要如实预览另一档长什么样 */
+function ThemeSwatch({ dark }: { dark: boolean }) {
+  return (
+    <span
+      className="flex size-9 shrink-0 flex-col justify-center gap-[3px] rounded-lg border px-1.5"
+      style={{
+        background: dark ? "#0b1020" : "#ffffff",
+        borderColor: dark ? "rgba(255,255,255,0.14)" : "rgba(15,23,42,0.12)",
+      }}
+    >
+      <span
+        className="h-[3px] w-[70%] rounded-full"
+        style={{ background: dark ? "#818cf8" : "#6366f1" }}
+      />
+      <span
+        className="h-[3px] w-[45%] rounded-full"
+        style={{ background: dark ? "rgba(255,255,255,0.28)" : "rgba(15,23,42,0.18)" }}
+      />
+    </span>
   );
 }
 
@@ -185,57 +574,6 @@ function RowHeightPicker() {
         </button>
       ))}
     </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/* 排期                                                                */
-/* ------------------------------------------------------------------ */
-
-function SchedulePane() {
-  const autoRollover = useAppStore((s) => s.autoRollover);
-  const setAutoRollover = useAppStore((s) => s.setAutoRollover);
-
-  return (
-    <Section
-      title="实施逾期自动顺延"
-      desc="开了之后，每天跨天时把「已开工、还没干完、计划结束日已过」的任务，计划结束日自动推到今天 —— 计划跟着实际走，逾期的活不会一直停在过去。"
-    >
-      <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-[var(--rule)] p-3.5 hover:border-[var(--text-dim)]">
-        <button
-          type="button"
-          role="switch"
-          aria-checked={autoRollover}
-          onClick={() => setAutoRollover(!autoRollover)}
-          className={`relative mt-0.5 h-5 w-9 shrink-0 rounded-full transition-colors ${
-            autoRollover ? "bg-[var(--accent)]" : "bg-[var(--rule)]"
-          }`}
-        >
-          <span
-            className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${
-              autoRollover ? "translate-x-4" : "translate-x-0.5"
-            }`}
-          />
-        </button>
-        <span className="min-w-0">
-          <span className="block text-xs font-semibold text-[var(--text)]">
-            开启自动顺延
-          </span>
-          <span className="mt-1 block text-[10px] leading-relaxed text-[var(--text-dim)]">
-            默认关闭。计划结束日是排期的锚，改动它有代价 —— 所以要不要让计划自动
-            让位给事实，交给你决定，而不是替你默认。
-          </span>
-        </span>
-      </label>
-
-      <ul className="mt-4 space-y-1.5 text-[10px] leading-relaxed text-[var(--text-dim)]">
-        <li>· 只推<b>没有子任务</b>的叶子任务；父任务的日期由子任务汇总，推它没意义。</li>
-        <li>· 只推<b>已开工</b>（填了实施起始日）的任务；没开工的逾期是「还没排上」，不是「干超时」。</li>
-        <li>· 已标完成（进度 100%）的任务不再顺延。</li>
-        <li>· 和「标了阻碍」的自动延长共用同一套跨天检查，两者取最大值、不会重复叠加。</li>
-        <li>· 自动顺延不进撤销栈 —— 它不是你的操作，下次跨天还会回来。</li>
-      </ul>
-    </Section>
   );
 }
 

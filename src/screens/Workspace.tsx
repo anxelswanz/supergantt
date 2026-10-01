@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ComponentType,
+} from "react";
 import { motion } from "motion/react";
 import { GanttView } from "../gantt/GanttView";
 import { FIXED_COLS_WIDTH, MIN_PANEL_WIDTH, TaskGrid } from "./TaskGrid";
@@ -7,7 +15,8 @@ import { today } from "../gantt/time";
 import { useAppStore } from "../store/useAppStore";
 import { isMod } from "../core/keys";
 import { canEdit, VIEW_LABELS, type ViewMode } from "../core/viewMode";
-import { APP_VIEWS, type AppView } from "../core/views";
+import { APP_VIEWS } from "../core/views";
+import { useViews, ViewRenderer, type ViewEntry } from "../plugins/usePlugins";
 import { BoardView } from "./BoardView";
 import { TimelineView } from "./TimelineView";
 import { ReviewView } from "./ReviewView";
@@ -35,6 +44,34 @@ const MAX_GRID_WIDTH = 900;
 const DEFAULT_GRID_WIDTH = FIXED_COLS_WIDTH + 240;
 const GRID_WIDTH_KEY = "grid_width";
 
+/**
+ * 内置视图的清单项。元信息照抄 core/views.ts，render 留空 —— 组件由下面的
+ * BUILTIN_BODIES 按 key 给。分开放是为了让视图清单（插件系统会读它）
+ * 不必持有内置组件的引用：插件系统出了问题，内置视图的渲染路径不受影响。
+ */
+const BUILTIN_VIEWS: ViewEntry[] = APP_VIEWS.map((v) => ({
+  key: v.key,
+  label: v.label,
+  hint: v.hint,
+  pluginId: "builtin",
+  render: null,
+}));
+
+/**
+ * 内置视图 key → 组件。
+ *
+ * 甘特不在这里：它带左侧网格、分隔条和一串相机 props，在 Workspace 里
+ * 单独渲染。另外三个都是无参组件、各自占满，正好和插件视图同一个形状。
+ */
+const BUILTIN_BODIES: Record<string, ComponentType> = {
+  board: BoardView,
+  timeline: TimelineView,
+  review: ReviewView,
+};
+
+/** ⌘1–⌘9 切视图。九个够用了；再多工具的快捷键就比工具本身还重要了 */
+const VIEW_HOTKEY_MAX = 9;
+
 export function Workspace() {
   const project = useAppStore((s) => s.project);
   const closeProject = useAppStore((s) => s.closeProject);
@@ -48,6 +85,24 @@ export function Workspace() {
   const compareOn = useAppStore((s) => s.compareOn);
   const setViewMode = useAppStore((s) => s.setViewMode);
   const setCompareOn = useAppStore((s) => s.setCompareOn);
+
+  /**
+   * 完整视图清单：内置 + 插件。工具条、⌘数字、渲染分发全部读它。
+   *
+   * 内置的元信息来自 core/views.ts（那份清单不知道插件存在），插件的那部分
+   * 来自注册表。合并只发生在这里 —— core/views.ts 保持对插件系统零依赖。
+   */
+  const views = useViews(BUILTIN_VIEWS);
+
+  /**
+   * 真正要渲染的那个视图。
+   *
+   * activeView 是从库里读回来的字符串，它记的是**上次关掉时**的视图 ——
+   * 那个插件现在可能已经被删掉或者禁用了。查不到就回退到甘特：一个已经不
+   * 存在的视图 key 不该让整个工作区白屏，而甘特是唯一一个永远在的、
+   * 且必然有意义的视图。
+   */
+  const active = views.find((v) => v.key === activeView) ?? views[0];
 
   const [scrollY, setScrollY] = useState(0);
   const [preset, setPreset] = useState<ZoomPreset>("week");
@@ -197,11 +252,14 @@ export function Workspace() {
         if (store.selectedId != null) store.outdentTask(store.selectedId);
         return;
       }
-      // ⌘1–⌘4 切顶层视图。裸 1–4 留给甘特的缩放档位 ——
-      // 两者不冲突，因为缩放只在甘特里有意义
-      if (isMod(e) && /^[1-4]$/.test(e.key)) {
+      // ⌘1–⌘9 切顶层视图。裸 1–4 留给甘特的缩放档位 ——
+      // 两者不冲突，因为缩放只在甘特里有意义。数字对应的是**当前清单里的
+      // 次序**，所以插件视图会自然排在 ⌘5 之后，装上就可用
+      if (isMod(e) && /^[1-9]$/.test(e.key)) {
+        const idx = Number(e.key) - 1;
+        if (idx >= views.length || idx >= VIEW_HOTKEY_MAX) return;
         e.preventDefault();
-        store.setActiveView(APP_VIEWS[Number(e.key) - 1].key);
+        store.setActiveView(views[idx].key);
         return;
       }
       if (isMod(e) && e.key.toLowerCase() === "s") {
@@ -250,7 +308,10 @@ export function Workspace() {
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [goToday, jump]);
+    // views 进依赖：插件是运行时装上的，清单会变。少了它，⌘5 绑的还是
+    // 挂载那一刻那份清单 —— 插件启用后按快捷键没反应，而且只在「先开
+    // 项目、后启用插件」这个顺序下复现
+  }, [goToday, jump, views]);
 
   if (!project) return null;
 
@@ -274,22 +335,32 @@ export function Workspace() {
         <span className="size-2.5 rounded-full" style={{ background: accent }} />
         <span className="text-sm font-semibold text-[var(--text)]">{project.name}</span>
 
-        {/* 顶层视图。同一批任务的四种问法，切换它不改任何数据 */}
+        {/* 顶层视图。同一批任务的几种问法，切换它不改任何数据。
+            内置四个在前，插件注册的接在后面（各带一个分隔点） */}
         <div className="ml-1 flex items-center gap-1 rounded-full bg-[var(--surface-alt)] p-1">
-          {APP_VIEWS.map((v, i) => (
-            <button
-              key={v.key}
-              onClick={() => setActiveView(v.key)}
-              title={`${v.hint}　⌘${i + 1}`}
-              className="rounded-full px-3 py-1 text-xs font-medium transition-colors"
-              style={
-                activeView === v.key
-                  ? { background: accent, color: "#fff" }
-                  : { color: "var(--text-dim)" }
-              }
-            >
-              {v.label}
-            </button>
+          {views.map((v, i) => (
+            <Fragment key={v.key}>
+              {i === APP_VIEWS.length && views.length > APP_VIEWS.length && (
+                <span className="mx-0.5 h-3 w-px bg-[var(--rule)]" />
+              )}
+              <button
+                onClick={() => setActiveView(v.key)}
+                title={
+                  // 超出 ⌘9 的视图没有快捷键，别在提示里写一个按不出来的键
+                  i < VIEW_HOTKEY_MAX
+                    ? `${v.hint}　⌘${i + 1}`
+                    : v.hint
+                }
+                className="rounded-full px-3 py-1 text-xs font-medium transition-colors"
+                style={
+                  active.key === v.key
+                    ? { background: accent, color: "#fff" }
+                    : { color: "var(--text-dim)" }
+                }
+              >
+                {v.label}
+              </button>
+            </Fragment>
           ))}
         </div>
 
@@ -400,9 +471,9 @@ export function Workspace() {
       </div>
 
       <div ref={bodyRef} className="flex min-h-0 flex-1">
-        {/* 甘特：左网格 + 右画布。另外三个视图各自占满，不带网格 ——
+        {/* 甘特：左网格 + 右画布。别的视图各自占满，不带网格 ——
             网格是甘特的一部分（行必须逐行对齐），不是全局的侧栏 */}
-        {activeView === "gantt" && (
+        {active.key === "gantt" && (
           <>
             <TaskGrid
               width={gridWidth}
@@ -433,9 +504,11 @@ export function Workspace() {
           </>
         )}
 
-        {activeView === "board" && <BoardView />}
-        {activeView === "timeline" && <TimelineView />}
-        {activeView === "review" && <ReviewView />}
+        {/* 其余视图：内置的各自占满，插件的由注册表提供组件。
+            插件的走 PluginBoundary + data-plugin 作用域（见 usePlugins） */}
+        {active.key !== "gantt" && (
+          <ViewRenderer view={active} fallback={BUILTIN_BODIES[active.key]} />
+        )}
 
         <AnimatePresence>{detailId != null && <TaskDetail />}</AnimatePresence>
       </div>
@@ -446,13 +519,15 @@ export function Workspace() {
 
       {/* 状态栏：把快捷键摆在明面上，否则没人会发现它们 */}
       <div className="flex shrink-0 items-center gap-4 border-t border-[var(--rule)] px-3 py-1.5 text-[10px] text-[var(--text-dim)]">
-        <span className="font-medium text-[var(--text)]">⌘1–4 切视图</span>
+        <span className="font-medium text-[var(--text)]">
+          ⌘1–{Math.min(views.length, VIEW_HOTKEY_MAX)} 切视图
+        </span>
         <span>Enter 新建</span>
         <span>⇧Enter 子任务</span>
         <span>⌘] / ⌘[ 缩进</span>
         <span>⌘Z 撤销</span>
         <span>⌫ 删除</span>
-        <HintsFor view={activeView} viewMode={viewMode} />
+        <HintsFor view={active} viewMode={viewMode} />
       </div>
     </motion.div>
   );
@@ -461,11 +536,14 @@ export function Workspace() {
 /**
  * 状态栏里随视图变的那一段。
  *
- * 快捷键摆在明面上，否则没人会发现它们；但把四个视图的提示全列出来
+ * 快捷键摆在明面上，否则没人会发现它们；但把每个视图的提示全列出来
  * 又会让这一行长到看不完 —— 只显示当前视图用得上的。
+ *
+ * 参数是视图**元信息**而不是 key：插件视图的提示只有注册表知道，本组件
+ * 不该再去查一次。
  */
-function HintsFor({ view, viewMode }: { view: AppView; viewMode: ViewMode }) {
-  switch (view) {
+function HintsFor({ view, viewMode }: { view: ViewEntry; viewMode: ViewMode }) {
+  switch (view.key) {
     case "gantt":
       return (
         <>
@@ -498,6 +576,15 @@ function HintsFor({ view, viewMode }: { view: AppView; viewMode: ViewMode }) {
       );
     case "review":
       return <span className="ml-auto">只读 · 数据来自计划与实施两组日期的差</span>;
+    default:
+      // 插件视图：宿主猜不出它的快捷键，就显示它自己写的那句提示，
+      // 并标明它来自插件 —— 出了问题用户要知道该去找谁
+      return (
+        <span className="ml-auto">
+          {view.hint}
+          <span className="ml-2 opacity-60">· 插件</span>
+        </span>
+      );
   }
 }
 

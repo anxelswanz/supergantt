@@ -15,6 +15,13 @@ import { WorkCalendar } from "../core/calendar";
 import type { ColorBy } from "../gantt/coloring";
 import { ROW_HEIGHTS, type RowHeightKey } from "../gantt/theme";
 import {
+  applyThemeMode,
+  readStoredThemeMode,
+  readSystemDark,
+  storeThemeMode,
+  type ThemeMode,
+} from "../core/themeMode";
+import {
   closeBlocked,
   extendOpenBlocks,
   fitBlocked,
@@ -26,7 +33,7 @@ import { rolloverOverdue } from "../core/rollover";
 import { canRecordBlocker, openBlockerOn } from "../core/board";
 import { riskFlags, type RiskFlag } from "../core/risks";
 import type { Span, ViewMode } from "../core/viewMode";
-import { isAppView, type AppView } from "../core/views";
+import { isViewKey, type AppView } from "../core/views";
 import type { DailyNote, Risk } from "../db/api";
 
 /**
@@ -84,6 +91,21 @@ interface AppState {
   rowHeightKey: RowHeightKey;
 
   /**
+   * 主题：跟随系统 / 浅色 / 深色。
+   *
+   * 和前两个视图偏好不同，它存 localStorage 而不是 settings 表 —— 数据库要
+   * 等窗口起来才能异步读，那一段会先画一帧错的。理由见 core/themeMode.ts。
+   */
+  themeMode: ThemeMode;
+
+  /**
+   * 系统当前是不是深色。只在 themeMode === "system" 时有意义，但**始终**维护 ——
+   * 这样从「浅色」切回「跟随系统」时不需要再去问一次 matchMedia，直接读它即可。
+   * 由 App 的 matchMedia 监听写入，全应用只有那一个监听源。
+   */
+  systemDark: boolean;
+
+  /**
    * 顶层视图：甘特 / 看板 / 时间线 / 复盘（core/views.ts）。
    * 同一批任务的四种看法，切换它不改任何数据。
    */
@@ -96,14 +118,6 @@ interface AppState {
   viewMode: ViewMode;
   /** 实施侧是否叠加显示计划条 */
   compareOn: boolean;
-  /**
-   * 实施逾期自动顺延（core/rollover.ts）。默认关。
-   *
-   * 开了之后，每天跨天时把「已开工、没干完、计划结束日已过」的叶子任务的
-   * 计划结束日推到今天 —— 计划跟着事实走。关着就什么都不动，逾期只能靠
-   * 用户手动改或标阻碍来表达。
-   */
-  autoRollover: boolean;
 
   /**
    * 负责人。全局共享，不按项目隔离 —— 同一个人通常同时出现在多个项目里。
@@ -205,6 +219,10 @@ interface AppState {
   removeBlocked: (taskId: number, periodId: string) => void;
   setColorBy: (mode: ColorBy) => void;
   setRowHeight: (key: RowHeightKey) => void;
+  /** 切主题：跟随系统 / 浅色 / 深色。落 localStorage，并同步写 DOM 属性 */
+  setThemeMode: (mode: ThemeMode) => void;
+  /** 系统深浅变了。只有 App 的 matchMedia 监听调它 —— 全应用唯一写入源 */
+  setSystemDark: (systemDark: boolean) => void;
   setNoteDraft: (draft: NoteDraft | null) => void;
   /** 在甘特上右键某天：切到时间线并把草稿准备好 */
   startNoteAt: (taskId: number | null, day: number) => void;
@@ -215,8 +233,6 @@ interface AppState {
   setActiveView: (view: AppView) => void;
   setViewMode: (mode: ViewMode) => void;
   setCompareOn: (on: boolean) => void;
-  /** 开关实施逾期自动顺延（core/rollover.ts） */
-  setAutoRollover: (on: boolean) => void;
   setActualSpan: (taskId: number, span: Span | null, label?: string) => void;
   adoptPlanDates: (taskId: number) => void;
   moveTask: (id: number, delta: -1 | 1) => void;
@@ -258,7 +274,6 @@ const COLOR_BY_KEY = "bar_color_by";
 const ROW_HEIGHT_KEY = "row_height";
 const VIEW_MODE_KEY = "view_mode";
 const ACTIVE_VIEW_KEY = "active_view";
-const AUTO_ROLLOVER_KEY = "auto_rollover";
 
 export const useAppStore = create<AppState>((set, get) => {
   /**
@@ -333,6 +348,8 @@ export const useAppStore = create<AppState>((set, get) => {
       pinned: false,
       sortOrder,
       blocked: [],
+      // 新建的任务默认不自动顺延：是不是该跟着事实走，要用户逐条决定
+      autoRollover: false,
       // 新建的任务默认「还没动过」，实施视图里显示为计划的虚线轮廓
       actualStartDay: null,
       actualEndDay: null,
@@ -356,10 +373,14 @@ export const useAppStore = create<AppState>((set, get) => {
 
     colorBy: "stage",
     rowHeightKey: "normal",
+    themeMode: readStoredThemeMode(),
+    // 初值要和 index.html 首帧脚本的判据一致，否则属性已定、状态却不同，
+    // 第一次切换会跳一下。用 readSystemDark 而不是直接调 matchMedia ——
+    // 这一行在模块加载时就执行，测试环境的桩还没装上
+    systemDark: readSystemDark(),
     activeView: "gantt",
     viewMode: "plan",
     compareOn: false,
-    autoRollover: false,
     people: [],
     selectedId: null,
     detailId: null,
@@ -373,22 +394,20 @@ export const useAppStore = create<AppState>((set, get) => {
     saveError: null,
 
     async loadSettings() {
-      const [color, row, view, active, rollover] = await Promise.all([
+      const [color, row, view, active] = await Promise.all([
         api.getSetting(COLOR_BY_KEY).catch(() => null),
         api.getSetting(ROW_HEIGHT_KEY).catch(() => null),
         api.getSetting(VIEW_MODE_KEY).catch(() => null),
         api.getSetting(ACTIVE_VIEW_KEY).catch(() => null),
-        api.getSetting(AUTO_ROLLOVER_KEY).catch(() => null),
       ]);
       if (color && ["stage", "assignee", "priority", "none"].includes(color)) {
         set({ colorBy: color as ColorBy });
       }
       if (row && row in ROW_HEIGHTS) set({ rowHeightKey: row as RowHeightKey });
       if (view === "plan" || view === "actual") set({ viewMode: view });
-      if (isAppView(active)) set({ activeView: active });
-      // 只有明确写成 "1" 才算开 —— 读不到、读坏了都退回默认的关，
-      // 免得一个读写异常就把全项目的排期默默改了
-      set({ autoRollover: rollover === "1" });
+      // 只挡明显不合法的字符串。格式合法但插件已被删掉的那种 key 留给
+      // Workspace 渲染时查注册表 —— 这里读设置的时候插件目录还没扫过
+      if (isViewKey(active)) set({ activeView: active });
     },
 
     setColorBy(mode) {
@@ -399,6 +418,24 @@ export const useAppStore = create<AppState>((set, get) => {
     setRowHeight(key) {
       set({ rowHeightKey: key });
       void api.setSetting(ROW_HEIGHT_KEY, key).catch(() => {});
+    },
+
+    setThemeMode(mode) {
+      set({ themeMode: mode });
+      storeThemeMode(mode);
+      // 写 DOM 属性这一步必须在这里做，不能等 React 重渲染 ——
+      // 甘特图的 Canvas 颜色是在渲染循环里读 store 的，而 DOM 变量是给
+      // 静态层用的，两者要同时换，中间不能有一帧半深半浅
+      applyThemeMode(mode, get().systemDark);
+    },
+
+    setSystemDark(systemDark) {
+      // 只有「跟随系统」这一档才需要把变化落到 DOM 上。
+      // 另外两档下系统怎么变都不该动 —— 那正是用户显式选它的原因
+      set((s) => {
+        if (s.themeMode === "system") applyThemeMode("system", systemDark);
+        return { systemDark };
+      });
     },
 
     setNoteDraft(draft) {
@@ -462,11 +499,6 @@ export const useAppStore = create<AppState>((set, get) => {
 
     setCompareOn(on) {
       set({ compareOn: on });
-    },
-
-    setAutoRollover(on) {
-      set({ autoRollover: on });
-      void api.setSetting(AUTO_ROLLOVER_KEY, on ? "1" : "0").catch(() => {});
     },
 
     /**
@@ -768,7 +800,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
     /**
      * 每日跨天：没关掉的阻碍往后长一天，任务的计划结束日跟着顺延；
-     * 开了「实施逾期自动顺延」的话，逾期未完工的叶子任务也一并推。
+     * 开了自动顺延开关（task.autoRollover）的逾期未完工叶子任务也一并推。
      *
      * 全项目一次算完、一条命令落地：一条一条写会让持久化层被触发 N 次，
      * 而它每次都是整项目全量写回。
@@ -779,26 +811,23 @@ export const useAppStore = create<AppState>((set, get) => {
      * 「两段阻碍同时开着取最大值不求和」是同一条规矩。
      */
     extendOpenBlockers() {
-      const { tasks, stack, autoRollover } = get();
+      const { tasks, stack } = get();
       if (!stack) return;
       const day = today();
 
-      // 只有叶子任务能推计划结束日：父任务的日期是子任务汇总出来的
-      // （model.resolve），推它下一轮汇总就覆盖回去，等于没改
-      let parents: Set<number> | null = null;
-      if (autoRollover) {
-        parents = new Set<number>();
-        for (const task of tasks.values()) {
-          if (task.parentId != null) parents.add(task.parentId);
-        }
+      // 只有叶子任务能被自动顺延：父任务的日期是子任务汇总出来的
+      // （model.resolve），推它下一轮汇总就覆盖回去，等于没改。
+      // rolloverOverdue 内部还会再看 task.autoRollover 这个开关。
+      const parents = new Set<number>();
+      for (const task of tasks.values()) {
+        if (task.parentId != null) parents.add(task.parentId);
       }
 
       const changes: Array<{ id: number; changes: Partial<Task> }> = [];
       for (const task of tasks.values()) {
         // 目标结束日：两条路径都想推时取最靠后的那个
         const blockerPatch = extendOpenBlocks(task, day);
-        const overduePatch =
-          autoRollover && !parents!.has(task.id) ? rolloverOverdue(task, day) : null;
+        const overduePatch = parents.has(task.id) ? null : rolloverOverdue(task, day);
         if (!blockerPatch && !overduePatch) continue;
 
         const end = Math.max(

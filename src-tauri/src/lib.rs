@@ -5,8 +5,8 @@ mod backup;
 mod db;
 mod dbfile;
 mod export;
+mod plugin;
 mod transfer;
-
 
 pub(crate) const DB_FILE: &str = "gantt.db";
 
@@ -30,6 +30,20 @@ pub fn run() {
             }
 
             app.manage(db::Db(Mutex::new(conn)));
+
+            // 留一个 PID 文件，告诉离线 CLI「应用正开着，别写」。见 gantt-core/src/locate.rs。
+            //
+            // 为什么必须有：前端是「整项目 400ms 防抖全量替换」，CLI 这会儿插进去的任务，
+            // 下一帧就被界面上那份陈旧快照抹掉 —— 而且是静默抹掉。WAL 只保证读写不互相
+            // 阻塞，不保证两个写入者不互相覆盖。单机单人场景下正确的做法不是搞冲突合并，
+            // 而是根本不让两边同时写。
+            //
+            // 失败只记日志：拿不到锁文件顶多是 CLI 少了一道保护，
+            // 不该因此让应用起不来。
+            if let Err(err) = gantt_core::locate::write_lock(&dir) {
+                eprintln!("[lock] 写入 gantt.lock 失败：{err}");
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -65,6 +79,10 @@ pub fn run() {
             db::check_integrity,
             db::get_setting,
             db::set_setting,
+            db::list_settings_with_prefix,
+            plugin::list_plugins,
+            plugin::plugins_dir,
+            plugin::reveal_plugins_dir,
             backup::data_dir,
             backup::reveal_data_dir,
             backup::backup_now,
@@ -78,6 +96,18 @@ pub fn run() {
             dbfile::commit_db_import,
             dbfile::undo_db_import,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // 退出时把锁摘掉。不摘也「能用」—— CLI 会去问那个 PID 还活着没，
+            // 死了照样放行 —— 但让用户看见一个 gantt.lock 躺在数据目录里总归是噪声。
+            //
+            // 走 RunEvent::Exit 而不是窗口关闭事件：关窗口只是隐藏（托盘常驻），
+            // 那时应用还活着、还该继续挡着 CLI。
+            if let tauri::RunEvent::Exit = event {
+                if let Ok(dir) = app.path().app_config_dir() {
+                    gantt_core::locate::clear_lock(&dir);
+                }
+            }
+        });
 }

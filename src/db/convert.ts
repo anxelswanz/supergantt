@@ -30,6 +30,7 @@ export function rowToTask(row: TaskRow): Task {
     pinned: row.pinned,
     sortOrder: row.sortOrder,
     blocked: parseBlocked(row.blocked),
+    autoRollover: row.autoRollover === true,
   };
 }
 
@@ -60,6 +61,7 @@ export function taskToRow(task: Task, previous?: TaskRow): TaskRow {
     note: previous?.note ?? "",
     sortOrder: task.sortOrder,
     blocked: serializeBlocked(task.blocked),
+    autoRollover: task.autoRollover,
   };
 }
 

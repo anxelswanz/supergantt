@@ -5,6 +5,28 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Gantt</title>
+    <script>
+      /*
+       * 首帧定主题。
+       *
+       * 必须在样式表和 React 之前同步跑完 —— 否则会先按默认（浅色）画一帧，
+       * 等 JS 起来才跳成深色，刷新一次闪一次。逻辑和 core/themeMode.ts 的
+       * resolveDark 一致；那两行短到不值得为「只写一遍」去引一个模块，
+       * 改一处务必改另一处。
+       */
+      (function () {
+        try {
+          var mode = localStorage.getItem("gantt.theme") || "system";
+          var dark =
+            mode === "dark" ||
+            (mode !== "light" &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.dataset.theme = dark ? "dark" : "light";
+        } catch (e) {
+          document.documentElement.dataset.theme = "light";
+        }
+      })();
+    </script>
   </head>
 
   <body>

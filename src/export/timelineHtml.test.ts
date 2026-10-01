@@ -32,6 +32,7 @@ function task(over: Partial<Task> & { id: number }): Task {
     pinned: false,
     sortOrder: over.id,
     blocked: [],
+    autoRollover: false,
     ...over,
   };
 }

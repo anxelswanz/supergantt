@@ -23,6 +23,13 @@ tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# ⚠️ 版本必须和 gantt-core/Cargo.toml 里的**完全一致**（连 feature 一起）。
+# 有一处对不上，Cargo 就会编出两份 rusqlite，于是 `gantt_core::Connection`
+# 和这里的 `Connection` 成了两个不同的类型，db.rs 那层再导出会以
+# 完全看不懂的方式报类型不匹配 —— 原因却藏在依赖树里。
 rusqlite = { version = "0.40.1", features = ["backup", "bundled"] }
+# 数据层。桌面应用和 CLI 共用同一份 schema / 查询 / 写入，
+# 所以「加一列迁移」只发生在一个地方，两边永远不会分叉。
+gantt-core = { path = "../gantt-core" }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 

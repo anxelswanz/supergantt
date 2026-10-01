@@ -29,6 +29,7 @@ function task(over: Partial<Task> & { id: number }): Task {
     priority: 2,
     personId: null,
     blocked: [],
+    autoRollover: false,
   actualStartDay: null,
   actualEndDay: null,
     milestone: false,

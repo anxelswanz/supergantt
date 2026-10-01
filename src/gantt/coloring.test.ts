@@ -17,6 +17,7 @@ const task = (id: number, over: Partial<Task> = {}): Task => ({
   pinned: false,
   sortOrder: id,
   blocked: [],
+  autoRollover: false,
   actualStartDay: null,
   actualEndDay: null,
   ...over,

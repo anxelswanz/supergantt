@@ -6,7 +6,7 @@ import { drawContent, drawInteraction, drawStatic } from "./render";
 import { resolve, type ResolvedTask } from "./model";
 import { Viewport, ZOOM_PRESETS, type ZoomPreset } from "./viewport";
 import { dayToIso, today } from "./time";
-import { cursorFor, hitTest, snapProgress, type DragMode } from "./hitTest";
+import { cursorFor, hitTest, snapProgress, tapAdoptsPlanDates, type DragMode } from "./hitTest";
 import { makeBarPainter } from "./coloring";
 import {
   BLOCK_REASONS,
@@ -19,6 +19,7 @@ import { moveBy, resizeEnd, resizeStart } from "../core/dateLink";
 import { makeCommand } from "../core/edits";
 import { useAppStore } from "../store/useAppStore";
 import { activeSpan } from "../core/viewMode";
+import { resolveDark } from "../core/themeMode";
 
 /**
  * 甘特图画布。
@@ -33,6 +34,16 @@ export interface GanttHandle {
   fitAll: () => void;
   currentPreset: () => ZoomPreset;
 }
+
+/**
+ * 按下到松手之间挪多少像素才算「拖动」而不是「单击」。
+ *
+ * 取 4px：比人手最轻微的抖动大一点，又比「一个整列都挪不到」小得多。
+ * 用日期差值去判是错的 —— 缩到「月」时 20px 都不足一天，一次明显的拖动
+ * 会因为 deltaDays === 0 被误判成单击，于是「拖一下」变成「照原样采用计划」，
+ * 两者结果一样但标签不同，撤销栈里会多出一条莫名其妙的记录。
+ */
+const CLICK_SLOP = 4;
 
 interface Props {
   scrollY: number;
@@ -55,6 +66,7 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
   const run = useAppStore((s) => s.run);
   const runMerge = useAppStore((s) => s.runMerge);
   const addBlocked = useAppStore((s) => s.addBlocked);
+  const adoptPlanDates = useAppStore((s) => s.adoptPlanDates);
 
   const tasks = useMemo(
     () => resolve([...taskMap.values()]),
@@ -69,9 +81,11 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
   const interactRef = useRef<HTMLCanvasElement>(null);
   const vpRef = useRef(new Viewport());
 
-  const [isDark, setIsDark] = useState(
-    () => window.matchMedia("(prefers-color-scheme: dark)").matches,
-  );
+  // 两个独立的 selector，不写成返回数组的一个 —— zustand v5 没有默认的浅比较，
+  // 每次返回新数组会让快照恒不等，React 19 下会持续重渲染
+  const themeMode = useAppStore((s) => s.themeMode);
+  const systemDark = useAppStore((s) => s.systemDark);
+  const isDark = resolveDark(themeMode, systemDark);
   const [size, setSize] = useState({ w: 0, h: 0 });
 
   /** ⌥ 拖完、等用户在就地菜单里选原因的那一段 */
@@ -188,24 +202,14 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
   }, [size]);
 
   useEffect(() => {
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const onChange = () => {
-      setIsDark(mq.matches);
-      markAll();
-    };
-    mq.addEventListener("change", onChange);
-    return () => mq.removeEventListener("change", onChange);
-  }, []);
-
-  useEffect(() => {
     dirty.current.content = true;
     dirty.current.interact = true;
-  }, [tasks, selectedId, isDark, painter, colorBy, blockedOf, viewMode, compareOn]);
+  }, [tasks, selectedId, painter, colorBy, blockedOf, viewMode, compareOn]);
 
-  // 改工作日历会影响底纹和星期行，那都在静态层
+  // 改工作日历会影响底纹和星期行，切主题会改全部三层的颜色 —— 都要整幅重画
   useEffect(() => {
     markAll();
-  }, [calendar]);
+  }, [calendar, isDark]);
 
   // 行高变了几何全变，三层都要重画
   useEffect(() => {
@@ -334,6 +338,16 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
       grabOffset: number;
       /** 拖动父任务时要一起平移的整棵子树 */
       subtree: number[];
+      /**
+       * 指针有没有真的移动过。
+       *
+       * 「单击采用计划日期」和「拖动落笔即变成实施条」用的是同一个按下手势，
+       * 区别只在松手时指针动没动。按距离而不是「有没有触发过 onMove」来判 ——
+       * onMove 在按下后哪怕挪 1px 也会来，那样单击会被当成拖动。
+       */
+      moved: boolean;
+      /** 抓到的这条是不是「还没动过」的虚线影子（hitTest 判定，见那里的说明） */
+      ghost: boolean;
     } | null = null;
     let panning = false;
     let lastPanX = 0;
@@ -394,6 +408,8 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
           grabOffset:
             hit.mode === "progress" ? px - (barX1 + barW * hit.task.progress) : 0,
           subtree: hit.task.hasChildren ? descendantsOf(hit.task.id) : [],
+          moved: false,
+          ghost: hit.ghost,
         };
         el.setPointerCapture(e.pointerId);
         return;
@@ -443,6 +459,9 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
       const { tasks: current } = live.current;
       const fresh = current.find((t) => t.id === drag!.task.id);
       if (!fresh) return;
+
+      // 松手时要拿它区分「单击采用计划」和「拖动落笔」
+      if (Math.abs(localX(e) - drag.startX) >= CLICK_SLOP) drag.moved = true;
 
       const store = useAppStore.getState();
       const original = store.tasks.get(drag.task.id);
@@ -572,6 +591,28 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
           });
         }
         return;
+      }
+
+      // 单击（没拖动）落在一条虚线上 = 采用计划日期，把它变成实施条。
+      //
+      // 这补的是左网格那句提示（「到甘特图上拖那条虚线，或点它采用计划日期」）
+      // 一直没兑现的另一半：拖动会落笔成实施，单击却什么都不做。
+      //
+      // 实施日期在松手这一刻从 store 重取，不用 drag 里那份快照 —— 中间可能
+      // 已经被 ⌥ 标受阻之类的操作改过。规则见 tapAdoptsPlanDates。
+      if (drag?.ghost) {
+        const latest = useAppStore.getState().tasks.get(drag.task.id);
+        if (
+          tapAdoptsPlanDates({
+            viewMode: live.current.viewMode,
+            ghost: drag.ghost,
+            moved: drag.moved,
+            actualStartDay: latest?.actualStartDay,
+          })
+        ) {
+          adoptPlanDates(drag.task.id);
+          dirty.current.content = true;
+        }
       }
 
       drag = null;

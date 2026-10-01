@@ -1,0 +1,14 @@
+D:\supergantt\supergantt\gantt-core\target\release\deps\serde-6b8c168963231c69.d: C:\Users\Ansel\ -\ FAE\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\lib.rs C:\Users\Ansel\ -\ FAE\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\integer128.rs C:\Users\Ansel\ -\ FAE\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\mod.rs C:\Users\Ansel\ -\ FAE\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\de.rs C:\Users\Ansel\ -\ FAE\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\ser.rs D:\supergantt\supergantt\gantt-core\target\release\build\serde-1ea3739ae6be1251\out/private.rs
+
+D:\supergantt\supergantt\gantt-core\target\release\deps\libserde-6b8c168963231c69.rlib: C:\Users\Ansel\ -\ FAE\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\lib.rs C:\Users\Ansel\ -\ FAE\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\integer128.rs C:\Users\Ansel\ -\ FAE\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\mod.rs C:\Users\Ansel\ -\ FAE\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\de.rs C:\Users\Ansel\ -\ FAE\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\ser.rs D:\supergantt\supergantt\gantt-core\target\release\build\serde-1ea3739ae6be1251\out/private.rs
+
+D:\supergantt\supergantt\gantt-core\target\release\deps\libserde-6b8c168963231c69.rmeta: C:\Users\Ansel\ -\ FAE\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\lib.rs C:\Users\Ansel\ -\ FAE\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\integer128.rs C:\Users\Ansel\ -\ FAE\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\mod.rs C:\Users\Ansel\ -\ FAE\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\de.rs C:\Users\Ansel\ -\ FAE\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\ser.rs D:\supergantt\supergantt\gantt-core\target\release\build\serde-1ea3739ae6be1251\out/private.rs
+
+C:\Users\Ansel\ -\ FAE\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\lib.rs:
+C:\Users\Ansel\ -\ FAE\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\integer128.rs:
+C:\Users\Ansel\ -\ FAE\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\mod.rs:
+C:\Users\Ansel\ -\ FAE\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\de.rs:
+C:\Users\Ansel\ -\ FAE\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.229\src\private\ser.rs:
+D:\supergantt\supergantt\gantt-core\target\release\build\serde-1ea3739ae6be1251\out/private.rs:
+
+# env-dep:OUT_DIR=D:\\supergantt\\supergantt\\gantt-core\\target\\release\\build\\serde-1ea3739ae6be1251\\out

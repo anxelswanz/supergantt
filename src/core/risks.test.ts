@@ -82,6 +82,7 @@ describe("canAddRisk", () => {
     progress: 0,
     actualStartDay: null,
     blocked: [],
+    autoRollover: false,
     ...over,
   });
 

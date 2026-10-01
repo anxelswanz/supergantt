@@ -32,6 +32,7 @@ const row = (id: number, over: Partial<TaskRow> = {}): TaskRow => ({
   blocked: "[]",
   actualStart: null,
   actualEnd: null,
+  autoRollover: false,
   ...over,
 });
 

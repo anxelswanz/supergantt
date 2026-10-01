@@ -61,6 +61,8 @@ export interface TaskRow {
   sortOrder: number;
   /** 受阻时段的 JSON 数组，见 migrations/004_blocked.sql */
   blocked: string;
+  /** 实施逾期时自动顺延计划结束日。见 migrations/009_auto_rollover.sql */
+  autoRollover: boolean;
 }
 
 export interface Person {
@@ -151,6 +153,25 @@ export interface ProjectData {
   people: Person[];
   /** 全局下一个可用的任务 id —— 前端不能只看当前项目去猜 */
   nextTaskId: number;
+}
+
+/**
+ * 插件目录里一个子目录的原始内容，未校验。
+ *
+ * 字段全是文件原文而不是解析后的结构：manifest 的校验逻辑在 TS 侧
+ * （plugins/manifest.ts），它需要拿到原始 JSON 文本才能报出「第几个字符
+ * 不对」。这里解析一次再交给它，等于把错误现场洗掉了。
+ */
+export interface RawPlugin {
+  /** 目录名。插件身份就是它 —— manifest 里的 id 必须与之一致 */
+  dir_name: string;
+  path: string;
+  /** manifest.json 原文；文件不存在时为 null */
+  manifest_raw: string | null;
+  /** 入口文件原文；读不出来时为 null */
+  entry_raw: string | null;
+  /** 与 manifest 同级的 styles.css，有就自动注入 */
+  css_raw: string | null;
 }
 
 export const api = {
@@ -261,6 +282,21 @@ export const api = {
 
   setSetting: (key: string, value: string) =>
     invoke<void>("set_setting", { key, value }),
+
+  /** 按前缀取一组设置。插件系统用它一次性读回全部 plugin.<id>.* */
+  listSettingsWithPrefix: (prefix: string) =>
+    invoke<[string, string][]>("list_settings_with_prefix", { prefix }),
+
+  /* ---------------- 插件 ---------------- */
+
+  /** 扫描插件目录。只读文件，不解析 —— 校验在 TS 侧（plugins/manifest.ts） */
+  listPlugins: () => invoke<RawPlugin[]>("list_plugins"),
+
+  /** 插件目录的绝对路径 */
+  pluginsDir: () => invoke<string>("plugins_dir"),
+
+  /** 在资源管理器 / 访达里打开插件目录 */
+  revealPluginsDir: () => invoke<void>("reveal_plugins_dir"),
 
   dataDir: () => invoke<string>("data_dir"),
 

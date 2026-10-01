@@ -19,17 +19,23 @@
   color-scheme: light dark;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --surface: #0b1020;
-    --surface-alt: #0f1629;
-    --rule: rgba(255, 255, 255, 0.1);
-    --text: #e2e8f0;
-    --text-dim: #7c8aa5;
-    --row-hover: rgba(255, 255, 255, 0.05);
-    --row-stripe: rgba(255, 255, 255, 0.022);
-    --accent: #818cf8;
-  }
+/*
+ * 深色变量只在 data-theme="dark" 下生效（属性由 core/themeMode.ts 写入）。
+ *
+ * 以前这里是 @media (prefers-color-scheme: dark)，纯跟随系统。改成属性驱动是为了
+ * 支持设置里的手动开关：JS 把「跟随系统 / 浅色 / 深色」解析成最终的 light/dark
+ * 再写到 <html data-theme> 上，CSS 只认这个属性。首帧脚本在 index.html 里，
+ * 保证刷新时不闪。
+ */
+:root[data-theme="dark"] {
+  --surface: #0b1020;
+  --surface-alt: #0f1629;
+  --rule: rgba(255, 255, 255, 0.1);
+  --text: #e2e8f0;
+  --text-dim: #7c8aa5;
+  --row-hover: rgba(255, 255, 255, 0.05);
+  --row-stripe: rgba(255, 255, 255, 0.022);
+  --accent: #818cf8;
 }
 
 html,

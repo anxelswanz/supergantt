@@ -139,19 +139,11 @@ fn today_stamp() -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-/// Howard Hinnant 的 civil_from_days 算法：天数（自 1970-01-01）→ 年月日。
-pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
+// 民用历换算搬去了 gantt-core：`db.rs`（项目列表算逾期）、`backup.rs`（按天命名备份）
+// 和 CLI（`+3d` 这类相对日期）三处都要它，各自留一份迟早会分叉出「差一天」的 bug。
+// 这里只做转发，`civil_from_days_matches_known_dates` 那条测试留在下面 ——
+// 它现在同时守住了 core 的那份实现。
+pub(crate) use gantt_core::calendar::civil_from_days;
 
 /// 供设置页显示「数据文件在哪」。
 #[tauri::command]

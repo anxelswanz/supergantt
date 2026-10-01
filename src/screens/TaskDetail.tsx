@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
-import { resolve } from "../gantt/model";
+import { resolve, type Task } from "../gantt/model";
 import { PRIORITY_COLORS, PRIORITY_LABELS } from "../gantt/theme";
 import { withAlpha } from "../gantt/coloring";
 import { dayToIso } from "../gantt/time";
@@ -216,6 +216,20 @@ export function TaskDetail() {
 
         <Divider />
 
+        {/* 自动顺延：和「进度」挨着放 —— 它回答的是同一个问题的另一半
+            （「这条活现在怎么样了」→「那逾期的计划要不要跟着挪」）。
+            父任务整块不显示：它没有自己的计划结束日，日期全是子任务汇总出来的，
+            给了开关用户开了也看不出效果。分隔线跟着一起省掉，否则会出现两条
+            并排的横线 */}
+        {!task.hasChildren && (
+          <>
+            <Divider />
+            <RolloverToggle task={task} />
+          </>
+        )}
+
+        <Divider />
+
         {/* 受阻时段排在风险之前：它是**已经发生**的事实，
             风险是「可能会发生」—— 先看已发生的更符合复盘顺序 */}
         <BlockedSection
@@ -253,6 +267,70 @@ export function TaskDetail() {
         />
       )}
     </motion.aside>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* 自动顺延                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 「逾期自动顺延」：一条任务自己的开关，不是全局偏好。
+ *
+ * 只给叶子任务用（调用点的 !task.hasChildren）—— 父任务的计划结束日是
+ * 子任务汇总出来的，推它下一轮汇总就覆盖回去了，所以这里不给它这个开关，
+ * 免得用户开了却看不出任何效果。
+ *
+ * 开关本身走 patchTask，所以进撤销栈；它引起的跨天顺延不进（见
+ * store.extendOpenBlockers）—— 那个不是用户的操作，⌘Z 它没有意义。
+ */
+function RolloverToggle({ task }: { task: Task }) {
+  const patchTask = useAppStore((s) => s.patchTask);
+  const on = task.autoRollover;
+
+  // 开关只有在「已开工」之后才真的会做事（core/rollover.isOverdue）。
+  // 没开工就点开不算错，但要说清楚现在什么都不会发生，否则用户会以为坏了
+  const idle = on && task.actualStartDay == null;
+
+  return (
+    <div className="px-4 py-3.5">
+      <div className="flex items-start gap-3">
+        <button
+          type="button"
+          role="switch"
+          aria-checked={on}
+          onClick={() =>
+            patchTask(
+              task.id,
+              { autoRollover: !on },
+              on ? "关闭自动顺延" : "开启自动顺延",
+            )
+          }
+          className={`relative mt-0.5 h-4 w-7 shrink-0 rounded-full transition-colors ${
+            on ? "bg-[var(--accent)]" : "bg-[var(--rule)]"
+          }`}
+        >
+          <span
+            className={`absolute top-0.5 size-3 rounded-full bg-white shadow transition-transform ${
+              on ? "translate-x-3.5" : "translate-x-0.5"
+            }`}
+          />
+        </button>
+
+        <div className="min-w-0 flex-1">
+          <div className="text-[11px] font-semibold text-[var(--text)]">
+            逾期自动顺延
+          </div>
+          <p className="mt-1 text-[10px] leading-relaxed text-[var(--text-dim)]">
+            {on
+              ? idle
+                ? "已开启。这条活填上实施起始日之后才会生效 —— 没开工的逾期是「还没排上」，不该算干超时。"
+                : "已开启。这条活逾期未完工时，每天跨天把计划结束日推到今天。"
+              : "关闭中。逾期了计划结束日就停在原处，逾期本身暴露出来由你处理。"}
+          </p>
+        </div>
+      </div>
+    </div>
   );
 }
 

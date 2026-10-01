@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hitTest, progressGripX, snapProgress } from "./hitTest";
+import { hitTest, progressGripX, snapProgress, tapAdoptsPlanDates } from "./hitTest";
 import { resolve, type Task } from "./model";
 import { AXIS_HEIGHT } from "./theme";
 import { Viewport } from "./viewport";
@@ -97,6 +97,7 @@ describe("进度手柄只在实施视图给", () => {
     pinned: false,
     sortOrder: 1,
     blocked: [],
+    autoRollover: false,
     actualStartDay: null,
     actualEndDay: null,
   };
@@ -135,5 +136,135 @@ describe("进度手柄只在实施视图给", () => {
     const tasks = resolve([base]); // actualStartDay/EndDay 为空 → ghost
     const hit = hitTest(vp, tasks, gripAt(base), rowY, "actual");
     expect(hit?.mode).toBe("move");
+  });
+});
+
+/**
+ * 命中结果要带上「这是不是一个还没动过的影子」。
+ *
+ * 挡住的 bug：hitTest 内部用 activeSpan 算出了 ghost，却没往外传，
+ * 于是单击虚线的调用方无从判断 —— 那条线看上去能点，点下去什么都不发生。
+ * 判定必须和绘制同源，调用方自己拿 actualStartDay == null 再推一遍，
+ * 迟早会和绘制分叉。
+ */
+describe("命中结果带着 ghost 标记", () => {
+  const vp = new Viewport();
+  vp.zoom.value = 12;
+  vp.zoom.target = 12;
+  vp.anchorDay = 100;
+  vp.anchorX = 0;
+  vp.rowHeight = 32;
+  vp.width = 800;
+  vp.height = 400;
+
+  const base: Task = {
+    id: 1,
+    parentId: null,
+    name: "任务1",
+    startDay: 100,
+    endDay: 104,
+    progress: 0.5,
+    priority: 2,
+    personId: null,
+    milestone: false,
+    weight: null,
+    collapsed: false,
+    pinned: false,
+    sortOrder: 1,
+    blocked: [],
+    autoRollover: false,
+    actualStartDay: null,
+    actualEndDay: null,
+  };
+  /** 条子 100 → 105，即 x ∈ [0, 60]；取中段避开两端改工期的手柄 */
+  const MID = 30;
+  const rowY = AXIS_HEIGHT + vp.rowHeight / 2;
+
+  it("实施视图、没填实施日期：中段抓到的是 ghost", () => {
+    const tasks = resolve([base]);
+    const hit = hitTest(vp, tasks, MID, rowY, "actual");
+    expect(hit?.mode).toBe("move");
+    expect(hit?.ghost).toBe(true);
+  });
+
+  it("实施视图、已经填了实施日期：不再是 ghost", () => {
+    const t = { ...base, actualStartDay: 102, actualEndDay: 108 };
+    const tasks = resolve([t]);
+    const hit = hitTest(vp, tasks, vp.xOf(104), rowY, "actual");
+    expect(hit?.mode).toBe("move");
+    expect(hit?.ghost).toBe(false);
+  });
+
+  it("计划视图下永远不是 ghost —— 计划条本身就是真的", () => {
+    const tasks = resolve([base]);
+    const hit = hitTest(vp, tasks, MID, rowY, "plan");
+    expect(hit?.mode).toBe("move");
+    expect(hit?.ghost).toBe(false);
+  });
+
+  it("父任务不算影子：汇总值没有「还没动过」一说，也没有日期可采用", () => {
+    const parent: Task = { ...base, id: 1, name: "组" };
+    const child: Task = { ...base, id: 2, parentId: 1, name: "子" };
+    const tasks = resolve([parent, child]);
+    // 父任务排在前面，取它的那一行
+    const hit = hitTest(vp, tasks, MID, rowY, "actual");
+    expect(hit?.task.hasChildren).toBe(true);
+    expect(hit?.mode).toBe("move");
+    expect(hit?.ghost).toBe(false);
+  });
+
+  it("条子外的空白：ghost 也照实带出，免得调用方以为这里是干净的", () => {
+    const tasks = resolve([base]);
+    const hit = hitTest(vp, tasks, 400, rowY, "actual");
+    expect(hit?.mode).toBe(null);
+    expect(hit?.ghost).toBe(true);
+  });
+});
+
+/**
+ * 「单击虚线 = 采用计划日期」的判定。
+ *
+ * 这是左网格那句提示（「点它采用计划日期」）背后一直没实现的规则。
+ * 四个条件必须同时成立，缺任何一个的表现都是静默的：要么点了没反应，
+ * 要么一次拖动被误当成单击 —— 后者会凭空写一组实施日期进撤销栈。
+ */
+describe("单击虚线采用计划日期", () => {
+  const ok = {
+    viewMode: "actual" as const,
+    ghost: true,
+    moved: false,
+    actualStartDay: null,
+  };
+
+  it("实施视图 + 抓到虚线 + 指针没动 + 还没填过 = 采用", () => {
+    expect(tapAdoptsPlanDates(ok)).toBe(true);
+  });
+
+  it("拖动过（指针动了）不算 —— 那是落笔变实施，不是采用原计划", () => {
+    expect(tapAdoptsPlanDates({ ...ok, moved: true })).toBe(false);
+  });
+
+  it("计划视图不采用 —— 那里没有影子，也没有要写的实施日期", () => {
+    expect(tapAdoptsPlanDates({ ...ok, viewMode: "plan" })).toBe(false);
+  });
+
+  it("抓到的是真实施条就不采用 —— 已经发生过的事不该被计划覆盖", () => {
+    expect(tapAdoptsPlanDates({ ...ok, ghost: false })).toBe(false);
+  });
+
+  it("已经填过实施日期的不覆盖 —— 单击只是选中，不是重置", () => {
+    expect(tapAdoptsPlanDates({ ...ok, actualStartDay: 100 })).toBe(false);
+  });
+
+  it("undefined 和 null 一视同仁（都当成还没填）", () => {
+    // 松手时任务查不到会传 undefined。这里放行没关系 —— 真被删了的话，
+    // 下游 adoptPlanDates 找不到任务会自己 no-op，不会凭空造数据
+    expect(tapAdoptsPlanDates({ ...ok, actualStartDay: undefined })).toBe(true);
+  });
+
+  it("0 也算已填 —— 天序号可以合法地是 0，别把它当成 null", () => {
+    // 第 0 天（1970-01-01）在真实数据里不该出现，但判断写错成真值判断
+    // （`!actualStartDay`）就会在这里放行，把一条已有实施的任务重置成计划值
+    expect(tapAdoptsPlanDates({ ...ok, actualStartDay: 0 })).toBe(false);
   });
 });

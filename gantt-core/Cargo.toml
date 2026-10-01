@@ -1,0 +1,28 @@
+[package]
+name = "gantt-core"
+version = "0.1.0"
+description = "Gantt 的数据层：schema、模型、查询、写入。桌面应用与 CLI 共用同一份"
+authors = ["you"]
+edition = "2021"
+
+[dependencies]
+# ⚠️ rusqlite 版本必须和 src-tauri/Cargo.toml 里的**完全一致**（连 feature 一起）。
+#
+# 两边只要有一处对不上，Cargo 会同时编出两份 rusqlite，于是 `gantt_core::Connection`
+# 和 `src-tauri` 里的 `Connection` 是两个不同的类型 —— db.rs 那层再导出会以一种
+# 完全看不懂的方式报类型不匹配，而真正的原因藏在依赖树里。
+#
+# 这里刻意写死 "=0.40.1" 而不是 "^0.40.1"：前者在两边漂移时立刻编译失败，
+# 后者会安静地选出一个能满足双方的最高版本，把问题推迟到最难查的时候。
+rusqlite = { version = "=0.40.1", features = ["backup", "bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lib]
+name = "gantt_core"
+path = "src/lib.rs"
+
+# CLI 放在这里而不是 src-tauri：它只需要数据层，不该把整个 Tauri 拖进链接。
+[[bin]]
+name = "gantt"
+path = "src/bin/gantt.rs"

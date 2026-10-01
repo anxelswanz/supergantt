@@ -9,13 +9,21 @@ import type { ResolvedTask } from "./model";
 import { AXIS_HEIGHT } from "./theme";
 import type { Viewport } from "./viewport";
 import { activeSpan, canEdit, type ViewMode } from "../core/viewMode";
-
 export type DragMode = "move" | "resizeStart" | "resizeEnd" | "progress";
 
 export interface Hit {
   index: number;
   task: ResolvedTask;
   mode: DragMode | null;
+  /**
+   * 抓到的这条是不是「还没动过」的虚线影子。
+   *
+   * 必须由这里给出：判定用的是 `activeSpan(task, mode)`，只有它知道这条子
+   * 画在实施位置还是计划位置、以及那是不是一个影子。调用方自己用
+   * `actualStartDay == null` 再推一遍，迟早会和绘制分叉 —— 表现就是
+   * 「点上去没反应」而条子看上去明明在那里。
+   */
+  ghost: boolean;
 }
 
 const HANDLE = 7;
@@ -71,11 +79,19 @@ export function hitTest(
 
   // 父任务的日期是子任务汇总出来的，不能直接拖它的边缘改工期。
   // 但整体平移是允许的 —— 那等价于平移整组子任务（DESIGN.md §1.3）。
+  //
+  // 父任务永远不算影子：它的实施区间是**已经填过的子任务**汇总出来的，
+  // 「还没动过」对一条汇总值没有意义，也没有一组日期可以拿来填。
   if (task.hasChildren) {
     const { span: p } = activeSpan(task, mode);
     const px1 = vp.xOf(p.startDay);
     const px2 = vp.xOf(p.endDay + 1);
-    return { index, task, mode: x >= px1 && x <= px2 ? "move" : null };
+    return {
+      index,
+      task,
+      mode: x >= px1 && x <= px2 ? "move" : null,
+      ghost: false,
+    };
   }
 
   // 命中判定必须用**当前视图正在画的那个区间** —— 用另一组日期去判定，
@@ -84,12 +100,12 @@ export function hitTest(
 
   if (task.milestone) {
     const cx = vp.xOf(span.startDay) + vp.pxPerDay / 2;
-    return { index, task, mode: Math.abs(x - cx) <= 9 ? "move" : null };
+    return { index, task, mode: Math.abs(x - cx) <= 9 ? "move" : null, ghost };
   }
 
   const x1 = vp.xOf(span.startDay);
   const x2 = vp.xOf(span.endDay + 1);
-  if (x < x1 - HANDLE || x > x2 + HANDLE) return { index, task, mode: null };
+  if (x < x1 - HANDLE || x > x2 + HANDLE) return { index, task, mode: null, ghost };
 
   // —— 进度手柄 ——
   // 只在**实施**视图给。进度是「实际干了多少」，归实施侧（viewMode.canEdit）；
@@ -103,14 +119,14 @@ export function hitTest(
   if (canEdit("progress", mode) && !ghost) {
     const grip = progressGripX(x1, x2, task.progress);
     if (grip != null && Math.abs(x - grip) <= PROGRESS_GRIP) {
-      return { index, task, mode: "progress" };
+      return { index, task, mode: "progress", ghost };
     }
   }
 
-  if (x <= x1 + HANDLE) return { index, task, mode: "resizeStart" };
-  if (x >= x2 - HANDLE) return { index, task, mode: "resizeEnd" };
+  if (x <= x1 + HANDLE) return { index, task, mode: "resizeStart", ghost };
+  if (x >= x2 - HANDLE) return { index, task, mode: "resizeEnd", ghost };
 
-  return { index, task, mode: "move" };
+  return { index, task, mode: "move", ghost };
 }
 
 export function cursorFor(mode: DragMode | null): string {
@@ -125,6 +141,33 @@ export function cursorFor(mode: DragMode | null): string {
     default:
       return "default";
   }
+}
+
+/**
+ * 这次松手算不算「单击虚线，采用计划日期」。
+ *
+ * 和拖动落笔（也是一按一放）靠**指针位移**区分，不是靠日期差 —— 缩到「月」时
+ * 一次明显的拖动也可能不足一天，用日期差判会让它退化成"采用计划"。
+ *
+ * 抽成纯函数是为了让这条规则可测：它同时被四个条件约束（实施视图、
+ * 抓到 ghost、指针没动、确实还没填过实施日期），漏掉任何一个，表现都是
+ * 「点了没反应」或「拖一下反而被当成点了一下」，而这两种在界面上都不报错。
+ */
+export function tapAdoptsPlanDates(opts: {
+  viewMode: ViewMode;
+  /** 抓到的这条是不是虚线影子（hitTest 给出） */
+  ghost: boolean;
+  /** 按下到松手，指针有没有真的动过 */
+  moved: boolean;
+  /** 当前这条任务的实施开始日 —— 已经有值就不该被覆盖 */
+  actualStartDay: number | null | undefined;
+}): boolean {
+  return (
+    opts.viewMode === "actual" &&
+    opts.ghost &&
+    !opts.moved &&
+    opts.actualStartDay == null
+  );
 }
 
 /** 鼠标离手柄多近时手柄开始变大 —— 视觉上的「吸附」提示 */
