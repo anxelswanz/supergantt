@@ -104,12 +104,15 @@ const KINDS = [
 
 /** settings 表的内存替身 —— 视图开关要能读回去 */
 let settings: Record<string, string>;
+/** 某些测试要一长串类型来验分页；null = 用默认那两个 */
+let manyKinds: typeof KINDS | null;
 
 beforeEach(() => {
   cleanup();
   vi.resetModules();
   invoke.mockReset();
   settings = {};
+  manyKinds = null;
 
   window.matchMedia ??= ((q: string) => ({
     matches: false,
@@ -135,7 +138,7 @@ beforeEach(() => {
       case "load_item_notes":
         return Promise.resolve(NOTES);
       case "list_item_kinds":
-        return Promise.resolve(KINDS);
+        return Promise.resolve(manyKinds ?? KINDS);
       case "add_item_note":
         return Promise.resolve({
           ...NOTES[0],
@@ -337,7 +340,7 @@ describe("改类型", () => {
    * 自定义类型藏在设置里，而用户是在分拣菜单前面发现「没有我要的类型」的。
    * 那一刻要有一条直达的路。
    */
-  it("分拣菜单里有「新建类型…」，直达设置的视图页", async () => {
+  it("分拣菜单里有「新建类型…」，直达设置的事项类型页", async () => {
     const store = await openWorkspace();
     store.getState().setActiveView("items");
     await screen.findByText("下周一确认夹具方案");
@@ -345,8 +348,9 @@ describe("改类型", () => {
     fireEvent.click(screen.getByText("加入到事项 ▾"));
     fireEvent.click(await screen.findByText("新建类型…"));
 
-    await waitFor(() => expect(store.getState().settingsTab).toBe("views"));
-    expect(await screen.findByText("事项类型")).toBeTruthy();
+    await waitFor(() => expect(store.getState().settingsTab).toBe("kinds"));
+    // 那一页上的标志性内容 —— 不是侧栏里那个同名页签
+    expect(await screen.findByText(/共 \d+ 个（\d+ 个内置）/)).toBeTruthy();
   });
 
   /** 行上不显示任务了，菜单项就必须说清楚要打开的是哪条 */
@@ -453,5 +457,93 @@ describe("视图开关", () => {
 
     await store.getState().loadSettings();
     expect(store.getState().enabledViews).toEqual(["gantt", "board", "timeline", "items"]);
+  });
+});
+
+describe("设置 → 事项类型", () => {
+  /**
+   * 类型多起来之后这一页要能用。
+   *
+   * 不分页的话这张 520px 高的面板会变成一条长滚动条，而「新建类型」被顶到
+   * 最底下 —— 要加一个类型得先滚到底，而那是这一页最高频的动作。
+   */
+  it("超过一页才出现翻页控件，翻页换一批", async () => {
+    manyKinds = Array.from({ length: 15 }, (_, i) => ({
+      key: `custom:k${i}`,
+      label: `类型${String(i).padStart(2, "0")}`,
+      color: "#0ea5e9",
+      requiresNote: false,
+      builtin: false,
+      sortOrder: i,
+    }));
+    const store = await openWorkspace();
+    store.getState().openSettings("kinds");
+
+    await screen.findByText(/共 15 个/);
+    expect(screen.getByText("1 / 3")).toBeTruthy();
+    // 第一页是前 6 个
+    expect(screen.getByDisplayValue("类型00")).toBeTruthy();
+    expect(screen.queryByDisplayValue("类型06")).toBe(null);
+
+    fireEvent.click(screen.getByText("›"));
+    await waitFor(() => expect(screen.getByText("2 / 3")).toBeTruthy());
+    expect(screen.getByDisplayValue("类型06")).toBeTruthy();
+    expect(screen.queryByDisplayValue("类型00")).toBe(null);
+  });
+
+  it("只有两个类型时不出现翻页，也不出现搜索框", async () => {
+    const store = await openWorkspace();
+    store.getState().openSettings("kinds");
+
+    await screen.findByText(/共 2 个/);
+    expect(screen.queryByText("1 / 1")).toBe(null);
+    expect(screen.queryByPlaceholderText("搜索类型…")).toBe(null);
+  });
+
+  /** 搜索跨全部类型，不只是当前页 —— 分页是显示手段，不该缩小搜索范围 */
+  it("搜索能命中不在当前页的类型", async () => {
+    manyKinds = Array.from({ length: 15 }, (_, i) => ({
+      key: `custom:k${i}`,
+      label: `类型${String(i).padStart(2, "0")}`,
+      color: "#0ea5e9",
+      requiresNote: false,
+      builtin: false,
+      sortOrder: i,
+    }));
+    const store = await openWorkspace();
+    store.getState().openSettings("kinds");
+
+    const box = await screen.findByPlaceholderText("搜索类型…");
+    // 故意用一个**不等于**标签全文的词：搜索框自己也是个 input，
+    // 查 displayValue 时会和被筛出来那一行撞上
+    fireEvent.change(box, { target: { value: "型14" } });
+
+    await waitFor(() => expect(screen.getByDisplayValue("类型14")).toBeTruthy());
+    expect(screen.getByText(/筛出 1 个/)).toBeTruthy();
+    expect(screen.queryByText(/\d+ \/ \d+/)).toBe(null);
+  });
+
+  /** 「新建类型」钉在列表上方，位置不随条数变 —— 不然加一个类型得先滚到底 */
+  it("新建按钮在列表之前", async () => {
+    manyKinds = Array.from({ length: 15 }, (_, i) => ({
+      key: `custom:k${i}`,
+      label: `类型${String(i).padStart(2, "0")}`,
+      color: "#0ea5e9",
+      requiresNote: false,
+      builtin: false,
+      sortOrder: i,
+    }));
+    const store = await openWorkspace();
+    store.getState().openSettings("kinds");
+
+    const add = await screen.findByText("＋ 新建类型");
+    const first = screen.getByDisplayValue("类型00");
+    expect(add.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("页面上写明阻碍和风险为什么不在清单里", async () => {
+    const store = await openWorkspace();
+    store.getState().openSettings("kinds");
+    expect(await screen.findByText(/为什么这里没有「阻碍」和「风险」/)).toBeTruthy();
   });
 });

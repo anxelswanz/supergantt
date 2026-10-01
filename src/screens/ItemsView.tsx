@@ -1104,13 +1104,14 @@ function SortMenu({
       ))}
 
       {/*
-        自定义类型藏在设置里，而用户是在**这里**发现「没有我要的类型」的。
-        那一刻给一条直达的路，比让他自己去齿轮图标下面翻有用得多。
+        自定义类型在「设置 → 事项类型」，而用户是在**这里**发现「没有我要的
+        类型」的。那一刻给一条直达那一页的路，比让他自己去齿轮图标下面翻
+        有用得多。
       */}
       <MenuItem
         onClick={() => {
           onClose();
-          openSettings("views");
+          openSettings("kinds");
         }}
       >
         <span className="flex items-center gap-2 text-[var(--text-dim)]">

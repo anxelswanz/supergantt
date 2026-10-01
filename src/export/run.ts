@@ -3,9 +3,10 @@
  *
  * 内容全部在前端生成，Rust 只负责写字节（见 src-tauri/src/export.rs 的说明）。
  *
- * 两个出口，对应两种问法：
- *   · Excel   —— 按任务排的排期表，给人核计划用
- *   · 时间线  —— 按日期排的流水，给人看「那几天到底发生了什么」
+ * 三个出口，对应三种问法：
+ *   · Excel     —— 按任务排的排期表，给人核计划用
+ *   · 时间线    —— 按日期排的流水，给人看「那几天到底发生了什么」
+ *   · 事项类型  —— 这个团队把事情分成哪几类，给人对口径用
  */
 
 import { save } from "@tauri-apps/plugin-dialog";
@@ -120,4 +121,40 @@ function toBase64(buffer: ArrayBuffer | Uint8Array): string {
     binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
   }
   return btoa(binary);
+}
+
+/**
+ * 事项类型清单 → Excel。
+ *
+ * 入口在「设置 → 事项类型」那一页，不在工具条上：它是一份配置的快照，
+ * 不是项目产出。会去导它的人正在那一页维护类型，手边就有按钮。
+ *
+ * 使用数只统计**当前项目**（`item_kinds` 是全局表，`item_notes` 按项目分，
+ * 手里只有当前这一个项目的事项）。这件事写在列名和表头上 —— 见 itemKinds.ts。
+ */
+export async function exportItemKindsToExcel(): Promise<ExportResult> {
+  const { buildItemKindsWorkbook, itemKindsFileName } = await import("./itemKinds");
+
+  const { project, itemKinds, itemNotes } = useAppStore.getState();
+  const exportedAt = new Date();
+
+  const workbook = buildItemKindsWorkbook({
+    // 没开项目也能导 —— 类型是全局的。那时使用数全是 0，表头写明范围
+    projectName: project?.name ?? "（未打开项目，使用数不统计）",
+    kinds: itemKinds,
+    notes: project ? itemNotes : [],
+    exportedAt,
+  });
+
+  // 同 Excel 那条路：先生成再弹对话框，不让用户选完路径才知道导不出来
+  const buffer = await workbook.xlsx.writeBuffer();
+
+  const path = await save({
+    defaultPath: itemKindsFileName(exportedAt),
+    filters: [{ name: "Excel 工作簿", extensions: ["xlsx"] }],
+  });
+  if (!path) return { path: null };
+
+  await api.writeExport(path, toBase64(buffer));
+  return { path };
 }

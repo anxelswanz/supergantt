@@ -24,6 +24,7 @@ import {
 import { exportDatabaseFile } from "../transfer/projectFile";
 import { Avatar, fileToAvatarDataUrl } from "./Avatar";
 import { CalendarPane } from "./CalendarSettings";
+import { ExportButton } from "./ExportButton";
 
 /**
  * 设置面板。
@@ -32,13 +33,16 @@ import { CalendarPane } from "./CalendarSettings";
  * 负责人偶尔维护，数据文件几乎不碰但出事时必须找得到。
  */
 
-type Tab = "appearance" | "views" | "people" | "calendar" | "plugins" | "data";
+type Tab = "appearance" | "views" | "kinds" | "people" | "calendar" | "plugins" | "data";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "appearance", label: "外观" },
   // 视图紧跟外观：两者都是「这个软件长什么样」。事项类型也在这一页 ——
   // 它属于「事项视图怎么用」，和负责人、工作日历那种项目数据不是一类
   { id: "views", label: "视图" },
+  // 事项类型独立一页，不挂在「视图」下面：类型清单会长 —— 一个团队用上
+  // 十几个类型是正常的 —— 而它需要搜索和分页，塞进别人的页脚底下放不开
+  { id: "kinds", label: "事项类型" },
   { id: "people", label: "负责人" },
   { id: "calendar", label: "工作日历" },
   // 插件排在数据前面：它是「扩展这个软件」的地方，属于日常会来的，
@@ -113,6 +117,7 @@ export function Settings({
         <div className="min-w-0 flex-1 overflow-y-auto p-5">
           {tab === "appearance" && <AppearancePane />}
           {tab === "views" && <ViewsPane />}
+          {tab === "kinds" && <ItemKindsPane />}
           {tab === "people" && <PeoplePane />}
           {tab === "calendar" && <CalendarPane />}
           {tab === "plugins" && <PluginsPane />}
@@ -425,25 +430,30 @@ function PluginFieldRow({ pluginId, field }: { pluginId: string; field: PluginSe
 /* ------------------------------------------------------------------ */
 
 /**
- * 视图页。两件事：开关哪些视图，以及事项有哪些类型。
+ * 视图页：只管开关哪些视图。
  *
- * 放在一页是因为它们回答的是同一个问题 ——「这个软件给我摆哪些面、
- * 我在事项里怎么给东西分类」。都是全局偏好，都不随项目走。
+ * 事项类型本来也在这一页（它们都是「这个软件摆成什么样」的全局偏好），
+ * 后来拆出去了 —— 类型清单会长，一个团队用上十几个类型是正常的，
+ * 而它需要搜索框和分页。那些东西挂在别人的页脚底下放不开。
  */
 function ViewsPane() {
+  const openSettings = useAppStore((s) => s.openSettings);
   return (
-    <>
-      <Section
-        title="启用哪些视图"
-        desc="关掉的视图连快捷键一起消失，⌘1–⌘5 的编号跟着重新算，不留死键。这是全局偏好，不随项目走。"
-      >
-        <ViewToggles />
-      </Section>
+    <Section
+      title="启用哪些视图"
+      desc="关掉的视图连快捷键一起消失，⌘1–⌘5 的编号跟着重新算，不留死键。这是全局偏好，不随项目走。"
+    >
+      <ViewToggles />
 
-      <div className="mt-8">
-        <ItemKindsPane />
-      </div>
-    </>
+      {/* 事项类型搬到了自己那一页，这里留一条路 —— 原来它在本页底下，
+          习惯了的人到这儿找不到会以为功能没了 */}
+      <button
+        onClick={() => openSettings("kinds")}
+        className="mt-4 text-[10px] text-[var(--text-dim)] underline hover:text-[var(--text)]"
+      >
+        事项的类型清单搬到「事项类型」那一页了 →
+      </button>
+    </Section>
   );
 }
 
@@ -510,28 +520,122 @@ function ViewToggles() {
 }
 
 /**
- * 事项类型。
+ * 事项类型页。
  *
  * **阻碍和风险不在这张清单里**，所以页面上要写明白为什么 —— 否则用户会
  * 在这找它们，找不到就以为是漏了。它们是实体不是分类：一条阻碍会推排期、
  * 进复盘的归因图、让卡片上看板的受阻列，而一个类型标签做不到其中任何一件
  * （设计稿 §6.3）。做成这张表的两行只会制造出「名字叫阻碍、底下没有实体」
  * 的悬空状态。
+ *
+ * ## 为什么要搜索和分页
+ *
+ * 类型是全局的，一个团队用上十几个是正常的（设计稿 §7 里把「类型总数超过
+ * 十个」列成了触发条件）。一次性铺开的话，这张 520px 高的面板会变成一条
+ * 长滚动条，而「新建类型」那个按钮被顶到最底下 —— 要加一个类型得先滚到底。
+ *
+ * 所以：**新建按钮钉在列表上方**（它的位置不随条数变），列表每页 6 条，
+ * 搜索跨全部而不只是当前页。只有超过一页时才出现翻页控件 —— 三个类型的
+ * 时候摆一个「1/1」是纯噪音。
  */
+
+/** 每页几条。按面板高度定的：6 行 + 头 + 新建 + 翻页刚好不出现滚动条 */
+const KINDS_PER_PAGE = 6;
+
 function ItemKindsPane() {
   const kinds = useAppStore((s) => s.itemKinds);
   const saveItemKind = useAppStore((s) => s.saveItemKind);
   const removeItemKind = useAppStore((s) => s.removeItemKind);
   const [adding, setAdding] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(0);
+
+  const q = query.trim().toLowerCase();
+  // 搜索跨**全部**类型，不只是当前页 —— 分页是显示手段，不该缩小搜索范围
+  const shown = q
+    ? kinds.filter(
+        (k) => k.label.toLowerCase().includes(q) || k.key.toLowerCase().includes(q),
+      )
+    : kinds;
+
+  const pages = Math.max(1, Math.ceil(shown.length / KINDS_PER_PAGE));
+  // 删掉几条之后当前页可能已经越界了，夹回最后一页
+  const current = Math.min(page, pages - 1);
+  const slice = shown.slice(current * KINDS_PER_PAGE, (current + 1) * KINDS_PER_PAGE);
+
+  const builtin = kinds.filter((k) => k.builtin).length;
 
   return (
     <Section
       title="事项类型"
       desc="事项分拣时能选的类型。全局定义，所有项目共用 —— 类型是「这个团队怎么给事情分类」，不是某个项目的属性。"
     >
+      <div className="mb-2.5 flex items-center gap-2">
+        <span className="text-[10px] text-[var(--text-dim)]">
+          共 {kinds.length} 个（{builtin} 个内置）
+          {q && shown.length !== kinds.length && ` · 筛出 ${shown.length} 个`}
+        </span>
+
+        {/* 搜索框只在真的多起来之后才出现 —— 三个类型的时候它是纯噪音 */}
+        {kinds.length > KINDS_PER_PAGE && (
+          <input
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setPage(0); // 换了筛选条件还停在第 3 页，多半是空的
+            }}
+            placeholder="搜索类型…"
+            className="ml-auto w-28 rounded-full border border-[var(--rule)] bg-[var(--surface)] px-2.5 py-0.5 text-[10px] text-[var(--text)] outline-none focus:border-[var(--accent)]"
+          />
+        )}
+
+        <ExportButton
+          label="⤓ 导出"
+          title="把类型清单导出成 Excel：名称、颜色、关闭规则、本项目用了多少条"
+          size="sm"
+          run={async () => (await import("../export/run")).exportItemKindsToExcel()}
+        />
+      </div>
+
+      {/*
+        「新建类型」钉在列表**上方**。
+        放在下面的话它的位置会随条数变，而加一个类型得先滚到底 ——
+        这一页最高频的动作不该是最难点到的那个。
+      */}
+      {adding ? (
+        <div className="mb-1.5">
+          <KindRow
+            kind={{
+              key: newKindKey(),
+              label: "",
+              color: PROJECT_COLORS[kinds.length % PROJECT_COLORS.length],
+              requiresNote: false,
+              builtin: false,
+              sortOrder: kinds.length,
+            }}
+            draft
+            onSave={(label, color, requiresNote) => {
+              void saveItemKind(newKindKey(), label, color, requiresNote);
+              setAdding(false);
+              setQuery("");
+              // 新建的排在最后，直接翻到它所在的那一页
+              setPage(Math.floor(kinds.length / KINDS_PER_PAGE));
+            }}
+            onDelete={() => setAdding(false)}
+          />
+        </div>
+      ) : (
+        <button
+          onClick={() => setAdding(true)}
+          className="mb-1.5 w-full rounded-xl border border-dashed border-[var(--rule)] py-1.5 text-[11px] text-[var(--text-dim)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
+        >
+          ＋ 新建类型
+        </button>
+      )}
+
       <div className="flex flex-col gap-1.5">
-        {kinds.map((k) => (
+        {slice.map((k) => (
           <KindRow
             key={k.key}
             kind={k}
@@ -549,32 +653,27 @@ function ItemKindsPane() {
           />
         ))}
 
-        {adding ? (
-          <KindRow
-            kind={{
-              key: newKindKey(),
-              label: "",
-              color: PROJECT_COLORS[kinds.length % PROJECT_COLORS.length],
-              requiresNote: false,
-              builtin: false,
-              sortOrder: kinds.length,
-            }}
-            draft
-            onSave={(label, color, requiresNote) => {
-              void saveItemKind(newKindKey(), label, color, requiresNote);
-              setAdding(false);
-            }}
-            onDelete={() => setAdding(false)}
-          />
-        ) : (
-          <button
-            onClick={() => setAdding(true)}
-            className="self-start rounded-lg border border-dashed border-[var(--rule)] px-2.5 py-1.5 text-[11px] text-[var(--text-dim)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
-          >
-            ＋ 新建类型
-          </button>
+        {slice.length === 0 && (
+          <div className="rounded-xl border border-dashed border-[var(--rule)] py-6 text-center text-[10px] text-[var(--text-dim)]">
+            没有匹配「{query}」的类型。
+          </div>
         )}
       </div>
+
+      {/* 翻页控件只在超过一页时出现 */}
+      {pages > 1 && (
+        <div className="mt-2 flex items-center justify-center gap-2">
+          <PageButton disabled={current === 0} onClick={() => setPage(current - 1)}>
+            ‹
+          </PageButton>
+          <span className="font-mono text-[10px] tabular-nums text-[var(--text-dim)]">
+            {current + 1} / {pages}
+          </span>
+          <PageButton disabled={current >= pages - 1} onClick={() => setPage(current + 1)}>
+            ›
+          </PageButton>
+        </div>
+      )}
 
       {notice && (
         <p className="mt-2 text-[10px] leading-relaxed text-emerald-600">{notice}</p>
@@ -601,6 +700,26 @@ function ItemKindsPane() {
         「问题」默认开着。
       </p>
     </Section>
+  );
+}
+
+function PageButton({
+  children,
+  disabled,
+  onClick,
+}: {
+  children: React.ReactNode;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      disabled={disabled}
+      onClick={onClick}
+      className="grid size-5 place-items-center rounded border border-[var(--rule)] text-[11px] leading-none text-[var(--text-dim)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:pointer-events-none disabled:opacity-30"
+    >
+      {children}
+    </button>
   );
 }
 
