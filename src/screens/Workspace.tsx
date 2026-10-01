@@ -91,6 +91,11 @@ export function Workspace() {
   const activeView = useAppStore((s) => s.activeView);
   const setActiveView = useAppStore((s) => s.setActiveView);
   const enabledViews = useAppStore((s) => s.enabledViews);
+  // 设置面板的开关在 store 里 —— 它有两个入口（工具条的齿轮，和事项分拣
+  // 菜单里那句「新建类型…」），跨组件的开关必须走共享状态
+  const settingsTab = useAppStore((s) => s.settingsTab);
+  const openSettings = useAppStore((s) => s.openSettings);
+  const closeSettings = useAppStore((s) => s.closeSettings);
   const viewMode = useAppStore((s) => s.viewMode);
   const compareOn = useAppStore((s) => s.compareOn);
   const setViewMode = useAppStore((s) => s.setViewMode);
@@ -124,7 +129,6 @@ export function Workspace() {
   const [preset, setPreset] = useState<ZoomPreset>("week");
   const [height, setHeight] = useState(0);
   const [gridWidth, setGridWidth] = useState(DEFAULT_GRID_WIDTH);
-  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const bodyRef = useRef<HTMLDivElement>(null);
   const vpRef = useRef<Viewport | null>(null);
@@ -488,7 +492,7 @@ export function Workspace() {
         />
 
         <button
-          onClick={() => setSettingsOpen(true)}
+          onClick={() => openSettings("appearance")}
           title="设置：着色、负责人、工作日历、数据"
           className="grid size-9 place-items-center rounded-lg text-[19px] leading-none text-[var(--text-dim)] transition-colors hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
         >
@@ -542,7 +546,9 @@ export function Workspace() {
       </div>
 
       <AnimatePresence>
-        {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}
+        {settingsTab != null && (
+          <Settings initialTab={settingsTab} onClose={closeSettings} />
+        )}
       </AnimatePresence>
 
       {/* 快速记录。挂在工作区根层而不是事项视图里 —— ⌘K 在五个视图下都能按，

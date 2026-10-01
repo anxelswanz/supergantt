@@ -736,13 +736,12 @@ function Row({
             ref={setSortAnchor}
             row={row}
             kinds={kinds}
-            onClick={() => {
-              if (row.source === "note") setSortOpen((v) => !v);
-            }}
+            // 实体行也能点 —— 改类型要先拆实体，代价在菜单里写明
+            onClick={() => setSortOpen((v) => !v)}
           />
         </span>
 
-        <RowMenu row={row} onOpenBlocked={onOpenBlocked} onPromote={onPromote} />
+        <RowMenu row={row} taskName={taskName} onOpenBlocked={onOpenBlocked} />
       </div>
 
       {/*
@@ -871,46 +870,45 @@ function GhostButton({
 /**
  * 右侧那个类型按钮 —— 这个视图里最高频的动作。
  *
- * 三种形态，刻意长得不一样：
+ * **三种形态都可点**，但点下去的后果差别很大，所以它们刻意长得不一样：
  *
- *   · **未分拣** —— 虚线框 + 「加入到事项」。它是一句召唤，不是一个状态标签：
- *     一条还没决定是什么的事项，唯一有意义的下一步就是点它
- *   · **已打类型** —— 实色标签 + 类型名 + ▾，还能改
- *   · **实体**（阻碍/风险）—— 实色标签，**不可点**：它们的身份由实体本身
- *     决定，不是一个能在这儿改的下拉项
+ *   · **未分拣** —— 虚线框 + 「加入到事项」。它是一句召唤：一条还没决定是
+ *     什么的事项，唯一有意义的下一步就是点它
+ *   · **已打类型** —— 实色标签 + 类型名。改它只是改一个字段
+ *   · **实体**（阻碍 / 风险）—— 实色标签。改它要**先拆掉实体**，
+ *     累计天数、顺延记录、归类都会随之消失，所以菜单里会把这件事写出来
+ *
+ * 实体行一度是不可点的，理由是「身份由实体本身决定」。那条理由站不住：
+ * 分错类型是常事（「这其实是个风险，不是阻碍」），而不给改的话用户唯一的
+ * 出路是删掉重记一遍 —— 连那句原话一起丢。能改、但把代价说清楚，更好。
  */
 const KindButton = forwardRef<
   HTMLButtonElement,
   { row: ItemRow; kinds: ItemKind[]; onClick: () => void }
 >(function KindButton({ row, kinds, onClick }, ref) {
   const unsorted = row.source === "note" && row.kind == null;
-  const editable = row.source === "note";
+  const entity = row.source !== "note";
   const color = kindColor(row.kind, kinds);
 
   return (
     <button
       ref={ref}
       onClick={onClick}
-      disabled={!editable}
       title={
         unsorted
           ? "还没决定这是什么 —— 点一下分类：阻碍 / 风险 / 代办 / 问题"
-          : editable
-            ? `${kindLabel(row.kind, kinds)}　点一下改分类`
-            : `${kindLabel(row.kind, kinds)}：这是一个实体，在看板和复盘里也算数`
+          : entity
+            ? `${kindLabel(row.kind, kinds)}：它在看板和复盘里也算数。点一下可以改类型（会拆掉这个实体）`
+            : `${kindLabel(row.kind, kinds)}　点一下改分类`
       }
-      className="shrink-0 rounded-md px-1.5 py-[3px] text-[9px] font-semibold leading-none transition-colors disabled:cursor-default"
+      className="shrink-0 rounded-md px-1.5 py-[3px] text-[9px] font-semibold leading-none transition-colors hover:brightness-95"
       style={
         unsorted
-          ? {
-              border: "1px dashed var(--rule)",
-              color: "var(--text-dim)",
-            }
+          ? { border: "1px dashed var(--rule)", color: "var(--text-dim)" }
           : { background: withAlpha(color, 0.14), color }
       }
     >
-      {unsorted ? `${SORT_ACTION_LABEL} ▾` : kindLabel(row.kind, kinds)}
-      {!unsorted && editable ? " ▾" : ""}
+      {unsorted ? `${SORT_ACTION_LABEL} ▾` : `${kindLabel(row.kind, kinds)} ▾`}
     </button>
   );
 });
@@ -975,14 +973,27 @@ function PriorityTag({
 /* ------------------------------------------------------------------ */
 
 /**
- * 分拣去向。
+ * 分拣 / 改类型的菜单。
  *
- * **阻碍和风险会创建真实实体，代办/问题/自定义只是打上类型。**
- * 这个区别不是实现细节，它是整条功能的核心（设计稿 §6.3）：一个只打标签的
- * 「阻碍」不会推排期、不会进复盘的归因图、不会让卡片进受阻列 —— 于是同一个词
- * 在三个地方指不同的事，用户没法知道哪个算数。
+ * ## 两组去向之间那条分隔线是整条功能的核心
  *
- * 所以菜单里这两组之间有一条分隔线，而且写明了前者「会建一条真实的阻碍/风险」。
+ * **阻碍和风险会创建真实实体，代办/问题/自定义只是打上类型。** 这个区别不是
+ * 实现细节（设计稿 §6.3）：一个只打标签的「阻碍」不会推排期、不会进复盘的
+ * 归因图、不会让卡片落进看板的受阻列 —— 于是同一个词在三个地方指不同的事，
+ * 用户没法知道哪个算数。所以菜单里写明前者「会建一条真实的实体」。
+ *
+ * ## 实体行改类型要先拆掉实体
+ *
+ * 从阻碍改成风险，不是改一个字段，是**删掉一段受阻、再建一条风险**。
+ * 那段区间累计的天数、顺延过的工期（pushed）、归类都随它消失 ——
+ * 一条阻碍的身份就是那段区间，区间没了它就不是同一条了。
+ *
+ * 菜单顶上因此有一句红字。不写的话，用户会以为这和改个标签一样轻，
+ * 而丢掉的是复盘时唯一能回答「时间去哪了」的那部分数据。
+ *
+ * 那句原话不会丢：拆实体的同时它被收回成一条事项（store.reclaimToNote），
+ * 然后按新类型重新分拣。两步都在这里编排，所以「改类型」和「分拣」走的是
+ * 同一套代码 —— 不会长出两种行为。
  */
 function SortMenu({
   anchor,
@@ -999,42 +1010,80 @@ function SortMenu({
   kinds: ItemKind[];
   onPromote: (noteId: number, target: PromoteTarget) => void;
 }) {
-  const noteId = row.note?.id;
-  const unpromote = useAppStore((s) => s.unpromoteNote);
-  const patch = useAppStore((s) => s.patchItemNote);
+  const store = useAppStore;
+  const openSettings = useAppStore((s) => s.openSettings);
+  const entity = row.source !== "note";
 
-  if (noteId == null) return null;
+  /**
+   * 拿到一个可以打类型的事项 id。
+   *
+   * 事项行直接就是它自己；实体行要先收回 —— 这一步会删掉实体，
+   * 是上面那段注释里说的「代价」真正发生的地方。
+   */
+  const noteIdFor = async (): Promise<number | null> => {
+    if (row.note) return row.note.id;
+    if (!entity) return null;
+    return store.getState().reclaimToNote({
+      source: row.source === "blocker" ? "blocker" : "risk",
+      // 分拣来的实体退回它原来那条事项，不是新建一条 —— 否则「谁在什么
+      // 时候记的」会被刷成现在
+      noteId: row.fromNoteId,
+      taskId: row.taskId,
+      periodId: row.blocker?.period.id,
+      riskId: row.risk?.id,
+      content: row.title,
+      priority: row.priority,
+    });
+  };
 
-  const pickKind = (key: string | null) => {
+  const pickKind = async (key: string | null) => {
     onClose();
-    void patch(noteId, { kind: key });
+    const id = await noteIdFor();
+    if (id == null) return;
+    await store.getState().patchItemNote(id, { kind: key });
+  };
+
+  const pickEntity = async (target: PromoteTarget) => {
+    onClose();
+    // 同类型点自己：什么都不做。否则会白拆一次实体再建一个一样的
+    if (row.kind === target) return;
+    const id = await noteIdFor();
+    if (id == null) return;
+    onPromote(id, target);
   };
 
   return (
-    <Popover anchor={anchor} open={open} onClose={onClose} width={204}>
+    <Popover anchor={anchor} open={open} onClose={onClose} width={212}>
+      {entity && (
+        <div
+          className="mx-1.5 mb-1 rounded border px-1.5 py-1 text-[9px] leading-snug"
+          style={{
+            borderColor: "rgba(244,63,94,0.3)",
+            background: "rgba(244,63,94,0.06)",
+            color: "#f43f5e",
+          }}
+        >
+          改类型会拆掉这条{kindLabel(row.kind, kinds)}：
+          {row.source === "blocker"
+            ? "累计天数、顺延过的工期、归类都会消失"
+            : "等级和处置说明都会消失"}
+          。那句原话会退回成一条事项。
+        </div>
+      )}
+
       <div className="px-2.5 pb-1 pt-0.5 text-[9px] leading-snug text-[var(--text-dim)]">
         会建一条真实的实体 —— 它会推排期、进复盘、上看板
       </div>
-      <MenuItem
-        onClick={() => {
-          onClose();
-          onPromote(noteId, "blocker");
-        }}
-      >
+      <MenuItem active={row.kind === "blocker"} onClick={() => void pickEntity("blocker")}>
         <span className="flex items-center gap-2">
           <span className="size-1.5 rounded-full" style={{ background: BLOCKER_KIND.color }} />
-          分拣为阻碍…
+          {row.kind === "blocker" ? "阻碍（当前）" : "改为阻碍…"}
         </span>
       </MenuItem>
-      <MenuItem
-        onClick={() => {
-          onClose();
-          onPromote(noteId, "risk");
-        }}
-      >
+      <MenuItem active={row.kind === "risk"} onClick={() => void pickEntity("risk")}>
         <span className="flex items-center gap-2">
           <span className="size-1.5 rounded-full" style={{ background: RISK_KIND.color }} />
-          分拣为风险…
+          {row.kind === "risk" ? "风险（当前）" : "改为风险…"}
         </span>
       </MenuItem>
 
@@ -1043,7 +1092,7 @@ function SortMenu({
         只是打上类型，留在事项里
       </div>
       {kinds.map((k) => (
-        <MenuItem key={k.key} active={row.kind === k.key} onClick={() => pickKind(k.key)}>
+        <MenuItem key={k.key} active={row.kind === k.key} onClick={() => void pickKind(k.key)}>
           <span className="flex items-center gap-2">
             <span className="size-1.5 rounded-full" style={{ background: k.color }} />
             <span className="min-w-0 flex-1 truncate">{k.label}</span>
@@ -1054,6 +1103,22 @@ function SortMenu({
         </MenuItem>
       ))}
 
+      {/*
+        自定义类型藏在设置里，而用户是在**这里**发现「没有我要的类型」的。
+        那一刻给一条直达的路，比让他自己去齿轮图标下面翻有用得多。
+      */}
+      <MenuItem
+        onClick={() => {
+          onClose();
+          openSettings("views");
+        }}
+      >
+        <span className="flex items-center gap-2 text-[var(--text-dim)]">
+          <span className="size-1.5 rounded-full border border-dashed border-[var(--text-dim)]" />
+          新建类型…
+        </span>
+      </MenuItem>
+
       {(row.kind != null || row.dangling) && (
         <>
           <MenuDivider />
@@ -1061,9 +1126,9 @@ function SortMenu({
             onClick={() => {
               onClose();
               // 悬挂的那条要走 unpromote（它要清掉 promotedKind/Ref）；
-              // 只打过类型的那条清掉 kind 就够了
-              if (row.dangling) void unpromote(noteId);
-              else pickKind(null);
+              // 实体行要拆实体；只打过类型的那条清掉 kind 就够了
+              if (row.dangling && row.note) void store.getState().unpromoteNote(row.note.id);
+              else void pickKind(null);
             }}
           >
             改回未分拣
@@ -1080,12 +1145,12 @@ function SortMenu({
 
 function RowMenu({
   row,
+  taskName,
   onOpenBlocked,
-  onPromote,
 }: {
   row: ItemRow;
+  taskName: string | null;
   onOpenBlocked: (ref: { taskId: number; periodId: string }) => void;
-  onPromote: (noteId: number, target: PromoteTarget) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
@@ -1131,6 +1196,11 @@ function RowMenu({
             打开阻碍详情…
           </MenuItem>
         )}
+        {/*
+          菜单项里**写明是哪条任务**。行上已经不显示关联任务了（见 Row 的
+          注释），一句「打开这条任务」等于让用户闭着眼点 —— 他看不出这一行
+          挂着的是哪条活，也就不知道点下去会跳到哪。
+        */}
         {row.taskId != null && (
           <MenuItem
             onClick={() => {
@@ -1138,7 +1208,7 @@ function RowMenu({
               store.getState().openDetail(row.taskId!);
             }}
           >
-            打开这条任务
+            打开 {taskName ?? `#${row.taskId}`}
           </MenuItem>
         )}
         {row.fromNoteId != null && (
@@ -1149,16 +1219,6 @@ function RowMenu({
             }}
           >
             撤销分拣（删掉这个实体）
-          </MenuItem>
-        )}
-        {row.source === "note" && row.note && !row.dangling && (
-          <MenuItem
-            onClick={() => {
-              setOpen(false);
-              onPromote(row.note!.id, "blocker");
-            }}
-          >
-            分拣为阻碍…
           </MenuItem>
         )}
 

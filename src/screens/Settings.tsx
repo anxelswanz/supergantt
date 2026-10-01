@@ -47,8 +47,18 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "data", label: "数据" },
 ];
 
-export function Settings({ onClose }: { onClose: () => void }) {
-  const [tab, setTab] = useState<Tab>("appearance");
+export function Settings({
+  onClose,
+  initialTab = "appearance",
+}: {
+  onClose: () => void;
+  /** 从哪一页打开。事项的分拣菜单会直接把人送到「视图」页 */
+  initialTab?: string;
+}) {
+  const [tab, setTab] = useState<Tab>(
+    // 认不出来的页签回退到外观，而不是白屏 —— 这个值是别处传进来的
+    (TABS.some((t) => t.id === initialTab) ? initialTab : "appearance") as Tab,
+  );
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

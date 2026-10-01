@@ -190,7 +190,8 @@ describe("事项视图", () => {
     // ⌥ 拖出来的那条阻碍：标题显示成「等料」（自己没写说明就用归类标签），
     // 右侧的类型按钮显示「阻碍」，附注行显示它卡了多久
     expect(screen.getByText("等料")).toBeTruthy();
-    expect(screen.getByText("阻碍")).toBeTruthy();
+    // 类型按钮带 ▾ —— 实体行的类型现在也能改（会拆掉实体，菜单里写明代价）
+    expect(screen.getByText("阻碍 ▾")).toBeTruthy();
     expect(screen.getByText(/已卡 \d+ 天/)).toBeTruthy();
   });
 
@@ -275,6 +276,87 @@ describe("快速记录", () => {
     // 存完不关窗：接着记下一条
     expect(screen.getByText("快速记录")).toBeTruthy();
     await waitFor(() => expect((input as HTMLInputElement).value).toBe(""));
+  });
+});
+
+describe("改类型", () => {
+  /**
+   * 实体行的类型**也能改**。它一度是不可点的，理由是「身份由实体本身决定」——
+   * 那条理由站不住：分错类型是常事（「这其实是个风险，不是阻碍」），不给改
+   * 的话用户唯一的出路是删掉重记一遍，连那句原话一起丢。
+   *
+   * 改的实现是「先把实体收回成一条事项，再按新类型分拣」。这里验的是
+   * 第一步真的发生了 —— 不是从事项分拣来的阻碍，收回时要新建一条事项承接
+   * 那句话，并把那段受阻从任务上摘掉。
+   */
+  it("⌥ 拖出来的阻碍改成代办：新建一条事项承接原话，受阻段被摘掉", async () => {
+    const store = await openWorkspace();
+    store.getState().setActiveView("items");
+    await screen.findByText("等料");
+    expect(store.getState().tasks.get(12)!.blocked).toHaveLength(1);
+
+    fireEvent.click(screen.getByText("阻碍 ▾"));
+    fireEvent.click(await screen.findByText("代办"));
+
+    // 原话被接住了 —— 它是不可再生的信息
+    await waitFor(() => {
+      const added = invoke.mock.calls.find(([c]) => c === "add_item_note");
+      expect(added).toBeTruthy();
+      expect((added![1] as Record<string, unknown>).name).toBe("等料");
+    });
+    // 实体真的被拆掉了
+    await waitFor(() => expect(store.getState().tasks.get(12)!.blocked).toHaveLength(0));
+  });
+
+  /** 点当前类型自己：什么都不做 —— 否则会白拆一次实体再建一个一样的 */
+  it("实体行点自己的类型不动数据", async () => {
+    const store = await openWorkspace();
+    store.getState().setActiveView("items");
+    await screen.findByText("等料");
+
+    fireEvent.click(screen.getByText("阻碍 ▾"));
+    fireEvent.click(await screen.findByText("阻碍（当前）"));
+
+    await new Promise((r) => setTimeout(r, 20));
+    expect(store.getState().tasks.get(12)!.blocked).toHaveLength(1);
+    expect(invoke.mock.calls.some(([c]) => c === "add_item_note")).toBe(false);
+  });
+
+  /** 菜单顶上必须把代价写出来 —— 改类型不是改一个标签 */
+  it("实体行的菜单写明改类型会拆掉实体", async () => {
+    const store = await openWorkspace();
+    store.getState().setActiveView("items");
+    await screen.findByText("等料");
+
+    fireEvent.click(screen.getByText("阻碍 ▾"));
+    expect(await screen.findByText(/改类型会拆掉这条阻碍/)).toBeTruthy();
+    expect(screen.getByText(/累计天数、顺延过的工期、归类都会消失/)).toBeTruthy();
+  });
+
+  /**
+   * 自定义类型藏在设置里，而用户是在分拣菜单前面发现「没有我要的类型」的。
+   * 那一刻要有一条直达的路。
+   */
+  it("分拣菜单里有「新建类型…」，直达设置的视图页", async () => {
+    const store = await openWorkspace();
+    store.getState().setActiveView("items");
+    await screen.findByText("下周一确认夹具方案");
+
+    fireEvent.click(screen.getByText("加入到事项 ▾"));
+    fireEvent.click(await screen.findByText("新建类型…"));
+
+    await waitFor(() => expect(store.getState().settingsTab).toBe("views"));
+    expect(await screen.findByText("事项类型")).toBeTruthy();
+  });
+
+  /** 行上不显示任务了，菜单项就必须说清楚要打开的是哪条 */
+  it("⋯ 菜单把任务名写在菜单项上", async () => {
+    const store = await openWorkspace();
+    store.getState().setActiveView("items");
+    await screen.findByText("等料");
+
+    fireEvent.click(screen.getAllByTitle("更多")[0]);
+    expect(await screen.findByText("打开 #12 电机安装")).toBeTruthy();
   });
 });
 

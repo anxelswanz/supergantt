@@ -226,6 +226,16 @@ interface AppState {
    */
   pendingSortNoteId: number | null;
 
+  /**
+   * 设置面板：null = 关着，字符串 = 开在那一页。
+   *
+   * 本来是 Workspace 的局部 state。挪到 store 是因为出现了第二个入口 ——
+   * 事项的分拣菜单里那句「新建类型…」要直接把人送到「设置 → 视图」。
+   * 自定义类型藏在设置里，而用户是在分拣菜单前面发现「没有我要的类型」的，
+   * 那一刻给一条直达的路，比让他自己去齿轮图标下面翻有用得多。
+   */
+  settingsTab: string | null;
+
   /** 全局下一个可用的任务 id，由 load_project 给出。见 nextId 的说明 */
   nextTaskId: number;
   saving: boolean;
@@ -291,6 +301,9 @@ interface AppState {
 
   setQuickNoteOpen: (open: boolean) => void;
   setPendingSortNote: (id: number | null) => void;
+  /** 打开设置面板。传页签 id 可以直接落在那一页 */
+  openSettings: (tab?: string) => void;
+  closeSettings: () => void;
   loadItemNotes: () => Promise<void>;
   loadItemKinds: () => Promise<void>;
   /** 记一条。返回新建的那条，录入弹窗据此清空标题继续记 */
@@ -317,6 +330,24 @@ interface AppState {
   promoteToRisk: (noteId: number, taskId: number, level: number) => Promise<void>;
   /** 撤销分拣：删掉实体，事项退回「未分拣」 */
   unpromoteNote: (noteId: number) => Promise<void>;
+  /**
+   * 把一条实体（阻碍 / 风险）**收回成事项**，返回那条事项的 id。
+   *
+   * 它是「改类型」的前半步，也是「我当初分错了」唯一的退路。两种情形：
+   *   · 本来就是从事项分拣来的 —— 退回那条事项（unpromoteNote）
+   *   · 不是（⌥ 拖甘特条标的阻碍、任务详情里直接建的风险）—— 新建一条
+   *     事项承接它的内容，再删掉实体
+   */
+  reclaimToNote: (args: {
+    source: "blocker" | "risk";
+    /** 来源事项；null = 这条实体不是分拣来的 */
+    noteId: number | null;
+    taskId: number | null;
+    periodId?: string;
+    riskId?: number;
+    content: string;
+    priority: 0 | 1 | 2 | 3 | null;
+  }) => Promise<number | null>;
   saveItemKind: (
     key: string,
     label: string,
@@ -490,6 +521,7 @@ export const useAppStore = create<AppState>((set, get) => {
     itemKinds: BUILTIN_KINDS,
     quickNoteOpen: false,
     pendingSortNoteId: null,
+    settingsTab: null,
     noteDraft: null,
     nextTaskId: 1,
     saving: false,
@@ -622,6 +654,14 @@ export const useAppStore = create<AppState>((set, get) => {
 
     setPendingSortNote(id) {
       set({ pendingSortNoteId: id });
+    },
+
+    openSettings(tab = "appearance") {
+      set({ settingsTab: tab });
+    },
+
+    closeSettings() {
+      set({ settingsTab: null });
     },
 
     async loadItemNotes() {
@@ -810,6 +850,38 @@ export const useAppStore = create<AppState>((set, get) => {
         }
       }
       await Promise.all([get().loadItemNotes(), get().refreshRisks()]);
+    },
+
+    /**
+     * 实体 → 事项。见接口上那段注释。
+     *
+     * 为什么要有这条路：类型分错了是常事（「这其实是个风险，不是阻碍」），
+     * 而阻碍和风险是实体，不能像标签那样改一下字段就完事 —— 必须先把实体
+     * 拆掉。拆掉之后那句话得有地方待着，否则用户唯一的选择是删掉重记一遍，
+     * 而「谁在什么时候说的」就此丢失。
+     *
+     * **会丢东西，调用方必须说清楚**：阻碍累计的天数、顺延记录（pushed）、
+     * 归类都随实体一起消失；风险的等级和处置说明同理。这不是可以优化掉的
+     * 实现细节 —— 一条阻碍的身份就是那段区间，区间没了它就不是同一条了。
+     */
+    async reclaimToNote({ source, noteId, taskId, periodId, riskId, content, priority }) {
+      if (noteId != null) {
+        // 分拣来的那种：库层在一个事务里删掉风险 / 返回引用让我们摘掉阻碍
+        await get().unpromoteNote(noteId);
+        return noteId;
+      }
+
+      // 不是分拣来的：先把内容接住，再删实体。顺序是定的 —— 反过来的话
+      // 新建失败就等于静默删掉了一条阻碍
+      const row = await get().addItemNote(content, priority ?? 2, null, taskId);
+      if (!row) return null;
+
+      if (source === "blocker" && taskId != null && periodId) {
+        get().removeBlocked(taskId, periodId);
+      } else if (source === "risk" && riskId != null) {
+        await get().removeRisk(riskId);
+      }
+      return row.id;
     },
 
     async saveItemKind(key, label, color, requiresNote) {
