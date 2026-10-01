@@ -7,6 +7,7 @@ import { today } from "../gantt/time";
 import { PRIORITY_COLORS, PRIORITY_LABELS } from "../gantt/theme";
 import { shortcut } from "../core/keys";
 import { FilterSelect, type SelectOption } from "./FilterSelect";
+import { GrowingTextarea, type GrowingTextareaHandle } from "./GrowingTextarea";
 
 /**
  * 快速记录（`⌘K` / `Ctrl+K`）。
@@ -51,7 +52,7 @@ export function QuickNote() {
   /** 有下拉开着时 Enter 归它，不触发保存 */
   const dropdownOpen = useRef(0);
 
-  const nameRef = useRef<HTMLInputElement>(null);
+  const nameRef = useRef<GrowingTextareaHandle>(null);
 
   const tasks = useMemo(
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -189,13 +190,30 @@ export function QuickNote() {
             )}
           </div>
 
-          <input
+          {/*
+            会换行、会长高的多行框。一条事项常常是一整句话，单行框里它会
+            往左滚出去 —— 而这个弹窗的全部意义就是让人把那句话原样倒出来。
+
+            键盘：↵ 存下并接着记、⇧↵ 换行、⌘↵ 存下并分拣。
+            三者都在这里处理，不交给弹窗那层的 onKeyDown —— 多行框必须
+            stopPropagation（工作区在 window 上监听裸 ↵「新建任务」），
+            所以冒泡上去那条路在这里本来就是断的。
+          */}
+          <GrowingTextarea
             ref={nameRef}
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={setName}
+            onSubmit={() => void submit(false)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                void submit(true);
+              }
+            }}
             placeholder="会上提到的那件事…"
-            /* 弹窗里它是唯一的主角，比事项视图那个常驻输入行再高一点 */
-            className="h-12 w-full rounded-lg border border-[var(--rule)] bg-[var(--surface-alt)] px-3 text-[14px] text-[var(--text)] outline-none focus:border-[var(--accent)]"
+            minHeight={56}
+            maxHeight={168}
+            className="w-full rounded-lg border border-[var(--rule)] bg-[var(--surface-alt)] px-3 py-2.5 text-[14px] leading-relaxed text-[var(--text)] focus:border-[var(--accent)]"
           />
 
           {/* Tab 顺序就是这个顺序：标题 → 负责人 → 任务 → 优先级 */}
@@ -235,6 +253,9 @@ export function QuickNote() {
         <div className="flex items-center gap-3 border-t border-[var(--rule)] bg-[var(--surface-alt)] px-3.5 py-2 text-[10px] text-[var(--text-dim)]">
           <span>
             <Key>↵</Key> 保存并继续
+          </span>
+          <span>
+            <Key>⇧↵</Key> 换行
           </span>
           <span>
             <Key>{shortcut("mod", "↵")}</Key> 存下并分拣

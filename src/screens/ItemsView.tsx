@@ -26,6 +26,7 @@ import {
   type ItemRow,
 } from "../core/items";
 import { MenuDivider, MenuItem, Popover } from "./Popover";
+import { GrowingTextarea, type GrowingTextareaHandle } from "./GrowingTextarea";
 import { FilterSelect, type SelectOption } from "./FilterSelect";
 import type { ItemKind, Person } from "../db/api";
 import { BlockedDetail } from "./BlockedDetail";
@@ -412,7 +413,7 @@ function InlineComposer({ tasks, day }: { tasks: ResolvedTask[]; day: number }) 
   const [priority, setPriority] = useState<Priority>(2);
   const touchedPerson = useRef(false);
   const dropdownOpen = useRef(0);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<GrowingTextareaHandle>(null);
 
   const taskOptions = useMemo<SelectOption<number | null>[]>(() => {
     const rank = (t: ResolvedTask) => {
@@ -442,25 +443,27 @@ function InlineComposer({ tasks, day }: { tasks: ResolvedTask[]; day: number }) 
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-[var(--rule)] bg-[var(--surface-alt)] px-4 py-2">
       {/*
-        标题框比旁边那几个下拉**明显大一号**：44px 对 26px，差着一截。
+        标题框是一个**会换行、会长高**的多行框，不是单行输入框。
+        一条事项常常是一整句话（「供应商说电机下周才能到，要不要先上二号线」），
+        单行框里它会往左滚出去，写到一半就无法回头检查自己写了什么。
 
-        这一行里只有它是必填的，其余三个都可以不动就 Enter 存下 ——
-        版面上的大小差别要把这件事说出来，否则四个等高的控件读起来像四个
-        同等重要的字段，而那恰好是「录入要快」的反面。
-
-        高度写死成 h-11 而不是靠 padding 撑：padding 撑出来的高度会随字号
-        和行高变，而这一行的视觉重心不该因为将来某次改字号就悄悄塌回去。
+        它也比旁边那三个下拉明显大一号：这一行里只有它是必填的，其余三个
+        不动也能直接 Enter 存下 —— 版面上的大小差别要把这件事说出来，
+        否则四个等高的控件读起来像四个同等重要的字段。
       */}
-      <input
+      <GrowingTextarea
         ref={inputRef}
         value={name}
-        onChange={(e) => setName(e.target.value)}
-        onKeyDown={(e) => {
-          e.stopPropagation();
-          if (e.key === "Enter" && dropdownOpen.current === 0) void submit();
+        onChange={setName}
+        onSubmit={() => {
+          // 下拉开着时 Enter 归下拉。正常情况下焦点在下拉自己的搜索框里，
+          // 这个回调根本不会被调到 —— 留着是因为规则只写在一处就够了
+          if (dropdownOpen.current === 0) void submit();
         }}
-        placeholder="记一条…（↵ 保存并接着记）"
-        className="h-11 min-w-[200px] flex-1 rounded-lg border border-[var(--rule)] bg-[var(--surface)] px-3 text-[13px] text-[var(--text)] outline-none focus:border-[var(--accent)]"
+        placeholder="记一条…（↵ 保存并接着记，⇧↵ 换行）"
+        minHeight={44}
+        maxHeight={120}
+        className="min-w-[200px] flex-1 rounded-lg border border-[var(--rule)] bg-[var(--surface)] px-3 py-2.5 text-[13px] leading-relaxed text-[var(--text)] focus:border-[var(--accent)]"
       />
       <FilterSelect
         value={personId}

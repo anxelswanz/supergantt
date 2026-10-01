@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { resolve, type Task } from "../gantt/model";
 import { PRIORITY_COLORS, PRIORITY_LABELS } from "../gantt/theme";
@@ -23,6 +23,7 @@ import { Avatar } from "./Avatar";
 import { MenuItem, Popover } from "./Popover";
 import { DatePicker } from "./DatePicker";
 import { ALT_LABEL, shortcut } from "../core/keys";
+import { GrowingTextarea } from "./GrowingTextarea";
 
 /**
  * 任务详情抽屉。
@@ -614,6 +615,7 @@ function RiskSection({
             onChange={setDraft}
             onSubmit={() => void add()}
             placeholder={`记一条风险…（${shortcut("shift", "↵")} 换行）`}
+            className="min-w-0 flex-1 rounded-md border border-[var(--rule)] bg-[var(--surface-alt)] px-2 py-1 text-[11px] leading-relaxed focus:border-[var(--accent)]"
           />
         </div>
       ) : (
@@ -743,49 +745,6 @@ function CommentRow({ comment, onChanged }: { comment: Comment; onChanged: () =>
  * 测高的办法是先把 height 清零再读 scrollHeight —— 不清零的话 scrollHeight
  * 永远不小于当前高度，框只会变高、删掉文字后再也缩不回去。
  */
-function GrowingTextarea({
-  value,
-  onChange,
-  onSubmit,
-  placeholder,
-  maxHeight = 120,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  onSubmit: () => void;
-  placeholder?: string;
-  maxHeight?: number;
-}) {
-  const ref = useRef<HTMLTextAreaElement>(null);
-
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    el.style.height = "0px";
-    el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
-  }, [value, maxHeight]);
-
-  return (
-    <textarea
-      ref={ref}
-      value={value}
-      rows={1}
-      placeholder={placeholder}
-      onChange={(e) => onChange(e.target.value)}
-      onKeyDown={(e) => {
-        // 详情抽屉浮在工作区之上，工作区在 window 上监听 Enter「新建任务」。
-        // 不拦住的话，敲完风险按回车会顺手建出一条空任务。
-        e.stopPropagation();
-        if (e.key === "Enter" && !e.shiftKey) {
-          e.preventDefault();
-          onSubmit();
-        }
-      }}
-      className="min-w-0 flex-1 resize-none overflow-y-auto rounded-md border border-[var(--rule)] bg-[var(--surface-alt)] px-2 py-1 text-[11px] leading-relaxed outline-none focus:border-[var(--accent)]"
-    />
-  );
-}
-
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="min-w-0">

@@ -278,6 +278,49 @@ describe("快速记录", () => {
   });
 });
 
+describe("常驻录入行", () => {
+  /**
+   * 标题框是**会换行的多行框**，不是单行输入框。
+   *
+   * 一条事项常常是一整句话，单行框里它会往左滚出去 —— 写到一半就无法
+   * 回头检查自己写了什么。换成 textarea 之后随之而来的问题是「回车是
+   * 提交还是换行」，所以这里把那条分工钉住：裸 ↵ 提交、⇧↵ 换行。
+   */
+  it("是 textarea：⇧↵ 换行不提交，裸 ↵ 才提交", async () => {
+    const store = await openWorkspace();
+    store.getState().setActiveView("items");
+
+    const box = (await screen.findByPlaceholderText(/^记一条…/)) as HTMLTextAreaElement;
+    expect(box.tagName).toBe("TEXTAREA");
+
+    fireEvent.change(box, { target: { value: "供应商说电机下周才能到" } });
+    fireEvent.keyDown(box, { key: "Enter", shiftKey: true });
+    expect(invoke.mock.calls.some(([c]) => c === "add_item_note")).toBe(false);
+
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() =>
+      expect(invoke.mock.calls.some(([c]) => c === "add_item_note")).toBe(true),
+    );
+  });
+
+  /**
+   * 工作区在 window 上监听裸 Enter「新建任务」、Backspace「删除任务」。
+   * 多行框不 stopPropagation 的话，在这里敲完回车会顺手建出一条空任务 ——
+   * 而用户完全看不出那是怎么发生的。
+   */
+  it("回车不会漏到工作区去新建任务", async () => {
+    const store = await openWorkspace();
+    store.getState().setActiveView("items");
+    const before = store.getState().tasks.size;
+
+    const box = await screen.findByPlaceholderText(/^记一条…/);
+    fireEvent.change(box, { target: { value: "随手记一条" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+
+    expect(store.getState().tasks.size).toBe(before);
+  });
+});
+
 describe("视图开关", () => {
   it("关掉看板，它的按钮就消失，⌘2 顺位给时间线", async () => {
     const store = await openWorkspace();
