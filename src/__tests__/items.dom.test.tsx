@@ -187,9 +187,11 @@ describe("事项视图", () => {
     store.getState().setActiveView("items");
 
     expect(await screen.findByText("下周一确认夹具方案")).toBeTruthy();
-    // ⌥ 拖出来的那条阻碍：显示成「等料」（自己没写说明就用归类标签）
+    // ⌥ 拖出来的那条阻碍：标题显示成「等料」（自己没写说明就用归类标签），
+    // 右侧的类型按钮显示「阻碍」，附注行显示它卡了多久
     expect(screen.getByText("等料")).toBeTruthy();
     expect(screen.getByText("阻碍")).toBeTruthy();
+    expect(screen.getByText(/已卡 \d+ 天/)).toBeTruthy();
   });
 
   it("已关闭的折叠在底部，展开才看得到", async () => {
@@ -205,13 +207,33 @@ describe("事项视图", () => {
     expect(screen.getByText("结论：打过电话了")).toBeTruthy();
   });
 
-  it("未分拣的那条显示成「未分拣」，并且不能关闭", async () => {
+  /**
+   * 未分拣那一行：右侧是一句召唤（「加入到事项 ▾」），而圆圈点不动 ——
+   * 还没决定它是什么，谈不上完成。
+   */
+  it("未分拣的那条给出「加入到事项」，并且不能关闭", async () => {
     const store = await openWorkspace();
     store.getState().setActiveView("items");
 
     await screen.findByText("下周一确认夹具方案");
-    const circle = screen.getByTitle("还没分拣的事项不能关闭：先决定它是什么");
+    expect(screen.getByText("加入到事项 ▾")).toBeTruthy();
+
+    const circle = screen.getByTitle(
+      "还没加入到事项分类里，谈不上完成 —— 先决定它是什么",
+    );
     expect((circle as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  /** 行上不再有负责人头像和任务名两列 —— 信息退到悬停里，不占版面 */
+  it("行上不显示关联任务和负责人，但悬停还查得到", async () => {
+    const store = await openWorkspace();
+    store.getState().setActiveView("items");
+
+    await screen.findByText("下周一确认夹具方案");
+    // 任务名不作为独立文本出现在列表里
+    expect(screen.queryByText("#12 电机安装")).toBe(null);
+    // 但那条阻碍的标题带着它 —— 要看的时候悬停就有
+    expect(screen.getByTitle(/关联：#12 电机安装/)).toBeTruthy();
   });
 });
 

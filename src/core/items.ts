@@ -64,6 +64,16 @@ export const RISK_KIND = { key: "risk", label: "风险", color: "#f59e0b" } as c
 /** 未分拣那一行的样子。灰的 —— 它在喊「还需要你做一个决定」，不该抢颜色 */
 export const UNSORTED_KIND = { key: "", label: "未分拣", color: "#94a3b8" } as const;
 
+/**
+ * 行上那个按钮的文案，和筛选器里的「未分拣」刻意用两个词。
+ *
+ * 筛选器问的是**状态**（「现在有哪些还没想清楚」），所以那里是「未分拣」；
+ * 行上那个按钮是一个**动作**，用户点它是为了做一件事，所以是动词短语。
+ * 同一个概念在「描述它」和「做它」两个位置用不同措辞是对的 ——
+ * 把按钮也写成「未分拣」，读起来像在陈述现状，没人会想到它能点。
+ */
+export const SORT_ACTION_LABEL = "加入到事项";
+
 /** 显示某个类型 key 用什么标签。认不出来的 key 原样显示，不吞掉 */
 export function kindLabel(key: string | null, kinds: ItemKind[]): string {
   if (key == null) return UNSORTED_KIND.label;
