@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ComponentType,
@@ -15,11 +16,13 @@ import { today } from "../gantt/time";
 import { useAppStore } from "../store/useAppStore";
 import { isMod } from "../core/keys";
 import { canEdit, VIEW_LABELS, type ViewMode } from "../core/viewMode";
-import { APP_VIEWS } from "../core/views";
+import { APP_VIEWS, type BuiltinView } from "../core/views";
 import { useViews, ViewRenderer, type ViewEntry } from "../plugins/usePlugins";
 import { BoardView } from "./BoardView";
 import { TimelineView } from "./TimelineView";
 import { ReviewView } from "./ReviewView";
+import { ItemsView } from "./ItemsView";
+import { QuickNote } from "./QuickNote";
 import { api } from "../db/api";
 import { Settings } from "./Settings";
 import { TaskDetail } from "./TaskDetail";
@@ -48,14 +51,19 @@ const GRID_WIDTH_KEY = "grid_width";
  * 内置视图的清单项。元信息照抄 core/views.ts，render 留空 —— 组件由下面的
  * BUILTIN_BODIES 按 key 给。分开放是为了让视图清单（插件系统会读它）
  * 不必持有内置组件的引用：插件系统出了问题，内置视图的渲染路径不受影响。
+ *
+ * `enabled` 是用户在设置里关掉的那几个。**过滤发生在这里，不在渲染时**：
+ * ⌘1–⌘9 的编号跟着这份清单重新算，所以关掉看板之后 ⌘2 自动变成时间线，
+ * 中间不留一个按了没反应的死键。
  */
-const BUILTIN_VIEWS: ViewEntry[] = APP_VIEWS.map((v) => ({
-  key: v.key,
-  label: v.label,
-  hint: v.hint,
-  pluginId: "builtin",
-  render: null,
-}));
+const builtinViews = (enabled: BuiltinView[]): ViewEntry[] =>
+  APP_VIEWS.filter((v) => enabled.includes(v.key)).map((v) => ({
+    key: v.key,
+    label: v.label,
+    hint: v.hint,
+    pluginId: "builtin",
+    render: null,
+  }));
 
 /**
  * 内置视图 key → 组件。
@@ -67,6 +75,7 @@ const BUILTIN_BODIES: Record<string, ComponentType> = {
   board: BoardView,
   timeline: TimelineView,
   review: ReviewView,
+  items: ItemsView,
 };
 
 /** ⌘1–⌘9 切视图。九个够用了；再多工具的快捷键就比工具本身还重要了 */
@@ -81,6 +90,7 @@ export function Workspace() {
   const detailId = useAppStore((s) => s.detailId);
   const activeView = useAppStore((s) => s.activeView);
   const setActiveView = useAppStore((s) => s.setActiveView);
+  const enabledViews = useAppStore((s) => s.enabledViews);
   const viewMode = useAppStore((s) => s.viewMode);
   const compareOn = useAppStore((s) => s.compareOn);
   const setViewMode = useAppStore((s) => s.setViewMode);
@@ -92,15 +102,21 @@ export function Workspace() {
    * 内置的元信息来自 core/views.ts（那份清单不知道插件存在），插件的那部分
    * 来自注册表。合并只发生在这里 —— core/views.ts 保持对插件系统零依赖。
    */
-  const views = useViews(BUILTIN_VIEWS);
+  // memo 是必须的，不是优化：useViews 把它写进了依赖（见那里的注释），
+  // 传一个就地构造的字面量会让视图清单每帧重建
+  const builtin = useMemo(() => builtinViews(enabledViews), [enabledViews]);
+  const views = useViews(builtin);
 
   /**
    * 真正要渲染的那个视图。
    *
    * activeView 是从库里读回来的字符串，它记的是**上次关掉时**的视图 ——
-   * 那个插件现在可能已经被删掉或者禁用了。查不到就回退到甘特：一个已经不
-   * 存在的视图 key 不该让整个工作区白屏，而甘特是唯一一个永远在的、
-   * 且必然有意义的视图。
+   * 那个插件现在可能已经被删掉或者禁用了，或者那个内置视图被用户在设置里
+   * 关掉了。查不到就回退到甘特：一个已经不存在的视图 key 不该让整个工作区
+   * 白屏，而甘特是唯一一个永远在的、且必然有意义的视图。
+   *
+   * 两种成因共用这一条兜底，所以「关掉看板再重启」和「删掉插件再重启」
+   * 走的是同一段代码 —— 只有一条路径需要是对的。
    */
   const active = views.find((v) => v.key === activeView) ?? views[0];
 
@@ -227,6 +243,18 @@ export function Workspace() {
         e.shiftKey ? store.redo() : store.undo();
         return;
       }
+      /**
+       * ⌘K 快速记录。和 ⌘Z 一样放在 inInput 之前 —— 它是全局的。
+       *
+       * 「正在输入框里打字时不响应」这条默认规矩在这里是错的：事情不挑你
+       * 在干什么时发生。你正在给某个任务改名，同事推门说了一句要记的话 ——
+       * 那一刻要是按 ⌘K 没反应，这个功能就白做了。
+       */
+      if (isMod(e) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        store.setQuickNoteOpen(true);
+        return;
+      }
       if (inInput) return;
 
       // 增删任务、缩进这些结构性操作只属于计划表
@@ -340,7 +368,7 @@ export function Workspace() {
         <div className="ml-1 flex items-center gap-1 rounded-full bg-[var(--surface-alt)] p-1">
           {views.map((v, i) => (
             <Fragment key={v.key}>
-              {i === APP_VIEWS.length && views.length > APP_VIEWS.length && (
+              {i === enabledViews.length && views.length > enabledViews.length && (
                 <span className="mx-0.5 h-3 w-px bg-[var(--rule)]" />
               )}
               <button
@@ -517,6 +545,10 @@ export function Workspace() {
         {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}
       </AnimatePresence>
 
+      {/* 快速记录。挂在工作区根层而不是事项视图里 —— ⌘K 在五个视图下都能按，
+          而事项视图多半没开着 */}
+      <QuickNote />
+
       {/* 状态栏：把快捷键摆在明面上，否则没人会发现它们 */}
       <div className="flex shrink-0 items-center gap-4 border-t border-[var(--rule)] px-3 py-1.5 text-[10px] text-[var(--text-dim)]">
         <span className="font-medium text-[var(--text)]">
@@ -527,6 +559,7 @@ export function Workspace() {
         <span>⌘] / ⌘[ 缩进</span>
         <span>⌘Z 撤销</span>
         <span>⌫ 删除</span>
+        <span className="font-medium text-[var(--text)]">⌘K 记一条</span>
         <HintsFor view={active} viewMode={viewMode} />
       </div>
     </motion.div>
@@ -576,6 +609,16 @@ function HintsFor({ view, viewMode }: { view: ViewEntry; viewMode: ViewMode }) {
       );
     case "review":
       return <span className="ml-auto">只读 · 数据来自计划与实施两组日期的差</span>;
+    case "items":
+      return (
+        <>
+          <span>点类型标签分拣</span>
+          <span>点圆圈关闭</span>
+          <span className="ml-auto">
+            按记录时间倒序 · 阻碍和风险是实体，在这里改会同步到看板和复盘
+          </span>
+        </>
+      );
     default:
       // 插件视图：宿主猜不出它的快捷键，就显示它自己写的那句提示，
       // 并标明它来自插件 —— 出了问题用户要知道该去找谁

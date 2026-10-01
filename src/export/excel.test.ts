@@ -49,6 +49,7 @@ function risk(over: Partial<Risk> & { id: number; taskId: number }): Risk {
     createdAt: Math.floor(new Date(2026, 7, 1, 9, 5).getTime() / 1000),
     resolvedAt: null,
     resolution: null,
+    priority: null,
     ...over,
   };
 }

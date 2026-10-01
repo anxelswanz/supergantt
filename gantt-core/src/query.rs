@@ -383,7 +383,7 @@ pub fn load_task_notes(conn: &Connection, task_id: i64) -> Result<TaskNotes> {
         let mut stmt = conn
             .prepare(
                 "SELECT id, task_id, content, level, resolved, created_at,
-                        resolved_at, resolution
+                        resolved_at, resolution, priority
                  FROM risks WHERE task_id = ?1
                  ORDER BY resolved, level, created_at DESC",
             )
@@ -404,6 +404,7 @@ pub fn load_task_notes(conn: &Connection, task_id: i64) -> Result<TaskNotes> {
                     created_at: r.get(5)?,
                     resolved_at: r.get(6)?,
                     resolution: r.get(7)?,
+                    priority: r.get(8)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -465,7 +466,7 @@ pub fn load_project_risks(conn: &Connection, project_id: i64) -> Result<Vec<Risk
     let mut stmt = conn
         .prepare(
             "SELECT r.id, r.task_id, r.content, r.level, r.resolved, r.created_at,
-                    r.resolved_at, r.resolution
+                    r.resolved_at, r.resolution, r.priority
              FROM risks r JOIN tasks t ON t.id = r.task_id
              WHERE t.project_id = ?1
              ORDER BY r.resolved, r.level, r.created_at",
@@ -482,6 +483,7 @@ pub fn load_project_risks(conn: &Connection, project_id: i64) -> Result<Vec<Risk
                 created_at: r.get(5)?,
                 resolved_at: r.get(6)?,
                 resolution: r.get(7)?,
+                priority: r.get(8)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -511,6 +513,9 @@ pub fn add_risk(conn: &Connection, task_id: i64, content: String, level: i64) ->
         created_at: ts,
         resolved_at: None,
         resolution: None,
+        // 从这个入口建的风险没有优先级 —— 只有「从事项分拣过来」那条路
+        // 才有一个用户刚刚做过的优先级判断需要带过来（promote_note_to_risk）
+        priority: None,
     })
 }
 
@@ -857,4 +862,442 @@ pub fn list_settings_with_prefix(conn: &Connection, prefix: String) -> Result<Ve
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     Ok(rows)
+}
+
+/* ------------------------------------------------------------------ */
+/* 事项（QuickNote）                                                    */
+/* ------------------------------------------------------------------ */
+
+fn map_item_note(r: &rusqlite::Row) -> rusqlite::Result<ItemNote> {
+    Ok(ItemNote {
+        id: r.get(0)?,
+        project_id: r.get(1)?,
+        name: r.get(2)?,
+        kind: r.get(3)?,
+        priority: r.get(4)?,
+        person_id: r.get(5)?,
+        task_id: r.get(6)?,
+        promoted_kind: r.get(7)?,
+        promoted_ref: r.get(8)?,
+        closed_at: r.get(9)?,
+        resolution: r.get(10)?,
+        created_at: r.get(11)?,
+        updated_at: r.get(12)?,
+    })
+}
+
+const ITEM_NOTE_COLS: &str = "id, project_id, name, kind, priority, person_id, task_id, \
+                              promoted_kind, promoted_ref, closed_at, resolution, \
+                              created_at, updated_at";
+
+/// 一个项目的全部事项，**按创建时间倒序**。
+///
+/// 排序定在库里而不是前端：事项视图、将来的导出都要用同一个顺序。
+/// 倒序是产品决定 —— 刚记下的那条必须在最上面，否则「快」这个唯一的
+/// 核心指标在第二条就丢了。`id DESC` 兜住同一秒内连记两条的情况。
+pub fn load_item_notes(conn: &Connection, project_id: i64) -> Result<Vec<ItemNote>> {
+    let sql =
+        format!("SELECT {ITEM_NOTE_COLS} FROM item_notes WHERE project_id = ?1 ORDER BY created_at DESC, id DESC");
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![project_id], map_item_note)
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+fn read_item_note(conn: &Connection, id: i64) -> Result<ItemNote> {
+    let sql = format!("SELECT {ITEM_NOTE_COLS} FROM item_notes WHERE id = ?1");
+    conn.query_row(&sql, params![id], map_item_note)
+        .map_err(|_| "事项不存在".to_string())
+}
+
+/// 记一条事项。
+///
+/// **不收类型。** 分拣是分开的动作（设计稿 §4.2）：录入界面每多一个字段，
+/// 记下来的概率就低一分，而「这是什么」往往要等记完才想清楚。
+pub fn add_item_note(
+    conn: &Connection,
+    project_id: i64,
+    name: String,
+    priority: i64,
+    person_id: Option<i64>,
+    task_id: Option<i64>,
+) -> Result<ItemNote> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("事项内容不能为空".into());
+    }
+    let priority = priority.clamp(0, 3);
+    let ts = unix_now();
+    conn.execute(
+        "INSERT INTO item_notes (project_id, name, priority, person_id, task_id,
+                                 created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        params![project_id, name, priority, person_id, task_id, ts],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(ItemNote {
+        id: conn.last_insert_rowid(),
+        project_id,
+        name,
+        kind: None,
+        priority,
+        person_id,
+        task_id,
+        promoted_kind: None,
+        promoted_ref: None,
+        closed_at: None,
+        resolution: None,
+        created_at: ts,
+        updated_at: ts,
+    })
+}
+
+/// 改一条事项的字段：标题、类型、优先级、负责人、关联任务。
+///
+/// **不碰关闭状态，也不碰晋升去向。** 关闭要走 `close_item_note`（那条路强制
+/// 按类型检查结论），分拣要走 `promote_*`（那条路要创建实体）。从这里顺手
+/// 把 closed_at 一起改掉，等于给自己留了一个绕过记录的后门 —— 和
+/// `update_risk` 有意不碰 `resolved` 是同一条规矩。
+///
+/// `kind` 传 None 就是改回「未分拣」。那是一个合法的目标状态，不是清空操作。
+pub fn update_item_note(
+    conn: &Connection,
+    id: i64,
+    name: String,
+    kind: Option<String>,
+    priority: i64,
+    person_id: Option<i64>,
+    task_id: Option<i64>,
+) -> Result<()> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("事项内容不能为空".into());
+    }
+    // 认不出来的类型一律拒绝。允许写进一个不存在的 key，列表里那一行会
+    // 既不是「未分拣」也显示不出标签 —— 一个无法从界面上修好的状态
+    if let Some(k) = &kind {
+        let known: i64 = conn
+            .query_row("SELECT COUNT(*) FROM item_kinds WHERE key = ?1", params![k], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        if known == 0 {
+            return Err(format!("没有名为「{k}」的事项类型"));
+        }
+    }
+    let n = conn
+        .execute(
+            "UPDATE item_notes
+                SET name = ?2, kind = ?3, priority = ?4, person_id = ?5, task_id = ?6,
+                    updated_at = ?7
+              WHERE id = ?1",
+            params![id, name, kind, priority.clamp(0, 3), person_id, task_id, unix_now()],
+        )
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Err("事项不存在".into());
+    }
+    Ok(())
+}
+
+/**
+ * 关闭一条事项。返回关闭时刻（Unix 秒）。
+ *
+ * 关闭规则**按类型区分**，而且在库层强制（设计稿 §5.4）：
+ *
+ *   · 未分拣        —— 不能关。还没决定它是什么，谈不上完成
+ *   · 已晋升成实体  —— 不能从这里关。阻碍要收区间、风险要写处置说明，
+ *                      两者各有自己的关闭路径，从这里关会留下
+ *                      「事项已关、实体还开着」的两份真相
+ *   · requires_note —— 必须带结论
+ *   · 其余（代办）  —— 单击即关
+ *
+ * UI 里也会拦一道，但规则只写在界面上等于没写：命令会多出入口，而一旦
+ * 允许空结论，它就会变成默认路径，三个月后这张表又变回一排勾。
+ */
+pub fn close_item_note(conn: &Connection, id: i64, resolution: Option<String>) -> Result<i64> {
+    let note = read_item_note(conn, id)?;
+    if note.promoted_kind.is_some() {
+        return Err("这条事项已经分拣成实体了，请到阻碍或风险那边关闭它".into());
+    }
+    let kind = note.kind.ok_or("还没分拣的事项不能关闭 —— 先决定它是什么")?;
+
+    let requires_note: bool = conn
+        .query_row(
+            "SELECT requires_note FROM item_kinds WHERE key = ?1",
+            params![kind],
+            |r| Ok(r.get::<_, i64>(0)? != 0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .unwrap_or(false);
+
+    let resolution = resolution.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    if requires_note && resolution.is_none() {
+        return Err("关闭这一类事项要写清楚是怎么解决的".into());
+    }
+
+    let ts = unix_now();
+    conn.execute(
+        "UPDATE item_notes SET closed_at = ?2, resolution = ?3, updated_at = ?2 WHERE id = ?1",
+        params![id, ts, resolution],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(ts)
+}
+
+/// 重新打开。关闭时刻和结论一并清掉 —— 留着的话界面上会出现一条「未关闭」
+/// 却挂着「已于某日解决」的事项，两个互相矛盾的说法。和 `reopen_risk` 同款。
+pub fn reopen_item_note(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE item_notes SET closed_at = NULL, resolution = NULL, updated_at = ?2 WHERE id = ?1",
+        params![id, unix_now()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn delete_item_note(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM item_notes WHERE id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/**
+ * 分拣成风险：**一个事务里**建风险行 + 写回事项的晋升去向。
+ *
+ * 原子性是这条路和阻碍那条路的区别所在。风险是独立的表，所以创建实体和
+ * 写回引用可以放进同一个事务 —— 要么两件事都成了，要么一件都没发生，
+ * 不可能留下「风险建好了但事项还显示未分拣」。
+ *
+ * 阻碍做不到同样的事：它住在 `tasks.blocked` 这个 JSON 列里，由防抖的
+ * 整项目保存写出，不在这个连接的事务边界内。那边的取舍见前端的
+ * `promoteToBlocker` 注释。
+ *
+ * 优先级跟着事项过去（migrations/012_risk_priority.sql）：用户刚刚做的那个
+ * 判断不该在分拣这一步被扔掉。
+ */
+pub fn promote_note_to_risk(
+    conn: &mut Connection,
+    note_id: i64,
+    task_id: i64,
+    content: String,
+    level: i64,
+    priority: Option<i64>,
+) -> Result<Risk> {
+    let content = content.trim().to_string();
+    if content.is_empty() {
+        return Err("风险内容不能为空".into());
+    }
+    let note = read_item_note(conn, note_id)?;
+    if note.promoted_kind.is_some() {
+        return Err("这条事项已经分拣过了".into());
+    }
+
+    let ts = unix_now();
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO risks (task_id, content, level, created_at, priority)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![task_id, content, level, ts, priority],
+    )
+    .map_err(|e| e.to_string())?;
+    let risk_id = tx.last_insert_rowid();
+    tx.execute(
+        "UPDATE item_notes
+            SET promoted_kind = 'risk', promoted_ref = ?2, updated_at = ?3
+          WHERE id = ?1",
+        params![note_id, risk_id.to_string(), ts],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+
+    Ok(Risk {
+        id: risk_id,
+        task_id,
+        content,
+        level,
+        resolved: false,
+        created_at: ts,
+        resolved_at: None,
+        resolution: None,
+        priority,
+    })
+}
+
+/**
+ * 分拣成阻碍：只记下引用。阻碍实体本身由前端经命令栈写进 `tasks.blocked`。
+ *
+ * `promoted_ref` 的形态是 `'<taskId>/<periodId>'`。两段都要：periodId 在
+ * 一个任务内唯一，但事项这边不知道它属于谁 —— 而列表要显示「卡在哪条活上」。
+ */
+pub fn promote_note_to_blocker(conn: &Connection, note_id: i64, promoted_ref: String) -> Result<()> {
+    let note = read_item_note(conn, note_id)?;
+    if note.promoted_kind.is_some() {
+        return Err("这条事项已经分拣过了".into());
+    }
+    conn.execute(
+        "UPDATE item_notes
+            SET promoted_kind = 'blocker', promoted_ref = ?2, updated_at = ?3
+          WHERE id = ?1",
+        params![note_id, promoted_ref, unix_now()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/**
+ * 撤销分拣：把事项退回「未分拣」，并顺手删掉它当初创建的那个实体。
+ *
+ * 返回原来的 `promoted_ref`，调用方据此知道要从哪条任务上摘掉哪一段阻碍 ——
+ * 风险这边在同一个事务里就删掉了，阻碍那边必须由前端走命令栈。
+ *
+ * 为什么要有这个出口：实体可以被单独删掉（阻碍能删、风险能删），此时事项上
+ * 留着一个指向空处的引用。不给「改回未分拣」的话，用户唯一能做的就是把这条
+ * 事项也删掉重记一遍 —— 而它记录的原始信息（谁在什么时候说的）就此丢失。
+ * 所以**悬挂引用是预期状态，而不是损坏**（设计稿 §6.2 规则三）。
+ */
+pub fn unpromote_note(conn: &mut Connection, note_id: i64) -> Result<Option<String>> {
+    let note = read_item_note(conn, note_id)?;
+    let Some(kind) = note.promoted_kind.clone() else {
+        return Ok(None);
+    };
+
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    // 风险在同一个事务里删掉。引用已经悬挂（风险被单独删过）时 DELETE
+    // 影响 0 行，那不是错误 —— 目标状态本来就是「这条风险不存在」
+    if kind == "risk" {
+        if let Some(id) = note.promoted_ref.as_deref().and_then(|s| s.parse::<i64>().ok()) {
+            tx.execute("DELETE FROM risks WHERE id = ?1", params![id])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    tx.execute(
+        "UPDATE item_notes
+            SET promoted_kind = NULL, promoted_ref = NULL, updated_at = ?2
+          WHERE id = ?1",
+        params![note_id, unix_now()],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+
+    Ok(note.promoted_ref)
+}
+
+/* ------------------------------------------------------------------ */
+/* 事项类型                                                            */
+/* ------------------------------------------------------------------ */
+
+/// 全部类型，内置的在前（sort_order 已经这么排了）。
+///
+/// 内置的两行由打开库时的 `schema::ensure_builtin_kinds` 保证存在，
+/// 所以这里查出来一定至少有两条 —— 但前端仍然有一份常量兜底，
+/// 一个读不出类型的库不该让事项视图整个白掉。
+pub fn list_item_kinds(conn: &Connection) -> Result<Vec<ItemKind>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT key, label, color, requires_note, builtin, sort_order
+               FROM item_kinds ORDER BY sort_order, key",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(ItemKind {
+                key: r.get(0)?,
+                label: r.get(1)?,
+                color: r.get(2)?,
+                requires_note: r.get::<_, i64>(3)? != 0,
+                builtin: r.get::<_, i64>(4)? != 0,
+                sort_order: r.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+/// 新建或改一个类型。`builtin` 一列由库决定，调用方改不了 ——
+/// 否则「内置不可删」这条规矩可以被一次改名绕过去。
+pub fn save_item_kind(
+    conn: &Connection,
+    key: String,
+    label: String,
+    color: String,
+    requires_note: bool,
+) -> Result<()> {
+    let label = label.trim().to_string();
+    if label.is_empty() {
+        return Err("类型名称不能为空".into());
+    }
+    conn.execute(
+        "INSERT INTO item_kinds (key, label, color, requires_note, builtin, sort_order)
+         VALUES (?1, ?2, ?3, ?4, 0,
+                 (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM item_kinds))
+         ON CONFLICT (key) DO UPDATE
+            SET label = excluded.label,
+                color = excluded.color,
+                requires_note = excluded.requires_note",
+        params![key, label, color, requires_note as i64],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/**
+ * 删一个自定义类型。内置的拒绝。
+ *
+ * 用着这个类型的事项**退回「未分拣」**，不是跟着删掉。理由是那条事项记录的
+ * 内容和它被分到哪一类是两件事：类型没了之后「我还没决定这是什么」重新成立，
+ * 而那句话本身必须留着。连带删除会让「整理一下类型清单」变成一次静默的数据
+ * 丢失 —— 用户完全看不出自己刚刚删了什么。
+ *
+ * 返回被退回的条数，界面据此提示。
+ */
+pub fn delete_item_kind(conn: &mut Connection, key: String) -> Result<i64> {
+    let builtin: Option<i64> = conn
+        .query_row(
+            "SELECT builtin FROM item_kinds WHERE key = ?1",
+            params![key],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    match builtin {
+        None => return Err("没有这个事项类型".into()),
+        Some(1) => return Err("内置类型不能删除 —— 可以改名字和颜色".into()),
+        _ => {}
+    }
+
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let reverted = tx
+        .execute(
+            "UPDATE item_notes SET kind = NULL, updated_at = ?2 WHERE kind = ?1",
+            params![key, unix_now()],
+        )
+        .map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM item_kinds WHERE key = ?1", params![key])
+        .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(reverted as i64)
+}
+
+/// 改一条风险的优先级。
+///
+/// 单独一个命令而不是塞进 `update_risk`：事项视图里改优先级是点一下标签就
+/// 立刻生效的行内操作，而 update_risk 要带上正文和等级 —— 为了改一个小整数
+/// 把整条正文回传一遍，中间任何一次并发编辑都会被这次回传盖掉。
+pub fn set_risk_priority(conn: &Connection, id: i64, priority: Option<i64>) -> Result<()> {
+    let n = conn
+        .execute(
+            "UPDATE risks SET priority = ?2 WHERE id = ?1",
+            params![id, priority.map(|p| p.clamp(0, 3))],
+        )
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Err("风险不存在".into());
+    }
+    Ok(())
 }

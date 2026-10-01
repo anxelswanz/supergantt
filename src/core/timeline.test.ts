@@ -50,6 +50,7 @@ const risk = (over: Partial<Risk> = {}): Risk => ({
   createdAt: unixOf(D0),
   resolvedAt: null,
   resolution: null,
+  priority: null,
   ...over,
 });
 

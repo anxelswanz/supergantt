@@ -21,6 +21,7 @@ const risk = (over: Partial<Risk> & { id: number }): Risk => ({
   createdAt: 1_700_000_000,
   resolvedAt: null,
   resolution: null,
+  priority: null,
   ...over,
 });
 

@@ -88,6 +88,14 @@ export interface Risk {
   resolvedAt: number | null;
   /** 怎么关掉的。复盘时有价值的是这一句，不是那个勾 */
   resolution: string | null;
+  /**
+   * 「先做哪个」（P0–P3）。和 `level`（多严重）是两个轴 ——
+   * 见 migrations/012_risk_priority.sql。
+   *
+   * null = 没填过。历史风险确实没有这一项，界面显示一个空的优先级槽，
+   * 不伪造一个「中」。
+   */
+  priority: number | null;
 }
 
 export interface Comment {
@@ -120,6 +128,60 @@ export interface DailyNote {
   /** Unix 秒 */
   createdAt: number;
   updatedAt: number;
+}
+
+/**
+ * 一条事项（QuickNote）—— 系统里唯一一种**不需要日期就能存在**的东西。
+ *
+ * 四个计划视图都要求「任务 + 日期 + 负责人」齐备才接得住，而现实里最先出现的
+ * 东西只有一句话：会上的一句话、邮件里的一个隐患。要求它们当场完成那次翻译，
+ * 就是它们最后没被记下来的原因。见 migrations/010_item_notes.sql。
+ */
+export interface ItemNote {
+  id: number;
+  projectId: number;
+  name: string;
+  /**
+   * 类型 key（见 ItemKind）。**null = 未分拣**，不是「其他」——
+   * 「我还没决定这是什么」是一个真实且重要的状态。
+   */
+  kind: string | null;
+  /** P0–P3，和任务的紧急度同一把刻度 */
+  priority: number;
+  personId: number | null;
+  /** 关联的活。任务删掉后变 null，但这条记录留着（ON DELETE SET NULL） */
+  taskId: number | null;
+  /** 非 null = 已经分拣成一个真实实体 */
+  promotedKind: "blocker" | "risk" | null;
+  /**
+   * 阻碍是 `"<taskId>/<periodId>"`，风险是 `"<riskId>"`。
+   * **可能指向一个已经不存在的东西** —— 那是预期状态，不是损坏：
+   * 阻碍能删、风险能删，界面上对此有专门的出路（core/items.ts）。
+   */
+  promotedRef: string | null;
+  /** Unix 秒。null = 还开着。**没有单独的 closed 布尔** */
+  closedAt: number | null;
+  resolution: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * 一个事项类型。全局表，所有项目共用。
+ *
+ * **阻碍和风险不在这张清单里**：它们是实体不是分类，身份由
+ * ItemNote.promotedKind + promotedRef 表达（见 migrations/011_item_kinds.sql）。
+ */
+export interface ItemKind {
+  /** 'todo' | 'issue' | 'custom:<uuid>' */
+  key: string;
+  label: string;
+  color: string;
+  /** 关闭时是否必须写一句结论 */
+  requiresNote: boolean;
+  /** 内置行：可改名改色，不可删 */
+  builtin: boolean;
+  sortOrder: number;
 }
 
 export interface DependencyRow {
@@ -269,6 +331,86 @@ export const api = {
   reopenRisk: (id: number) => invoke<void>("reopen_risk", { id }),
 
   deleteRisk: (id: number) => invoke<void>("delete_risk", { id }),
+
+  /**
+   * 只改优先级。单独一个命令而不是走 updateRisk ——
+   * 事项视图里点一下标签就生效，为了一个小整数把整条正文回传一遍，
+   * 中间任何一次并发编辑都会被这次回传盖掉。
+   */
+  setRiskPriority: (id: number, priority: number | null) =>
+    invoke<void>("set_risk_priority", { id, priority }),
+
+  /* ---------------- 事项 ---------------- */
+
+  /** 一个项目的全部事项，库层已按创建时间倒序排好 */
+  loadItemNotes: (projectId: number) =>
+    invoke<ItemNote[]>("load_item_notes", { projectId }),
+
+  /** 记一条。**不收类型** —— 分拣是分开的动作，见 core/items.ts */
+  addItemNote: (
+    projectId: number,
+    name: string,
+    priority: number,
+    personId: number | null,
+    taskId: number | null,
+  ) => invoke<ItemNote>("add_item_note", { projectId, name, priority, personId, taskId }),
+
+  /**
+   * 改字段：标题、类型、优先级、负责人、关联任务。
+   * **不碰关闭状态，也不碰晋升去向** —— 那两件事各有自己的入口。
+   * `kind` 传 null = 改回「未分拣」，那是一个合法的目标状态。
+   */
+  updateItemNote: (
+    id: number,
+    name: string,
+    kind: string | null,
+    priority: number,
+    personId: number | null,
+    taskId: number | null,
+  ) => invoke<void>("update_item_note", { id, name, kind, priority, personId, taskId }),
+
+  /** 关闭。返回关闭时刻（Unix 秒）。库层按类型校验结论是否必填 */
+  closeItemNote: (id: number, resolution: string | null) =>
+    invoke<number>("close_item_note", { id, resolution }),
+
+  reopenItemNote: (id: number) => invoke<void>("reopen_item_note", { id }),
+
+  deleteItemNote: (id: number) => invoke<void>("delete_item_note", { id }),
+
+  /**
+   * 分拣成风险：**一个事务里**建风险行 + 写回晋升去向。
+   * 不可能留下「风险建好了但事项还显示未分拣」。
+   */
+  promoteNoteToRisk: (
+    noteId: number,
+    taskId: number,
+    content: string,
+    level: number,
+    priority: number | null,
+  ) => invoke<Risk>("promote_note_to_risk", { noteId, taskId, content, level, priority }),
+
+  /**
+   * 分拣成阻碍：只记下引用。阻碍实体本身住在 tasks.blocked 里，
+   * 由命令栈 + 整项目保存写出，不在这个连接的事务边界内。
+   */
+  promoteNoteToBlocker: (noteId: number, promotedRef: string) =>
+    invoke<void>("promote_note_to_blocker", { noteId, promotedRef }),
+
+  /**
+   * 撤销分拣：退回「未分拣」，并删掉当初创建的实体。
+   * 返回原来的引用 —— 调用方据此摘掉对应的阻碍区间（风险已在库层删掉）。
+   */
+  unpromoteNote: (noteId: number) =>
+    invoke<string | null>("unpromote_note", { noteId }),
+
+  listItemKinds: () => invoke<ItemKind[]>("list_item_kinds"),
+
+  /** 新建或改一个类型。`builtin` 由库决定，这里传不了 */
+  saveItemKind: (key: string, label: string, color: string, requiresNote: boolean) =>
+    invoke<void>("save_item_kind", { key, label, color, requiresNote }),
+
+  /** 删一个自定义类型。返回被退回「未分拣」的事项条数 */
+  deleteItemKind: (key: string) => invoke<number>("delete_item_kind", { key }),
 
   addComment: (taskId: number, content: string) =>
     invoke<Comment>("add_comment", { taskId, content }),

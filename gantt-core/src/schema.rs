@@ -22,6 +22,9 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/007_project_identity.sql"),
     include_str!("../migrations/008_risk_resolution.sql"),
     include_str!("../migrations/009_auto_rollover.sql"),
+    include_str!("../migrations/010_item_notes.sql"),
+    include_str!("../migrations/011_item_kinds.sql"),
+    include_str!("../migrations/012_risk_priority.sql"),
 ];
 
 /// 打开（必要时创建）数据库，跑完迁移再自愈一遍。
@@ -77,7 +80,29 @@ pub fn repair(conn: &Connection) -> rusqlite::Result<()> {
     if selfref > 0 {
         eprintln!("[repair] 清理了 {selfref} 条自引用");
     }
+
+    ensure_builtin_kinds(conn)?;
     Ok(())
+}
+
+/**
+ * 保证事项的两个内置类型存在。幂等，每次打开库都跑一遍。
+ *
+ * 为什么不能只靠迁移 011 的那两行 INSERT：导入一个旧版 `.ganttproj`
+ * （里面根本没有 item_kinds 这一节）之后，本机这张表可能是空的 ——
+ * 而「代办」「问题」在前端是代码里的常量，渲染不依赖数据库。于是会出现
+ * 一个很难查的分叉：用户给「问题」改的颜色写进了这张表，而表里没有那一行时
+ * UPDATE 影响 0 行，改动静默丢失；下次打开又回到常量的颜色。
+ *
+ * 所以这里补行、但**不覆盖已有行** —— 用户改过的名字和颜色必须留着。
+ * `INSERT OR IGNORE` 正好是这个语义。
+ */
+fn ensure_builtin_kinds(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "INSERT OR IGNORE INTO item_kinds (key, label, color, requires_note, builtin, sort_order)
+         VALUES ('todo',  '代办', '#0ea5e9', 0, 1, 0),
+                ('issue', '问题', '#a855f7', 1, 1, 1);",
+    )
 }
 
 /* ------------------------------------------------------------------ */
@@ -168,6 +193,137 @@ mod tests {
             )
             .unwrap();
         assert_eq!(orphan, 0);
+    }
+
+    /**
+     * 事项的两条关键外键行为，刻意和风险那边**不同**：
+     *
+     *   · `task_id` 是 ON DELETE **SET NULL** —— 任务删了，事项要留着。
+     *     它是独立记录下来的东西，不是任务的附属品。
+     *     （risks.task_id 是 CASCADE：一条风险不挂在任何活上没有意义。）
+     *   · `project_id` 是 ON DELETE CASCADE —— 项目没了，它的收件箱也没了。
+     *
+     * 这两条不同是设计，不是疏忽，所以必须有测试钉住它们 ——
+     * 否则下一个人会「顺手统一」成 CASCADE，而丢数据是静默的。
+     */
+    #[test]
+    fn item_notes_survive_task_deletion_but_not_project_deletion() {
+        let conn = mem();
+        conn.execute(
+            "INSERT INTO projects (id, name, created_at, updated_at) VALUES (1, 'P', '0', '0')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, project_id, name, start_date, end_date, created_at, updated_at)
+             VALUES (1, 1, 'A', '2026-08-03', '2026-08-07', '0', '0')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO item_notes (project_id, name, task_id, created_at, updated_at)
+             VALUES (1, '电机交付确认', 1, 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO risks (task_id, content, created_at) VALUES (1, '可能缺料', 0)",
+            [],
+        )
+        .unwrap();
+
+        conn.execute("DELETE FROM tasks WHERE id = 1", []).unwrap();
+
+        let (notes, task_id): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(task_id) FROM item_notes",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(notes, 1, "任务删了，事项要留着 —— 它不是任务的附属品");
+        assert_eq!(task_id, None, "但关联要断开（ON DELETE SET NULL）");
+
+        let risks: i64 = conn
+            .query_row("SELECT COUNT(*) FROM risks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(risks, 0, "风险跟着任务走 —— 和事项刻意不同");
+
+        conn.execute("DELETE FROM projects WHERE id = 1", []).unwrap();
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM item_notes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "项目没了，它的收件箱也没了");
+    }
+
+    /// 内置类型在每次打开库时被补齐，但**已有的那一行不被覆盖** ——
+    /// 用户给「问题」改过的名字和颜色必须留着。
+    #[test]
+    fn builtin_item_kinds_are_restored_but_never_overwritten() {
+        let conn = mem();
+        conn.execute("UPDATE item_kinds SET label = '议题' WHERE key = 'issue'", [])
+            .unwrap();
+        conn.execute("DELETE FROM item_kinds WHERE key = 'todo'", []).unwrap();
+
+        ensure_builtin_kinds(&conn).unwrap();
+
+        let todo: i64 = conn
+            .query_row("SELECT COUNT(*) FROM item_kinds WHERE key = 'todo'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(todo, 1, "被删掉的内置行要补回来");
+
+        let issue: String = conn
+            .query_row("SELECT label FROM item_kinds WHERE key = 'issue'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(issue, "议题", "改过名的那一行不能被重置");
+    }
+
+    /// 未分拣（kind 为 NULL）必须存得进去 —— 它是一个真实状态，不是缺省值。
+    /// 同时 priority 的 CHECK 要挡住越界值。
+    #[test]
+    fn item_notes_allow_null_kind_and_clamp_priority() {
+        let conn = mem();
+        conn.execute(
+            "INSERT INTO projects (id, name, created_at, updated_at) VALUES (1, 'P', '0', '0')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO item_notes (project_id, name, created_at, updated_at)
+             VALUES (1, '还没想清楚这是什么', 0, 0)",
+            [],
+        )
+        .unwrap();
+        let (kind, priority): (Option<String>, i64) = conn
+            .query_row("SELECT kind, priority FROM item_notes", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(kind, None);
+        assert_eq!(priority, 2, "默认 P2 —— 录入时不选优先级也要能存下");
+
+        let bad = conn.execute(
+            "INSERT INTO item_notes (project_id, name, priority, created_at, updated_at)
+             VALUES (1, 'x', 9, 0, 0)",
+            [],
+        );
+        assert!(bad.is_err(), "越界的优先级要被 CHECK 挡住");
+
+        // promoted_kind 只认两个值；NULL 要放行（还没晋升）
+        assert!(conn
+            .execute(
+                "INSERT INTO item_notes (project_id, name, promoted_kind, created_at, updated_at)
+                 VALUES (1, 'y', 'todo', 0, 0)",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO item_notes (project_id, name, promoted_kind, created_at, updated_at)
+                 VALUES (1, 'z', NULL, 0, 0)",
+                [],
+            )
+            .is_ok());
     }
 
     /// 002 迁移要把已有的 assignee 文本拆成 people 表并回填外键。

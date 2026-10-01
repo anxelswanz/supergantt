@@ -2034,7 +2034,7 @@ fn read_risk(conn: &Connection, id: i64) -> CliResult<(String, i64)> {
 
 fn read_risk_json(conn: &Connection, id: i64) -> CliResult<Risk> {
     conn.query_row(
-        "SELECT id, task_id, content, level, resolved, created_at, resolved_at, resolution \
+        "SELECT id, task_id, content, level, resolved, created_at, resolved_at, resolution, priority \
          FROM risks WHERE id = ?1",
         [id],
         |r| {
@@ -2047,6 +2047,7 @@ fn read_risk_json(conn: &Connection, id: i64) -> CliResult<Risk> {
                 created_at: r.get(5)?,
                 resolved_at: r.get(6)?,
                 resolution: r.get(7)?,
+                priority: r.get(8)?,
             })
         },
     )

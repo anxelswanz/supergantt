@@ -128,6 +128,7 @@ describe("buildTimelineHtml", () => {
         createdAt: Math.floor(Date.parse("2026-08-05T02:00:00Z") / 1000),
         resolvedAt: null,
         resolution: null,
+        priority: null,
       },
     ];
 

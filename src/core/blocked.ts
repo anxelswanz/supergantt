@@ -75,6 +75,16 @@ export interface BlockedPeriod {
    */
   pushed?: number;
   /**
+   * 「先做哪个」（P0–P3）。**可不填** —— 历史数据和 ⌥ 拖出来的标注都没有它。
+   *
+   * 它存在的直接原因是分拣：一条 P0 的事项晋升成阻碍时，优先级必须跟过去，
+   * 否则用户刚刚做的那个判断在下一步被扔掉（设计稿 §3.2）。不填时界面显示
+   * 一个空的优先级槽，不伪造一个「中」—— 和 `open` 的默认值同一条规矩。
+   *
+   * 不需要迁移：`blocked` 是一列 JSON，可选字段历史数据没有就是没有。
+   */
+  priority?: 0 | 1 | 2 | 3;
+  /**
    * 这段卡住最后是怎么过去的。**可不填**，和风险那边刻意相反。
    *
    * 风险关闭时强制写处置说明：关一条风险是个**判断**（「它不会发生了」），
@@ -357,6 +367,7 @@ interface StoredPeriod {
   /** 只在未关闭时写出。缺省即已关闭，历史数据因此原样保持不变 */
   open?: boolean;
   pushed?: number;
+  priority?: number;
   resolution?: string;
 }
 
@@ -369,6 +380,8 @@ export function serializeBlocked(periods: BlockedPeriod[]): string {
     ...(p.note ? { note: p.note } : {}),
     ...(p.open ? { open: true } : {}),
     ...(p.pushed ? { pushed: p.pushed } : {}),
+    // 0 是 P0，不能用真值判断 —— `p.priority ? ...` 会把最紧急的那一档吞掉
+    ...(p.priority != null ? { priority: p.priority } : {}),
     ...(p.resolution ? { resolution: p.resolution } : {}),
   }));
   return JSON.stringify(rows);
@@ -412,6 +425,9 @@ export function parseBlocked(raw: string): BlockedPeriod[] {
       ...(row.open === true ? { open: true } : {}),
       ...(typeof row.pushed === "number" && row.pushed > 0
         ? { pushed: Math.floor(row.pushed) }
+        : {}),
+      ...(typeof row.priority === "number" && row.priority >= 0 && row.priority <= 3
+        ? { priority: Math.round(row.priority) as 0 | 1 | 2 | 3 }
         : {}),
       ...(typeof row.resolution === "string" && row.resolution.trim()
         ? { resolution: row.resolution.trim() }

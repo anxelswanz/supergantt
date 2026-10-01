@@ -207,6 +207,125 @@ pub fn delete_daily_note(db: tauri::State<Db>, id: i64) -> Result<()> {
 }
 
 /* ------------------------------------------------------------------ */
+/* 事项（QuickNote）                                                    */
+/* ------------------------------------------------------------------ */
+
+#[tauri::command]
+pub fn load_item_notes(db: tauri::State<Db>, project_id: i64) -> Result<Vec<ItemNote>> {
+    with_conn!(db, conn => query::load_item_notes(&conn, project_id))
+}
+
+#[tauri::command]
+pub fn add_item_note(
+    db: tauri::State<Db>,
+    project_id: i64,
+    name: String,
+    priority: i64,
+    person_id: Option<i64>,
+    task_id: Option<i64>,
+) -> Result<ItemNote> {
+    with_conn!(db, conn => query::add_item_note(&conn, project_id, name, priority, person_id, task_id))
+}
+
+#[tauri::command]
+pub fn update_item_note(
+    db: tauri::State<Db>,
+    id: i64,
+    name: String,
+    kind: Option<String>,
+    priority: i64,
+    person_id: Option<i64>,
+    task_id: Option<i64>,
+) -> Result<()> {
+    with_conn!(db, conn => query::update_item_note(&conn, id, name, kind, priority, person_id, task_id))
+}
+
+#[tauri::command]
+pub fn close_item_note(
+    db: tauri::State<Db>,
+    id: i64,
+    resolution: Option<String>,
+) -> Result<i64> {
+    with_conn!(db, conn => query::close_item_note(&conn, id, resolution))
+}
+
+#[tauri::command]
+pub fn reopen_item_note(db: tauri::State<Db>, id: i64) -> Result<()> {
+    with_conn!(db, conn => query::reopen_item_note(&conn, id))
+}
+
+#[tauri::command]
+pub fn delete_item_note(db: tauri::State<Db>, id: i64) -> Result<()> {
+    with_conn!(db, conn => query::delete_item_note(&conn, id))
+}
+
+/// 分拣成风险。开事务，所以要 `&mut Connection` —— 不走宏。
+#[tauri::command]
+pub fn promote_note_to_risk(
+    db: tauri::State<Db>,
+    note_id: i64,
+    task_id: i64,
+    content: String,
+    level: i64,
+    priority: Option<i64>,
+) -> Result<Risk> {
+    let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+    query::promote_note_to_risk(&mut conn, note_id, task_id, content, level, priority)
+}
+
+#[tauri::command]
+pub fn promote_note_to_blocker(
+    db: tauri::State<Db>,
+    note_id: i64,
+    promoted_ref: String,
+) -> Result<()> {
+    with_conn!(db, conn => query::promote_note_to_blocker(&conn, note_id, promoted_ref))
+}
+
+/// 撤销分拣。返回原来的引用，前端据此摘掉对应的阻碍区间。
+#[tauri::command]
+pub fn unpromote_note(db: tauri::State<Db>, note_id: i64) -> Result<Option<String>> {
+    let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+    query::unpromote_note(&mut conn, note_id)
+}
+
+#[tauri::command]
+pub fn set_risk_priority(
+    db: tauri::State<Db>,
+    id: i64,
+    priority: Option<i64>,
+) -> Result<()> {
+    with_conn!(db, conn => query::set_risk_priority(&conn, id, priority))
+}
+
+/* ------------------------------------------------------------------ */
+/* 事项类型                                                            */
+/* ------------------------------------------------------------------ */
+
+#[tauri::command]
+pub fn list_item_kinds(db: tauri::State<Db>) -> Result<Vec<ItemKind>> {
+    with_conn!(db, conn => query::list_item_kinds(&conn))
+}
+
+#[tauri::command]
+pub fn save_item_kind(
+    db: tauri::State<Db>,
+    key: String,
+    label: String,
+    color: String,
+    requires_note: bool,
+) -> Result<()> {
+    with_conn!(db, conn => query::save_item_kind(&conn, key, label, color, requires_note))
+}
+
+/// 删一个自定义类型。返回被退回「未分拣」的事项条数。
+#[tauri::command]
+pub fn delete_item_kind(db: tauri::State<Db>, key: String) -> Result<i64> {
+    let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+    query::delete_item_kind(&mut conn, key)
+}
+
+/* ------------------------------------------------------------------ */
 /* 整项目保存                                                          */
 /* ------------------------------------------------------------------ */
 

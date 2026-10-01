@@ -53,7 +53,11 @@ type Result<T> = std::result::Result<T, String>;
 /// 版本不一样」（你在家更新了，公司那台还没）。单个整数版本号会让
 /// 「加了一个无关紧要的字段」把旧机器彻底锁死。
 pub const FORMAT_MAJOR: u32 = 1;
-pub const FORMAT_MINOR: u32 = 0;
+/// 1.1 比 1.0 多出来的东西，全部是**新增字段**，所以只升 minor：
+/// `itemNotes` / `itemKinds` 两节，`risks` 的 `id`/`priority`/`resolvedAt`/`resolution`，
+/// 以及 `tasks.autoRollover`。旧版应用打开 1.1 的文件会忽略这些，照常导入
+/// 它认识的部分，并在预检里报告「较新的部分被忽略」。
+pub const FORMAT_MINOR: u32 = 1;
 
 pub const EXT: &str = "ganttproj";
 
@@ -109,6 +113,15 @@ pub struct FileTask {
     pub note: String,
     pub sort_order: f64,
     pub blocked: String,
+    /**
+     * 实施逾期时自动顺延计划结束日（migrations/009_auto_rollover.sql）。
+     *
+     * 格式 1.1 才有。旧文件里没有这一节，`serde(default)` 让它落成 `false` ——
+     * 而 false 正是那次迁移给既有任务填的值，所以旧文件导入后的行为和
+     * 它在源机器上的行为一致。
+     */
+    #[serde(default)]
+    pub auto_rollover: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -123,11 +136,82 @@ pub struct FileDep {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct FileRisk {
+    /**
+     * 文件内的风险编号，1..n，和任务一样**重编号**。
+     *
+     * 加这一列的唯一理由是 `FileItemNote.promoted_ref`：一条分拣成风险的事项
+     * 要指回那条风险，而库里的自增 id 带出去毫无意义（导入时必然换号）。
+     * 没有这个编号，每个导入过的项目里所有「分拣成风险」的事项都会变成
+     * 悬挂引用 —— 而那是静默发生的。
+     *
+     * 格式 1.1 才有；旧文件里为 0（serde default），导入时按数组次序补号。
+     */
+    #[serde(default)]
+    pub id: i64,
     pub task_id: i64,
     pub content: String,
     pub level: i64,
     pub resolved: bool,
     pub created_at: i64,
+    /// 关闭时刻与处置说明（migrations/008）。1.1 才有 —— 在此之前这两项
+    /// **导出时被静默丢掉**，而「我们做了什么让它不用管」恰恰是复盘里
+    /// 唯一值得抄的东西
+    #[serde(default)]
+    pub resolved_at: Option<i64>,
+    #[serde(default)]
+    pub resolution: Option<String>,
+    /// 「先做哪个」（migrations/012）。和 level「多严重」是两个轴
+    #[serde(default)]
+    pub priority: Option<i64>,
+}
+
+/**
+ * 一条事项。格式 1.1 新增。
+ *
+ * 和 FileTask 一样按**名字**引用负责人（people 是全局表，两台机器上同一个人的
+ * id 必然不同），按**文件内编号**引用任务和风险。
+ */
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct FileItemNote {
+    pub name: String,
+    /// None = 未分拣。不是「其他」
+    pub kind: Option<String>,
+    pub priority: i64,
+    pub person: Option<String>,
+    /// 文件内的任务编号
+    pub task_id: Option<i64>,
+    pub promoted_kind: Option<String>,
+    /**
+     * 晋升去向，**已经换成文件内的编号**：
+     *   阻碍 `"<文件内 taskId>/<periodId>"`、风险 `"<文件内 riskId>"`。
+     *
+     * 导出和导入各翻译一次。不翻译的话，带着源机器的自增 id 落到另一台机器上，
+     * 那个 id 要么不存在、要么指向别人的东西 —— 后者更糟。
+     */
+    pub promoted_ref: Option<String>,
+    pub closed_at: Option<i64>,
+    pub resolution: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/**
+ * 一个事项类型。格式 1.1 新增。
+ *
+ * 只带**这个项目真正用到的**那几个，和 people 同一条规矩：item_kinds 是全局表，
+ * 把整张表塞进去等于让「传一个项目」顺手改掉对方机器上的类型清单。
+ * 导入时也同样只补缺的、不覆盖本地已有的（见 apply_in）。
+ */
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct FileItemKind {
+    pub key: String,
+    pub label: String,
+    pub color: String,
+    pub requires_note: bool,
+    pub builtin: bool,
+    pub sort_order: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -190,6 +274,11 @@ pub struct Bundle {
     pub comments: Vec<FileComment>,
     pub daily_notes: Vec<FileNote>,
     pub baselines: Vec<FileBaseline>,
+    /// 格式 1.1 新增。旧文件里没有这两节，落成空数组
+    #[serde(default)]
+    pub item_notes: Vec<FileItemNote>,
+    #[serde(default)]
+    pub item_kinds: Vec<FileItemKind>,
 }
 
 /// 一份读进内存的完整项目文件。
@@ -286,13 +375,14 @@ pub fn collect(conn: &Connection, project_id: i64) -> rusqlite::Result<(Bundle, 
         note: String,
         sort_order: f64,
         blocked: String,
+        auto_rollover: bool,
     }
 
     let mut stmt = conn.prepare(
         "SELECT t.id, t.parent_id, t.name, t.start_date, t.end_date,
                 t.actual_start, t.actual_end, t.progress, t.priority,
                 p.name AS person, t.milestone, t.weight, t.collapsed, t.pinned,
-                t.note, t.sort_order, t.blocked
+                t.note, t.sort_order, t.blocked, t.auto_rollover
            FROM tasks t LEFT JOIN people p ON p.id = t.person_id
           WHERE t.project_id = ?1",
     )?;
@@ -316,6 +406,7 @@ pub fn collect(conn: &Connection, project_id: i64) -> rusqlite::Result<(Bundle, 
                 note: r.get(14)?,
                 sort_order: r.get(15)?,
                 blocked: r.get(16)?,
+                auto_rollover: r.get::<_, i64>(17)? != 0,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -351,6 +442,7 @@ pub fn collect(conn: &Connection, project_id: i64) -> rusqlite::Result<(Bundle, 
             note: t.note.clone(),
             sort_order: t.sort_order,
             blocked: t.blocked.clone(),
+            auto_rollover: t.auto_rollover,
         })
         .collect();
 
@@ -380,29 +472,49 @@ pub fn collect(conn: &Connection, project_id: i64) -> rusqlite::Result<(Bundle, 
         .collect();
     dependencies.sort_by_key(|d| (d.from_task_id, d.to_task_id));
 
-    let mut risks: Vec<FileRisk> = conn
+    // 风险：库里的 id 留着做 remap 的源（事项的 promoted_ref 指着它），
+    // 写进文件的是重编号后的 1..n
+    let mut risk_rows: Vec<(i64, FileRisk)> = conn
         .prepare(
-            "SELECT r.task_id, r.content, r.level, r.resolved, r.created_at
+            "SELECT r.id, r.task_id, r.content, r.level, r.resolved, r.created_at,
+                    r.resolved_at, r.resolution, r.priority
                FROM risks r JOIN tasks t ON t.id = r.task_id
               WHERE t.project_id = ?1",
         )?
         .query_map(params![project_id], |r| {
-            Ok(FileRisk {
-                task_id: r.get(0)?,
-                content: r.get(1)?,
-                level: r.get(2)?,
-                resolved: r.get::<_, i64>(3)? != 0,
-                created_at: r.get(4)?,
-            })
+            Ok((
+                r.get::<_, i64>(0)?,
+                FileRisk {
+                    id: 0,
+                    task_id: r.get(1)?,
+                    content: r.get(2)?,
+                    level: r.get(3)?,
+                    resolved: r.get::<_, i64>(4)? != 0,
+                    created_at: r.get(5)?,
+                    resolved_at: r.get(6)?,
+                    resolution: r.get(7)?,
+                    priority: r.get(8)?,
+                },
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?
         .into_iter()
-        .filter_map(|mut r| {
+        .filter_map(|(db_id, mut r)| {
             r.task_id = *remap.get(&r.task_id)?;
-            Some(r)
+            Some((db_id, r))
         })
         .collect();
-    risks.sort_by(|a, b| (a.task_id, a.created_at, &a.content).cmp(&(b.task_id, b.created_at, &b.content)));
+    risk_rows.sort_by(|a, b| {
+        (a.1.task_id, a.1.created_at, &a.1.content).cmp(&(b.1.task_id, b.1.created_at, &b.1.content))
+    });
+
+    // 库里的风险 id → 文件内编号。往返幂等的前提是这个编号只由数据决定
+    let mut risk_remap: HashMap<i64, i64> = HashMap::new();
+    for (i, (db_id, row)) in risk_rows.iter_mut().enumerate() {
+        row.id = i as i64 + 1;
+        risk_remap.insert(*db_id, row.id);
+    }
+    let risks: Vec<FileRisk> = risk_rows.into_iter().map(|(_, r)| r).collect();
 
     let mut comments: Vec<FileComment> = conn
         .prepare(
@@ -526,11 +638,126 @@ pub fn collect(conn: &Connection, project_id: i64) -> rusqlite::Result<(Bundle, 
         people.push(FilePerson { name, color, avatar_file, avatar_inline, sort_order });
     }
 
+    /* ---- 事项 ---- */
+    //
+    // promoted_ref 必须在这里**翻译成文件内的编号**。不翻译的话，它带着源机器的
+    // 自增 id 落到另一台机器上：那个 id 要么不存在（整条分拣记录静默变成悬挂
+    // 引用），要么指向了别人的东西（更糟 —— 一条事项会显示成另一个项目的阻碍）。
+    let mut item_notes: Vec<FileItemNote> = conn
+        .prepare(
+            "SELECT n.name, n.kind, n.priority, p.name AS person, n.task_id,
+                    n.promoted_kind, n.promoted_ref, n.closed_at, n.resolution,
+                    n.created_at, n.updated_at
+               FROM item_notes n LEFT JOIN people p ON p.id = n.person_id
+              WHERE n.project_id = ?1",
+        )?
+        .query_map(params![project_id], |r| {
+            Ok(FileItemNote {
+                name: r.get(0)?,
+                kind: r.get(1)?,
+                priority: r.get(2)?,
+                person: r.get(3)?,
+                task_id: r.get(4)?,
+                promoted_kind: r.get(5)?,
+                promoted_ref: r.get(6)?,
+                closed_at: r.get(7)?,
+                resolution: r.get(8)?,
+                created_at: r.get(9)?,
+                updated_at: r.get(10)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .map(|mut n| {
+            // 任务删了之后 task_id 已经是 NULL（ON DELETE SET NULL）；
+            // 这里再兜一道「指向别的项目」的脏数据
+            n.task_id = n.task_id.and_then(|t| remap.get(&t).copied());
+            n.promoted_ref = translate_ref(
+                n.promoted_kind.as_deref(),
+                n.promoted_ref.as_deref(),
+                &remap,
+                &risk_remap,
+            );
+            // 引用翻译不出来 = 它本来就是悬挂的，或者指向别的项目。
+            // 两种都退回「未分拣」—— 带着一个翻译失败的引用出去，
+            // 对方机器上会显示成「已被删除」，而那是误报
+            if n.promoted_ref.is_none() {
+                n.promoted_kind = None;
+            }
+            n
+        })
+        .collect();
+    item_notes.sort_by(|a, b| (a.created_at, &a.name).cmp(&(b.created_at, &b.name)));
+
+    // 类型：只带这个项目用到的**自定义**类型。
+    //
+    // item_kinds 是全局表，整张塞进去等于让「传一个项目」顺手改掉对方机器上的
+    // 类型清单（和 people 同一条规矩）。内置的两个也不带，两个理由：
+    // 对方库里由 schema::ensure_builtin_kinds 保证存在；而且源机器上给
+    // 「问题」改过的名字和颜色不该跟着跑过去改掉对方所有项目里的那一类
+    // —— 和「人员的颜色一律不覆盖」是同一条。
+    let used_kinds: HashSet<&str> = item_notes.iter().filter_map(|n| n.kind.as_deref()).collect();
+    let item_kinds: Vec<FileItemKind> = conn
+        .prepare(
+            "SELECT key, label, color, requires_note, builtin, sort_order
+               FROM item_kinds ORDER BY sort_order, key",
+        )?
+        .query_map([], |r| {
+            Ok(FileItemKind {
+                key: r.get(0)?,
+                label: r.get(1)?,
+                color: r.get(2)?,
+                requires_note: r.get::<_, i64>(3)? != 0,
+                builtin: r.get::<_, i64>(4)? != 0,
+                sort_order: r.get(5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|k| !k.builtin && used_kinds.contains(k.key.as_str()))
+        .collect();
+
     Ok((
-        Bundle { project, tasks, dependencies, risks, comments, daily_notes, baselines },
+        Bundle {
+            project,
+            tasks,
+            dependencies,
+            risks,
+            comments,
+            daily_notes,
+            baselines,
+            item_notes,
+            item_kinds,
+        },
         people,
         avatars,
     ))
+}
+
+/**
+ * `promoted_ref` 在两套编号之间的翻译。导出和导入各用一次，方向相反但形状一样。
+ *
+ * 翻译不出来就返回 None，调用方据此把整条晋升关系退回「未分拣」——
+ * 一个翻译失败的引用比没有引用更坏：它在对方机器上会显示成「已被删除」，
+ * 而那是误报，用户会去找一条从来没存在过的阻碍。
+ */
+fn translate_ref(
+    kind: Option<&str>,
+    raw: Option<&str>,
+    tasks: &HashMap<i64, i64>,
+    risks: &HashMap<i64, i64>,
+) -> Option<String> {
+    let raw = raw?;
+    match kind? {
+        "blocker" => {
+            // '<taskId>/<periodId>'。只按第一个斜杠切 —— periodId 里可能有斜杠
+            let (task, period) = raw.split_once('/')?;
+            let mapped = tasks.get(&task.parse::<i64>().ok()?)?;
+            Some(format!("{mapped}/{period}"))
+        }
+        "risk" => risks.get(&raw.parse::<i64>().ok()?).map(|id| id.to_string()),
+        _ => None,
+    }
 }
 
 fn split_data_uri(uri: &str) -> Option<(&str, &str)> {
@@ -650,7 +877,10 @@ pub fn read_archive(path: &Path) -> Result<Archive> {
 
     // 顶层多出来的段落 = 更新版本写进去的新东西。serde 默认静默忽略未知字段，
     // 这里再单独看一眼，好让用户知道「你这次导入拿到的不是文件的全部」
-    let known = ["project", "tasks", "dependencies", "risks", "comments", "dailyNotes", "baselines"];
+    let known = [
+        "project", "tasks", "dependencies", "risks", "comments", "dailyNotes", "baselines",
+        "itemNotes", "itemKinds",
+    ];
     let unknown_sections = serde_json::from_slice::<serde_json::Value>(&project_bytes)
         .ok()
         .and_then(|v| v.as_object().cloned())
@@ -1204,6 +1434,10 @@ pub(crate) fn apply_in(
                 "DELETE FROM dependencies WHERE project_id = ?1",
                 "DELETE FROM baselines WHERE project_id = ?1",
                 "DELETE FROM daily_notes WHERE project_id = ?1",
+                // 事项挂在项目上（不挂任务），所以 tasks 的 CASCADE 带不走它们。
+                // 漏掉这一行的后果是覆盖导入之后事项翻倍，而且旧的那一半
+                // 全部变成悬挂引用（它们指的任务已经被换掉了）
+                "DELETE FROM item_notes WHERE project_id = ?1",
                 "DELETE FROM tasks WHERE project_id = ?1",
             ] {
                 tx.execute(sql, params![id]).map_err(|e| e.to_string())?;
@@ -1256,9 +1490,9 @@ pub(crate) fn apply_in(
             "INSERT INTO tasks (id, project_id, parent_id, name, start_date, end_date,
                                 actual_start, actual_end, progress, priority, person_id,
                                 milestone, weight, collapsed, pinned, note, sort_order,
-                                blocked, created_at, updated_at)
+                                blocked, auto_rollover, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19, ?19)",
+                     ?16, ?17, ?18, ?19, ?20, ?20)",
             params![
                 remap[&t.id],
                 project_id,
@@ -1278,6 +1512,7 @@ pub(crate) fn apply_in(
                 t.note,
                 t.sort_order,
                 t.blocked,
+                t.auto_rollover as i64,
                 ts,
             ],
         )
@@ -1292,13 +1527,29 @@ pub(crate) fn apply_in(
         )
         .map_err(|e| e.to_string())?;
     }
-    for r in &a.bundle.risks {
+    // 文件内的风险编号 → 本机 id。事项的 promoted_ref 要靠它翻回来
+    let mut risk_remap: HashMap<i64, i64> = HashMap::new();
+    for (i, r) in a.bundle.risks.iter().enumerate() {
         tx.execute(
-            "INSERT INTO risks (task_id, content, level, resolved, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![remap[&r.task_id], r.content, r.level, r.resolved as i64, r.created_at],
+            "INSERT INTO risks (task_id, content, level, resolved, created_at,
+                                resolved_at, resolution, priority)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                remap[&r.task_id],
+                r.content,
+                r.level,
+                r.resolved as i64,
+                r.created_at,
+                r.resolved_at,
+                r.resolution,
+                r.priority,
+            ],
         )
         .map_err(|e| e.to_string())?;
+        // 1.0 的文件没有 id 那一列（落成 0）—— 按数组次序补号，和导出时
+        // 的编号规则一致。那种文件里本来也没有事项，补的号不会被用到
+        let file_id = if r.id > 0 { r.id } else { i as i64 + 1 };
+        risk_remap.insert(file_id, tx.last_insert_rowid());
     }
     for c in &a.bundle.comments {
         tx.execute(
@@ -1346,6 +1597,74 @@ pub(crate) fn apply_in(
             )
             .map_err(|e| e.to_string())?;
         }
+    }
+
+    /* ---- 事项类型：只补缺的，绝不覆盖本地已有的 ---- */
+    //
+    // 和人员那边完全同一条规矩：item_kinds 是全局表，覆盖一个 key 的
+    // 名字或颜色会连带改掉本机**所有其他项目**里那个类型的样子。
+    // 导入一个项目不该有这种影响范围。
+    for k in &a.bundle.item_kinds {
+        tx.execute(
+            "INSERT OR IGNORE INTO item_kinds
+                 (key, label, color, requires_note, builtin, sort_order)
+             VALUES (?1, ?2, ?3, ?4, 0,
+                     (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM item_kinds))",
+            params![k.key, k.label, k.color, k.requires_note as i64],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    /* ---- 事项 ---- */
+    for n in &a.bundle.item_notes {
+        // 文件里的类型 key 在本机不存在（1.0 的文件、或者那一节被手改过）时
+        // 退回「未分拣」。写进一个认不出来的 key 会让那一行既不是未分拣、
+        // 也显示不出标签 —— 一个无法从界面上修好的状态
+        let kind = match n.kind.as_deref() {
+            None => None,
+            Some(k) => {
+                let known: i64 = tx
+                    .query_row(
+                        "SELECT COUNT(*) FROM item_kinds WHERE key = ?1",
+                        params![k],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                if known > 0 { Some(k.to_string()) } else { None }
+            }
+        };
+
+        let promoted_ref = translate_ref(
+            n.promoted_kind.as_deref(),
+            n.promoted_ref.as_deref(),
+            &remap,
+            &risk_remap,
+        );
+        // 翻译不出来就退回未分拣。两列同生同灭 —— 留下半截会让界面显示
+        // 「已被删除」，而那是误报
+        let promoted_kind = promoted_ref.as_ref().and(n.promoted_kind.clone());
+
+        tx.execute(
+            "INSERT INTO item_notes (project_id, name, kind, priority, person_id, task_id,
+                                     promoted_kind, promoted_ref, closed_at, resolution,
+                                     created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                project_id,
+                n.name,
+                kind,
+                n.priority.clamp(0, 3),
+                n.person.as_deref().and_then(|p| person_id.get(p).copied()),
+                n.task_id.and_then(|t| remap.get(&t).copied()),
+                promoted_kind,
+                promoted_ref,
+                n.closed_at,
+                n.resolution,
+                n.created_at,
+                n.updated_at,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
     }
 
     Ok((project_id, new_people))
@@ -1577,6 +1896,84 @@ mod tests {
             params![bid, root],
         )
         .unwrap();
+
+        // 一条开了自动顺延的任务 —— 1.0 的格式会静默丢掉这一列
+        conn.execute("UPDATE tasks SET auto_rollover = 1 WHERE id = ?1", params![other])
+            .unwrap();
+
+        /* ---- 事项：四种状态各一条，往返测试才覆盖得全 ---- */
+
+        // 一个自定义类型。内置的两个由迁移插入，不该被导出
+        conn.execute(
+            "INSERT INTO item_kinds (key, label, color, requires_note, builtin, sort_order)
+             VALUES ('custom:qc', '待验收', '#14b8a6', 1, 0, 9)",
+            [],
+        )
+        .unwrap();
+
+        let risk_id: i64 = conn
+            .query_row("SELECT id FROM risks WHERE content = '雨季延误'", [], |r| r.get(0))
+            .unwrap();
+
+        let note = |name: &str,
+                    kind: Option<&str>,
+                    person: Option<i64>,
+                    task: Option<i64>,
+                    pk: Option<&str>,
+                    pr: Option<String>,
+                    created: i64| {
+            conn.execute(
+                "INSERT INTO item_notes (project_id, name, kind, priority, person_id, task_id,
+                                         promoted_kind, promoted_ref, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?7, ?8, ?8)",
+                params![pid, name, kind, person, task, pk, pr, created],
+            )
+            .unwrap();
+        };
+
+        // 未分拣
+        note("下周一确认夹具方案", None, None, None, None, None, 1_700_001_000);
+        // 打了类型（自定义），关联人和活
+        note("打电话确认交期", Some("custom:qc"), Some(zhang), Some(child), None, None, 1_700_002_000);
+        // 晋升成阻碍 —— promoted_ref 里带着**本机**的 task id，必须被翻译
+        note(
+            "电机交付延期",
+            None,
+            Some(li),
+            Some(child),
+            Some("blocker"),
+            Some(format!("{child}/b1")),
+            1_700_003_000,
+        );
+        // 晋升成风险 —— promoted_ref 是本机的 risk id，同样必须被翻译
+        note(
+            "雨季延误",
+            None,
+            None,
+            Some(child),
+            Some("risk"),
+            Some(risk_id.to_string()),
+            1_700_004_000,
+        );
+        // 悬挂引用：指向一条不存在的阻碍。它**不该**被带出去（见 translate_ref）
+        note(
+            "一条已经被删掉的阻碍",
+            None,
+            None,
+            None,
+            Some("blocker"),
+            Some("99999/gone".into()),
+            1_700_005_000,
+        );
+        // 已关闭、带结论
+        conn.execute(
+            "INSERT INTO item_notes (project_id, name, kind, priority, closed_at, resolution,
+                                     created_at, updated_at)
+             VALUES (?1, '旧的待办', 'todo', 3, 1700006100, '已经办完了', 1700006000, 1700006100)",
+            params![pid],
+        )
+        .unwrap();
+
         pid
     }
 
@@ -1622,6 +2019,171 @@ mod tests {
         assert_eq!(to_json(&bundle1).unwrap(), to_json(&bundle2).unwrap());
         assert_eq!(to_json(&people1).unwrap(), to_json(&people2).unwrap());
         assert_eq!(avatars1, avatars2);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /**
+     * 事项的晋升引用必须在两套编号之间**真的被翻译过**。
+     *
+     * 往返幂等那条测试证明不了这一点：一个「原样抄过去」的错误实现，
+     * 两次导出的字节同样相同（文件里存的就是源机器的 id，导入时原样写回，
+     * 再导出又原样读出来）。但那样的数据在对方机器上全是悬挂引用 ——
+     * 而且是静默的：界面上显示「已被删除」，用户会去找一条从没存在过的阻碍。
+     *
+     * 所以这里直接查目标库里那两条引用，确认它们指向的是**目标库的** id。
+     */
+    #[test]
+    fn promoted_refs_are_remapped_into_the_target_database() {
+        let a = mem();
+        let pid = seed(&a, "源项目");
+        let (bundle, people, avatars) = collect(&a, pid).unwrap();
+
+        let path = tmp("promote.ganttproj");
+        write_archive(&path, "0.1.0", "999", &bundle, &people, &avatars).unwrap();
+        let archive = read_archive(&path).unwrap();
+
+        let mut b = mem();
+        // 目标库先放一个干扰项目，把 id 分配范围整个推开 ——
+        // 没有这一步，源库和目标库的 id 可能恰好相同，测试就变成了摆设
+        seed(&b, "干扰项目");
+        b.execute("UPDATE projects SET uuid = 'other' WHERE name = '干扰项目'", [])
+            .unwrap();
+
+        let outcome = apply(&mut b, &archive, None, "源项目", None).unwrap();
+
+        // 阻碍：ref 的前半段必须是**目标库里**那条「放线」的 id
+        let blocker_ref: String = b
+            .query_row(
+                "SELECT promoted_ref FROM item_notes
+                  WHERE project_id = ?1 AND promoted_kind = 'blocker'",
+                params![outcome.project_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let fangxian: i64 = b
+            .query_row(
+                "SELECT id FROM tasks WHERE project_id = ?1 AND name = '放线'",
+                params![outcome.project_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(blocker_ref, format!("{fangxian}/b1"));
+        assert!(fangxian > 3, "目标库的 id 应该和文件里的 1..n 完全错开");
+
+        // 风险：ref 必须是目标库里那条风险的 id
+        let risk_ref: String = b
+            .query_row(
+                "SELECT promoted_ref FROM item_notes
+                  WHERE project_id = ?1 AND promoted_kind = 'risk'",
+                params![outcome.project_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let risk_id: i64 = b
+            .query_row(
+                "SELECT r.id FROM risks r JOIN tasks t ON t.id = r.task_id
+                  WHERE t.project_id = ?1",
+                params![outcome.project_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(risk_ref, risk_id.to_string());
+
+        // 悬挂的那一条不该带着引用过来 —— 带过去就是误报「已被删除」
+        let dangling: i64 = b
+            .query_row(
+                "SELECT COUNT(*) FROM item_notes
+                  WHERE project_id = ?1 AND name = '一条已经被删掉的阻碍'
+                    AND promoted_kind IS NULL AND promoted_ref IS NULL",
+                params![outcome.project_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dangling, 1, "翻译不出来的引用要退回「未分拣」，两列同生同灭");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /**
+     * 自定义类型只补缺的，不覆盖本地同 key 的那一行。
+     *
+     * item_kinds 是全局表：覆盖一个 key 的名字或颜色会连带改掉本机**所有
+     * 其他项目**里那个类型的样子。导入一个项目不该有这种影响范围 ——
+     * 和人员那边「同名即同人、本地优先」是同一条规矩。
+     */
+    #[test]
+    fn item_kinds_merge_locally_without_overwriting() {
+        let a = mem();
+        let pid = seed(&a, "源项目");
+        let (bundle, people, avatars) = collect(&a, pid).unwrap();
+
+        // 只带用到的那个自定义类型，内置两行不该出现在文件里
+        assert_eq!(
+            bundle.item_kinds.iter().map(|k| k.key.as_str()).collect::<Vec<_>>(),
+            vec!["custom:qc"],
+        );
+
+        let path = tmp("kinds.ganttproj");
+        write_archive(&path, "0.1.0", "999", &bundle, &people, &avatars).unwrap();
+        let archive = read_archive(&path).unwrap();
+
+        let mut b = mem();
+        // 本机已经有同一个 key，但名字和颜色都不一样
+        b.execute(
+            "INSERT INTO item_kinds (key, label, color, requires_note, builtin, sort_order)
+             VALUES ('custom:qc', '本机叫这个', '#000000', 0, 0, 5)",
+            [],
+        )
+        .unwrap();
+
+        apply(&mut b, &archive, None, "源项目", None).unwrap();
+
+        let (label, color): (String, String) = b
+            .query_row(
+                "SELECT label, color FROM item_kinds WHERE key = 'custom:qc'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(label, "本机叫这个", "本地的名字不能被导入覆盖");
+        assert_eq!(color, "#000000");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 覆盖导入要把旧的事项清掉。它们挂在项目上、不挂任务，
+    /// 所以 tasks 的 CASCADE 带不走 —— 漏掉就会翻倍，而且旧的那一半全成悬挂引用。
+    #[test]
+    fn overwrite_clears_old_item_notes() {
+        let a = mem();
+        let pid = seed(&a, "P");
+        let (bundle, people, avatars) = collect(&a, pid).unwrap();
+        let path = tmp("overwrite-items.ganttproj");
+        write_archive(&path, "0.1.0", "999", &bundle, &people, &avatars).unwrap();
+        let archive = read_archive(&path).unwrap();
+
+        let mut b = mem();
+        let target = seed(&b, "P");
+        let before: i64 = b
+            .query_row(
+                "SELECT COUNT(*) FROM item_notes WHERE project_id = ?1",
+                params![target],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(before > 0);
+
+        apply(&mut b, &archive, Some(target), "P", None).unwrap();
+
+        let after: i64 = b
+            .query_row(
+                "SELECT COUNT(*) FROM item_notes WHERE project_id = ?1",
+                params![target],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(after, before, "覆盖之后条数不变 —— 不是翻倍");
 
         let _ = std::fs::remove_file(&path);
     }

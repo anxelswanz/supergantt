@@ -33,8 +33,17 @@ import { rolloverOverdue } from "../core/rollover";
 import { canRecordBlocker, openBlockerOn } from "../core/board";
 import { riskFlags, type RiskFlag } from "../core/risks";
 import type { Span, ViewMode } from "../core/viewMode";
-import { isViewKey, type AppView } from "../core/views";
-import type { DailyNote, Risk } from "../db/api";
+import {
+  DEFAULT_ENABLED,
+  isViewKey,
+  parseEnabledViews,
+  serializeEnabledViews,
+  toggleView,
+  type AppView,
+  type BuiltinView,
+} from "../core/views";
+import { BUILTIN_KINDS, blockerRef, parseBlockerRef } from "../core/items";
+import type { DailyNote, ItemKind, ItemNote, Risk } from "../db/api";
 
 /**
  * 一条待写入的逐日记录。
@@ -106,10 +115,22 @@ interface AppState {
   systemDark: boolean;
 
   /**
-   * 顶层视图：甘特 / 看板 / 时间线 / 复盘（core/views.ts）。
-   * 同一批任务的四种看法，切换它不改任何数据。
+   * 顶层视图：甘特 / 看板 / 时间线 / 复盘 / 事项（core/views.ts）。
+   * 同一批数据的几种看法，切换它不改任何数据。
    */
   activeView: AppView;
+
+  /**
+   * 哪些内置视图是开着的。甘特永远在里面。
+   *
+   * 和 colorBy、rowHeightKey 同一类：**全局视图偏好**，存 settings 表，
+   * 不进撤销栈，也不随项目走。为什么不分项目：active_view 本来就是全局的，
+   * 分项目会让「这个项目怎么没看板」变成一个要解释的现象，而收益
+   * （少数项目想精简视图）在这个量级的工具里不值得。
+   *
+   * 插件视图不在这里 —— 它们的开关是「装不装那个插件」。
+   */
+  enabledViews: BuiltinView[];
 
   /**
    * 计划 / 实施。切的是「读哪一组日期」，不是换一张表。
@@ -173,6 +194,38 @@ interface AppState {
    */
   dailyNotes: DailyNote[];
 
+  /**
+   * 当前项目的全部事项，事项视图的数据源之一（另两个是阻碍和风险实体）。
+   *
+   * 即写即存、不进命令栈 —— 同上。库层已按创建时间倒序排好。
+   */
+  itemNotes: ItemNote[];
+
+  /**
+   * 事项类型清单。**全局**，不随项目走（migrations/011_item_kinds.sql）。
+   *
+   * 初值是代码里的常量而不是空数组：事项视图在第一帧就要渲染类型标签，
+   * 而这张表是异步读回来的 —— 空数组会让所有「代办」先显示成裸 key。
+   */
+  itemKinds: ItemKind[];
+
+  /**
+   * `Ctrl+K` 那个弹窗开着没有。
+   *
+   * 放在 store 而不是组件内部，是因为它有**两个入口**：任何视图下的全局
+   * 快捷键，和事项视图里那个「＋」按钮。跨组件的开关必须走共享状态。
+   */
+  quickNoteOpen: boolean;
+
+  /**
+   * 「存下并立刻分拣」（录入弹窗里的 ⌘↵）要给哪一行弹分拣菜单。
+   *
+   * 和 pendingEditId 同款的一次性信号，理由也一样：动作的发起方
+   * （录入弹窗）和执行方（事项列表里那一行）是两个组件，而分拣菜单
+   * 只该有一份实现 —— 在弹窗里再画一个等于两套代码迟早长出两种行为。
+   */
+  pendingSortNoteId: number | null;
+
   /** 全局下一个可用的任务 id，由 load_project 给出。见 nextId 的说明 */
   nextTaskId: number;
   saving: boolean;
@@ -231,6 +284,49 @@ interface AppState {
   editDailyNote: (id: number, day: string, content: string) => Promise<void>;
   removeDailyNote: (id: number) => Promise<void>;
   setActiveView: (view: AppView) => void;
+  /** 开关一个内置视图。甘特关不掉（core/views.toggleView 拦住） */
+  setViewEnabled: (view: BuiltinView, on: boolean) => void;
+
+  /* ---------------- 事项 ---------------- */
+
+  setQuickNoteOpen: (open: boolean) => void;
+  setPendingSortNote: (id: number | null) => void;
+  loadItemNotes: () => Promise<void>;
+  loadItemKinds: () => Promise<void>;
+  /** 记一条。返回新建的那条，录入弹窗据此清空标题继续记 */
+  addItemNote: (
+    name: string,
+    priority: 0 | 1 | 2 | 3,
+    personId: number | null,
+    taskId: number | null,
+  ) => Promise<ItemNote | null>;
+  /** 改字段。**不碰关闭状态和晋升去向** —— 那两件事各有入口 */
+  patchItemNote: (id: number, changes: Partial<ItemNote>) => Promise<void>;
+  /** 关闭。库层按类型校验结论是否必填 */
+  closeItemNote: (id: number, resolution: string | null) => Promise<void>;
+  reopenItemNote: (id: number) => Promise<void>;
+  removeItemNote: (id: number) => Promise<void>;
+  /** 分拣成阻碍：建实体（走命令栈）+ 记引用 */
+  promoteToBlocker: (
+    noteId: number,
+    taskId: number,
+    reason: BlockReason,
+    note?: string,
+  ) => Promise<void>;
+  /** 分拣成风险：库层一个事务里建实体 + 记引用 */
+  promoteToRisk: (noteId: number, taskId: number, level: number) => Promise<void>;
+  /** 撤销分拣：删掉实体，事项退回「未分拣」 */
+  unpromoteNote: (noteId: number) => Promise<void>;
+  saveItemKind: (
+    key: string,
+    label: string,
+    color: string,
+    requiresNote: boolean,
+  ) => Promise<void>;
+  /** 删一个自定义类型。返回被退回「未分拣」的事项条数 */
+  removeItemKind: (key: string) => Promise<number>;
+  /** 只改一条风险的优先级 —— 事项视图里点一下标签就生效 */
+  setRiskPriority: (id: number, priority: 0 | 1 | 2 | 3 | null) => Promise<void>;
   setViewMode: (mode: ViewMode) => void;
   setCompareOn: (on: boolean) => void;
   setActualSpan: (taskId: number, span: Span | null, label?: string) => void;
@@ -274,6 +370,7 @@ const COLOR_BY_KEY = "bar_color_by";
 const ROW_HEIGHT_KEY = "row_height";
 const VIEW_MODE_KEY = "view_mode";
 const ACTIVE_VIEW_KEY = "active_view";
+const ENABLED_VIEWS_KEY = "enabled_views";
 
 export const useAppStore = create<AppState>((set, get) => {
   /**
@@ -379,6 +476,7 @@ export const useAppStore = create<AppState>((set, get) => {
     // 这一行在模块加载时就执行，测试环境的桩还没装上
     systemDark: readSystemDark(),
     activeView: "gantt",
+    enabledViews: [...DEFAULT_ENABLED],
     viewMode: "plan",
     compareOn: false,
     people: [],
@@ -388,25 +486,36 @@ export const useAppStore = create<AppState>((set, get) => {
     openRisks: new Map(),
     projectRisks: [],
     dailyNotes: [],
+    itemNotes: [],
+    itemKinds: BUILTIN_KINDS,
+    quickNoteOpen: false,
+    pendingSortNoteId: null,
     noteDraft: null,
     nextTaskId: 1,
     saving: false,
     saveError: null,
 
     async loadSettings() {
-      const [color, row, view, active] = await Promise.all([
+      const [color, row, view, active, enabled] = await Promise.all([
         api.getSetting(COLOR_BY_KEY).catch(() => null),
         api.getSetting(ROW_HEIGHT_KEY).catch(() => null),
         api.getSetting(VIEW_MODE_KEY).catch(() => null),
         api.getSetting(ACTIVE_VIEW_KEY).catch(() => null),
+        api.getSetting(ENABLED_VIEWS_KEY).catch(() => null),
       ]);
       if (color && ["stage", "assignee", "priority", "none"].includes(color)) {
         set({ colorBy: color as ColorBy });
       }
       if (row && row in ROW_HEIGHTS) set({ rowHeightKey: row as RowHeightKey });
       if (view === "plan" || view === "actual") set({ viewMode: view });
+      // 读不懂一律回退到「全开」，不是「全关」—— 见 views.parseEnabledViews
+      set({ enabledViews: parseEnabledViews(enabled) });
       // 只挡明显不合法的字符串。格式合法但插件已被删掉的那种 key 留给
-      // Workspace 渲染时查注册表 —— 这里读设置的时候插件目录还没扫过
+      // Workspace 渲染时查注册表 —— 这里读设置的时候插件目录还没扫过。
+      //
+      // 「active_view 指向一个被关掉的内置视图」也走同一条兜底路径：
+      // store 这里不判断（它不知道有哪些插件视图），Workspace 查不到就回退到
+      // 甘特。少了那条兜底，关掉看板再重启会得到一个白屏的工作区
       if (isViewKey(active)) set({ activeView: active });
     },
 
@@ -489,6 +598,243 @@ export const useAppStore = create<AppState>((set, get) => {
     setActiveView(view) {
       set({ activeView: view });
       void api.setSetting(ACTIVE_VIEW_KEY, view).catch(() => {});
+    },
+
+    /**
+     * 开关一个内置视图。
+     *
+     * 关掉正在看的那个视图时要同时切走 —— 否则工作区会停在一个已经不在
+     * 清单里的 key 上，而那条兜底逻辑只在下次启动读设置时才跑。
+     * 回落到甘特：它是唯一一个永远在、且必然有意义的视图。
+     */
+    setViewEnabled(view, on) {
+      const next = toggleView(get().enabledViews, view, on);
+      set({ enabledViews: next });
+      void api.setSetting(ENABLED_VIEWS_KEY, serializeEnabledViews(next)).catch(() => {});
+      if (!on && get().activeView === view) get().setActiveView("gantt");
+    },
+
+    /* ---------------- 事项 ---------------- */
+
+    setQuickNoteOpen(open) {
+      set({ quickNoteOpen: open });
+    },
+
+    setPendingSortNote(id) {
+      set({ pendingSortNoteId: id });
+    },
+
+    async loadItemNotes() {
+      const { project } = get();
+      if (!project) return set({ itemNotes: [] });
+      try {
+        set({ itemNotes: await api.loadItemNotes(project.id) });
+      } catch {
+        // 事项读不出来不该拦住整个应用 —— 视图里显示成空
+        set({ itemNotes: [] });
+      }
+    },
+
+    async loadItemKinds() {
+      try {
+        const kinds = await api.listItemKinds();
+        // 空结果保留常量兜底。库里那两行由打开时的 ensure_builtin_kinds 保证
+        // 存在，真查出来空的说明读失败了 —— 那时显示内置两类比显示零类有用
+        if (Array.isArray(kinds) && kinds.length > 0) set({ itemKinds: kinds });
+      } catch {
+        set({ itemKinds: BUILTIN_KINDS });
+      }
+    },
+
+    /**
+     * 记一条事项。
+     *
+     * 返回新建的那条而不是 void：录入弹窗存完要**不关窗、清标题、焦点留在
+     * 标题**，好连着记下一条，而它需要知道这次到底成没成。
+     */
+    async addItemNote(name, priority, personId, taskId) {
+      const { project } = get();
+      if (!project || !name.trim()) return null;
+      try {
+        const row = await api.addItemNote(project.id, name, priority, personId, taskId);
+        // 库层按创建时间倒序返回，这里插到最前面保持同一个顺序 ——
+        // 刚记的那条必须在最上面，否则「快」这个唯一的核心指标就丢了
+        set({ itemNotes: [row, ...get().itemNotes] });
+        return row;
+      } catch {
+        return null;
+      }
+    },
+
+    /**
+     * 改一条事项的字段。
+     *
+     * 先改内存再落库（乐观更新）：行内改优先级、改负责人是点一下就该见效的
+     * 操作，等一次 IPC 往返会让标签「跳一下才变」。失败时整条重新拉回来 ——
+     * 不是回滚到旧值，而是以库为准，那样不会留下一个凭空想出来的中间态。
+     */
+    async patchItemNote(id, changes) {
+      const before = get().itemNotes.find((n) => n.id === id);
+      if (!before) return;
+      const next = { ...before, ...changes };
+      set({ itemNotes: get().itemNotes.map((n) => (n.id === id ? next : n)) });
+      try {
+        await api.updateItemNote(
+          id,
+          next.name,
+          next.kind,
+          next.priority,
+          next.personId,
+          next.taskId,
+        );
+      } catch {
+        await get().loadItemNotes();
+      }
+    },
+
+    async closeItemNote(id, resolution) {
+      try {
+        const closedAt = await api.closeItemNote(id, resolution);
+        set({
+          itemNotes: get().itemNotes.map((n) =>
+            n.id === id ? { ...n, closedAt, resolution: resolution?.trim() || null } : n,
+          ),
+        });
+      } catch {
+        // 库层按类型拦住了（未分拣、结论必填）。以库为准重新拉一遍
+        await get().loadItemNotes();
+      }
+    },
+
+    async reopenItemNote(id) {
+      await api.reopenItemNote(id).catch(() => {});
+      set({
+        itemNotes: get().itemNotes.map((n) =>
+          n.id === id ? { ...n, closedAt: null, resolution: null } : n,
+        ),
+      });
+    },
+
+    async removeItemNote(id) {
+      await api.deleteItemNote(id).catch(() => {});
+      set({ itemNotes: get().itemNotes.filter((n) => n.id !== id) });
+    },
+
+    /**
+     * 分拣成阻碍。
+     *
+     * **两步，而且顺序是定的：先建实体，再记引用。**
+     *
+     * 阻碍住在 `tasks.blocked` 这列 JSON 里，由命令栈 + 防抖的整项目保存写出，
+     * 不在事项那条 IPC 的事务边界内 —— 所以做不到像晋升成风险那样一个事务
+     * 两件事（见 query::promote_note_to_risk）。既然必须分两步，就把**不会失败
+     * 的那一步放前面**：patchTask 是纯内存操作，之后的落库失败会走和其余所有
+     * 编辑完全相同的那条路（状态栏「● 未保存」+ ⌘S 重试）。
+     *
+     * 反过来（先记引用）万一任务那边没落库成功，事项上就留着一个指向不存在的
+     * 阻碍的引用；而现在这个顺序下，最坏情况是实体建好了、事项还显示未分拣 ——
+     * 而那条实体**本来就会出现在清单里**（合并层的第 3 个来源），什么都不会丢。
+     *
+     * 准入检查放在这一步，不在录入时：录入的时候连类型都还没定。
+     */
+    async promoteToBlocker(noteId, taskId, reason, note) {
+      const { tasks } = get();
+      const task = tasks.get(taskId);
+      const row = get().itemNotes.find((n) => n.id === noteId);
+      if (!task || !row || row.promotedKind != null) return;
+
+      const day = today();
+      if (!canRecordBlocker(task, day)) return;
+
+      const changes = openBlockerOn(task, day, reason, note ?? row.name);
+      // 优先级跟着事项过去 —— 用户刚刚做的那个判断不该在分拣这一步被扔掉
+      const period = changes.blocked?.[changes.blocked.length - 1];
+      if (period) period.priority = row.priority as 0 | 1 | 2 | 3;
+      get().patchTask(taskId, changes, "分拣为阻碍");
+      if (!period) return;
+
+      const ref = blockerRef(taskId, period.id);
+      try {
+        await api.promoteNoteToBlocker(noteId, ref);
+        set({
+          itemNotes: get().itemNotes.map((n) =>
+            n.id === noteId ? { ...n, promotedKind: "blocker", promotedRef: ref } : n,
+          ),
+        });
+      } catch {
+        await get().loadItemNotes();
+      }
+    },
+
+    /**
+     * 分拣成风险。库层一个事务里建风险行 + 写回引用，不可能半途而废。
+     *
+     * 优先级一起带过去（migrations/012_risk_priority.sql）。等级（高/中/低）
+     * 是另一个轴，由分拣对话框单独问 —— 「多严重」和「先做哪个」不是一件事。
+     */
+    async promoteToRisk(noteId, taskId, level) {
+      const row = get().itemNotes.find((n) => n.id === noteId);
+      if (!row || row.promotedKind != null) return;
+      try {
+        await api.promoteNoteToRisk(noteId, taskId, row.name, level, row.priority);
+      } catch {
+        return;
+      }
+      await Promise.all([get().loadItemNotes(), get().refreshRisks()]);
+    },
+
+    /**
+     * 撤销分拣：实体删掉，事项退回「未分拣」。
+     *
+     * 这是**悬挂引用唯一的出路**，也是「晋升」这个动作的反向操作。风险那边
+     * 库层在同一个事务里就删掉了；阻碍那边要前端走命令栈把那一段摘掉 ——
+     * 所以库层把原来的引用返回给我们。
+     *
+     * 为什么不靠 ⌘Z：⌘Z 只能退掉命令栈上那一半（阻碍区间），事项上那三列
+     * 它碰不到，结果是一个悬挂引用。这个显式入口才是完整的反向操作。
+     */
+    async unpromoteNote(noteId) {
+      let ref: string | null = null;
+      try {
+        ref = await api.unpromoteNote(noteId);
+      } catch {
+        return;
+      }
+
+      const parsed = ref ? parseBlockerRef(ref) : null;
+      if (parsed) {
+        const task = get().tasks.get(parsed.taskId);
+        // 引用可能已经悬挂（阻碍被单独删过）—— 那就没什么要摘的了
+        if (task?.blocked.some((p) => p.id === parsed.periodId)) {
+          get().removeBlocked(parsed.taskId, parsed.periodId);
+        }
+      }
+      await Promise.all([get().loadItemNotes(), get().refreshRisks()]);
+    },
+
+    async saveItemKind(key, label, color, requiresNote) {
+      await api.saveItemKind(key, label, color, requiresNote).catch(() => {});
+      await get().loadItemKinds();
+    },
+
+    /**
+     * 删一个自定义类型。用着它的事项**退回「未分拣」**，不跟着删 ——
+     * 库层保证（query::delete_item_kind）。返回被退回的条数，界面据此提示。
+     */
+    async removeItemKind(key) {
+      let reverted = 0;
+      try {
+        reverted = await api.deleteItemKind(key);
+      } catch {
+        return 0;
+      }
+      await Promise.all([get().loadItemKinds(), get().loadItemNotes()]);
+      return reverted;
+    },
+
+    async setRiskPriority(id, priority) {
+      await api.setRiskPriority(id, priority).catch(() => {});
+      await get().refreshRisks();
     },
 
     setViewMode(mode) {
@@ -912,6 +1258,10 @@ export const useAppStore = create<AppState>((set, get) => {
 
       void get().refreshRisks();
       void get().loadDailyNotes();
+      void get().loadItemNotes();
+      // 类型表是全局的，不随项目走 —— 但它要在事项视图第一次渲染之前到位，
+      // 而「打开项目」是唯一能保证那之前发生的时机
+      void get().loadItemKinds();
       // 关掉应用过了一夜再打开，没关的阻碍要先补上这几天
       get().extendOpenBlockers();
     },
@@ -950,6 +1300,10 @@ export const useAppStore = create<AppState>((set, get) => {
         openRisks: new Map(),
         projectRisks: [],
         dailyNotes: [],
+        // 事项随项目走，类型清单不随 —— 后者是全局表，下次开项目不必再读一遍
+        itemNotes: [],
+        quickNoteOpen: false,
+        pendingSortNoteId: null,
         noteDraft: null,
       });
       await get().loadProjects();

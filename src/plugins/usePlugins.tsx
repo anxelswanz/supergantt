@@ -59,15 +59,17 @@ export interface ViewEntry {
  * 已经挡掉了和内置 key 重名的注册（见 RESERVED_VIEW_TYPES），所以走到
  * 这里的 key 一定唯一；真出现重复说明有人绕过了校验，那时候保留两份让
  * 它显形，比静默地后者覆盖前者好。
+ *
+ * ⚠️ **`builtin` 必须由调用方 memo 好。** 它曾经被当成常量（用 ref 读、
+ * 不进依赖），那在内置视图可以被用户关掉之后就错了：关掉看板时
+ * `enabledViews` 变了、`builtin` 变了，但 views 没变，于是这份清单不重建 ——
+ * 工具条上那个按钮赖着不走，而快捷键编号已经改了。
+ *
+ * 现在它进依赖。代价是传一个就地构造的数组字面量会让清单每帧重建；
+ * 换来的是「内置视图清单会变」这件事真的被表达出来了。
  */
 export function useViews(builtin: ViewEntry[]): ViewEntry[] {
   const { views } = useRegistry();
-
-  // 不把 builtin 写进依赖 —— 调用方多半是就地构造的数组字面量，每次渲染
-  // 都是新引用，写进去等于每帧都重建整个清单。内置视图是常量，清单只该
-  // 在插件注册表变化时重建。所以用 ref 拿最新的 builtin，依赖只留 views。
-  const builtinRef = React.useRef(builtin);
-  builtinRef.current = builtin;
 
   return React.useMemo(() => {
     const fromPlugins: ViewEntry[] = views.map((v: RegisteredView) => ({
@@ -77,8 +79,8 @@ export function useViews(builtin: ViewEntry[]): ViewEntry[] {
       pluginId: v.pluginId,
       render: v.render,
     }));
-    return [...builtinRef.current, ...fromPlugins];
-  }, [views]);
+    return [...builtin, ...fromPlugins];
+  }, [views, builtin]);
 }
 
 /* ------------------------------------------------------------------ */

@@ -149,6 +149,13 @@ pub struct Risk {
     pub resolved_at: Option<i64>,
     /// 怎么关掉的。复盘时真正有价值的是这一句，不是那个勾
     pub resolution: Option<String>,
+    /**
+     * 「先做哪个」。和 `level` 是两个轴，见 migrations/012_risk_priority.sql。
+     *
+     * None = 没填过。历史风险确实没有这一项，不伪造一个「中」——
+     * 界面上显示一个空的优先级槽。
+     */
+    pub priority: Option<i64>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -180,4 +187,61 @@ pub struct DailyNote {
     /// 什么时候写的。和 day 不是一回事 —— 周五补记周三的事，两者相差两天
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/* ------------------------------------------------------------------ */
+/* 事项                                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 一条事项（QuickNote）。见 migrations/010_item_notes.sql。
+ *
+ * 它是系统里唯一一种**不需要日期就能存在**的东西。四个计划视图都要求
+ * 「任务 + 日期 + 负责人」齐备才接得住，而现实里最先出现的东西只有一句话。
+ *
+ * 分拣（决定它是什么）是和录入分开的动作：`kind` 为 None 就是「还没想清楚」，
+ * 那是一个真实且重要的状态，不是缺省值。
+ */
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemNote {
+    pub id: i64,
+    pub project_id: i64,
+    pub name: String,
+    /// None = 未分拣。不是「其他」
+    pub kind: Option<String>,
+    /// P0–P3，和任务的紧急度同一把刻度
+    pub priority: i64,
+    pub person_id: Option<i64>,
+    /// 关联的活。任务删掉后这里变 None，但记录留着（ON DELETE SET NULL）
+    pub task_id: Option<i64>,
+    /// 'blocker' | 'risk'。非 None = 已经晋升成一个真实实体
+    pub promoted_kind: Option<String>,
+    /// 阻碍是 '<taskId>/<periodId>'，风险是 '<riskId>'。可能悬挂 —— 那是预期状态
+    pub promoted_ref: Option<String>,
+    /// 关闭时刻（Unix 秒）。None = 还开着。**没有单独的 closed 布尔**
+    pub closed_at: Option<i64>,
+    pub resolution: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/**
+ * 一个事项类型。全局表，见 migrations/011_item_kinds.sql。
+ *
+ * 阻碍和风险**不在**这里：它们是实体不是分类，身份由 ItemNote 的
+ * promoted_kind + promoted_ref 表达。
+ */
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemKind {
+    /// 'todo' | 'issue' | 'custom:<uuid>'
+    pub key: String,
+    pub label: String,
+    pub color: String,
+    /// 关闭时是否必须写一句结论
+    pub requires_note: bool,
+    /// 内置行：可改名改色，不可删
+    pub builtin: bool,
+    pub sort_order: f64,
 }

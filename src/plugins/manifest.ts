@@ -8,6 +8,7 @@
  */
 
 import type { PluginManifest, PluginViewDeclaration, Version } from "./types";
+import { APP_VIEWS } from "../core/views";
 
 /**
  * 宿主当前提供的 API 版本。
@@ -18,8 +19,14 @@ import type { PluginManifest, PluginViewDeclaration, Version } from "./types";
  */
 export const HOST_API_VERSION: Version = { major: 1, minor: 0 };
 
-/** 内置视图的 key。插件视图不能用这些，否则会把甘特图顶掉 */
-const RESERVED_VIEW_TYPES = new Set(["gantt", "board", "timeline", "review"]);
+/**
+ * 内置视图的 key。插件视图不能用这些，否则会把甘特图顶掉。
+ *
+ * 直接从 core/views.ts 读，不再抄一份 ——
+ * 抄一份的后果是加了第五个内置视图之后，插件仍然能注册 "items" 把它顶掉，
+ * 而那种冲突只在「装了那个插件」的机器上复现。
+ */
+const RESERVED_VIEW_TYPES = new Set<string>(APP_VIEWS.map((v) => v.key));
 
 /**
  * 插件 id 的形状：小写字母、数字、连字符，字母开头。

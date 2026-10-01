@@ -8,7 +8,10 @@ import {
   type RowHeightKey,
 } from "../gantt/theme";
 import { PROJECT_COLORS, useAppStore } from "../store/useAppStore";
-import { REVEAL_LABEL } from "../core/keys";
+import { REVEAL_LABEL, shortcut } from "../core/keys";
+import { APP_VIEWS, OPTIONAL_VIEWS, PERMANENT_VIEW } from "../core/views";
+import { BLOCKER_KIND, RISK_KIND, newKindKey } from "../core/items";
+import type { ItemKind } from "../db/api";
 import { plugins } from "../plugins/registry";
 import type { PluginRecord, PluginSettingField } from "../plugins/types";
 import { useRegistry } from "../plugins/usePlugins";
@@ -29,10 +32,13 @@ import { CalendarPane } from "./CalendarSettings";
  * 负责人偶尔维护，数据文件几乎不碰但出事时必须找得到。
  */
 
-type Tab = "appearance" | "people" | "calendar" | "plugins" | "data";
+type Tab = "appearance" | "views" | "people" | "calendar" | "plugins" | "data";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "appearance", label: "外观" },
+  // 视图紧跟外观：两者都是「这个软件长什么样」。事项类型也在这一页 ——
+  // 它属于「事项视图怎么用」，和负责人、工作日历那种项目数据不是一类
+  { id: "views", label: "视图" },
   { id: "people", label: "负责人" },
   { id: "calendar", label: "工作日历" },
   // 插件排在数据前面：它是「扩展这个软件」的地方，属于日常会来的，
@@ -96,6 +102,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
         <div className="min-w-0 flex-1 overflow-y-auto p-5">
           {tab === "appearance" && <AppearancePane />}
+          {tab === "views" && <ViewsPane />}
           {tab === "people" && <PeoplePane />}
           {tab === "calendar" && <CalendarPane />}
           {tab === "plugins" && <PluginsPane />}
@@ -399,6 +406,280 @@ function PluginFieldRow({ pluginId, field }: { pluginId: string; field: PluginSe
       {field.desc && (
         <div className="mt-1 text-[10px] leading-relaxed text-[var(--text-dim)]">{field.desc}</div>
       )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* 视图与事项类型                                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 视图页。两件事：开关哪些视图，以及事项有哪些类型。
+ *
+ * 放在一页是因为它们回答的是同一个问题 ——「这个软件给我摆哪些面、
+ * 我在事项里怎么给东西分类」。都是全局偏好，都不随项目走。
+ */
+function ViewsPane() {
+  return (
+    <>
+      <Section
+        title="启用哪些视图"
+        desc="关掉的视图连快捷键一起消失，⌘1–⌘5 的编号跟着重新算，不留死键。这是全局偏好，不随项目走。"
+      >
+        <ViewToggles />
+      </Section>
+
+      <div className="mt-8">
+        <ItemKindsPane />
+      </div>
+    </>
+  );
+}
+
+function ViewToggles() {
+  const enabled = useAppStore((s) => s.enabledViews);
+  const setViewEnabled = useAppStore((s) => s.setViewEnabled);
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      {APP_VIEWS.map((v) => {
+        const permanent = v.key === PERMANENT_VIEW;
+        const on = permanent || enabled.includes(v.key);
+        // 编号按**启用后的次序**算，和工具条、快捷键完全一致
+        const index = enabled.indexOf(v.key);
+        return (
+          <button
+            key={v.key}
+            onClick={() => setViewEnabled(v.key, !on)}
+            disabled={permanent}
+            title={
+              permanent
+                ? "甘特不能关：它是唯一能拖日期、改工期的面，关掉之后这个软件就没有排期能力了"
+                : v.hint
+            }
+            className={`flex items-center gap-2.5 rounded-xl border p-3 text-left transition-colors ${
+              on
+                ? "border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_8%,transparent)]"
+                : "border-[var(--rule)] hover:border-[var(--text-dim)]"
+            } disabled:cursor-default`}
+          >
+            <span
+              className="grid size-4 shrink-0 place-items-center rounded text-[10px] leading-none text-white"
+              style={{ background: on ? "var(--accent)" : "var(--rule)" }}
+            >
+              {on ? "✓" : ""}
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="flex items-baseline gap-1.5">
+                <span className="text-xs font-semibold text-[var(--text)]">{v.label}</span>
+                {on && index >= 0 && (
+                  <kbd className="font-mono text-[9px] text-[var(--text-dim)]">
+                    {shortcut("mod", String(index + 1))}
+                  </kbd>
+                )}
+                {permanent && (
+                  <span className="ml-auto text-[9px] text-[var(--text-dim)]">不可关闭</span>
+                )}
+              </span>
+              <span className="mt-0.5 block text-[10px] leading-relaxed text-[var(--text-dim)]">
+                {v.hint}
+              </span>
+            </span>
+          </button>
+        );
+      })}
+
+      <p className="mt-2 text-[10px] leading-relaxed text-[var(--text-dim)]">
+        正在看的那个视图被关掉时会自动切回甘特。关掉的视图不会丢任何数据 ——
+        它只是不再占工具条上的一个位置，重新打开就回来了。
+        {OPTIONAL_VIEWS.length} 个可关，甘特始终在。
+      </p>
+    </div>
+  );
+}
+
+/**
+ * 事项类型。
+ *
+ * **阻碍和风险不在这张清单里**，所以页面上要写明白为什么 —— 否则用户会
+ * 在这找它们，找不到就以为是漏了。它们是实体不是分类：一条阻碍会推排期、
+ * 进复盘的归因图、让卡片上看板的受阻列，而一个类型标签做不到其中任何一件
+ * （设计稿 §6.3）。做成这张表的两行只会制造出「名字叫阻碍、底下没有实体」
+ * 的悬空状态。
+ */
+function ItemKindsPane() {
+  const kinds = useAppStore((s) => s.itemKinds);
+  const saveItemKind = useAppStore((s) => s.saveItemKind);
+  const removeItemKind = useAppStore((s) => s.removeItemKind);
+  const [adding, setAdding] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  return (
+    <Section
+      title="事项类型"
+      desc="事项分拣时能选的类型。全局定义，所有项目共用 —— 类型是「这个团队怎么给事情分类」，不是某个项目的属性。"
+    >
+      <div className="flex flex-col gap-1.5">
+        {kinds.map((k) => (
+          <KindRow
+            key={k.key}
+            kind={k}
+            onSave={(label, color, requiresNote) =>
+              void saveItemKind(k.key, label, color, requiresNote)
+            }
+            onDelete={async () => {
+              const n = await removeItemKind(k.key);
+              setNotice(
+                n > 0
+                  ? `已删除。${n} 条用着这个类型的事项退回了「未分拣」—— 内容都还在。`
+                  : "已删除。",
+              );
+            }}
+          />
+        ))}
+
+        {adding ? (
+          <KindRow
+            kind={{
+              key: newKindKey(),
+              label: "",
+              color: PROJECT_COLORS[kinds.length % PROJECT_COLORS.length],
+              requiresNote: false,
+              builtin: false,
+              sortOrder: kinds.length,
+            }}
+            draft
+            onSave={(label, color, requiresNote) => {
+              void saveItemKind(newKindKey(), label, color, requiresNote);
+              setAdding(false);
+            }}
+            onDelete={() => setAdding(false)}
+          />
+        ) : (
+          <button
+            onClick={() => setAdding(true)}
+            className="self-start rounded-lg border border-dashed border-[var(--rule)] px-2.5 py-1.5 text-[11px] text-[var(--text-dim)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
+          >
+            ＋ 新建类型
+          </button>
+        )}
+      </div>
+
+      {notice && (
+        <p className="mt-2 text-[10px] leading-relaxed text-emerald-600">{notice}</p>
+      )}
+
+      <div className="mt-4 rounded-lg border border-[var(--rule)] bg-[var(--surface-alt)] px-2.5 py-2">
+        <div className="mb-1 text-[10px] font-semibold text-[var(--text)]">
+          为什么这里没有「阻碍」和「风险」
+        </div>
+        <p className="text-[10px] leading-relaxed text-[var(--text-dim)]">
+          它们是<strong>实体</strong>，不是分类。事项分拣成
+          <span style={{ color: BLOCKER_KIND.color }}> 阻碍 </span>会真的在那条活上建一段受阻
+          —— 它每天跨天顺延计划结束日、进复盘的归因图、让卡片落进看板的受阻列；分拣成
+          <span style={{ color: RISK_KIND.color }}> 风险 </span>会真的写进风险表。
+          一个只打标签的「阻碍」做不到其中任何一件，于是同一个词在三个地方指不同的事，
+          而用户没法知道哪个算数。
+        </p>
+      </div>
+
+      <p className="mt-3 text-[10px] leading-relaxed text-[var(--text-dim)]">
+        「关闭需写结论」这个开关值得认真选：一个只打勾的关闭，把「这条不用管了」和
+        「我们做了什么让它不用管」压成了同一个比特，而后者才是复盘时唯一值得抄的东西。
+        「代办」默认关着（关掉一个打电话确认交期的待办，没什么结论可写），
+        「问题」默认开着。
+      </p>
+    </Section>
+  );
+}
+
+function KindRow({
+  kind,
+  draft,
+  onSave,
+  onDelete,
+}: {
+  kind: ItemKind;
+  /** 还没落库的新行：直接进编辑态，取消就消失 */
+  draft?: boolean;
+  onSave: (label: string, color: string, requiresNote: boolean) => void;
+  onDelete: () => void | Promise<void>;
+}) {
+  const [label, setLabel] = useState(kind.label);
+  const [color, setColor] = useState(kind.color);
+  const [requiresNote, setRequiresNote] = useState(kind.requiresNote);
+  const [confirming, setConfirming] = useState(false);
+
+  const dirty =
+    label.trim() !== kind.label ||
+    color !== kind.color ||
+    requiresNote !== kind.requiresNote;
+
+  return (
+    <div className="flex items-center gap-2 rounded-xl border border-[var(--rule)] px-2.5 py-2">
+      <input
+        type="color"
+        value={color}
+        onChange={(e) => setColor(e.target.value)}
+        title="标签颜色"
+        className="size-5 shrink-0 cursor-pointer rounded border-0 bg-transparent p-0"
+      />
+      <input
+        value={label}
+        onChange={(e) => setLabel(e.target.value)}
+        placeholder="类型名称"
+        autoFocus={draft}
+        className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 text-xs text-[var(--text)] outline-none hover:border-[var(--rule)] focus:border-[var(--accent)]"
+      />
+
+      <button
+        onClick={() => setRequiresNote((v) => !v)}
+        title="关闭这一类事项时，是否必须写一句「怎么解决的」"
+        className="shrink-0 rounded-full border px-2 py-0.5 text-[9px] font-medium transition-colors"
+        style={
+          requiresNote
+            ? { borderColor: "var(--accent)", color: "var(--accent)" }
+            : { borderColor: "var(--rule)", color: "var(--text-dim)" }
+        }
+      >
+        {requiresNote ? "关闭需写结论" : "关闭即完成"}
+      </button>
+
+      {kind.builtin && (
+        <span className="shrink-0 text-[9px] text-[var(--text-dim)]" title="内置类型可改名改色，但不能删">
+          内置
+        </span>
+      )}
+
+      {(dirty || draft) && label.trim() && (
+        <button
+          onClick={() => onSave(label, color, requiresNote)}
+          className="shrink-0 rounded-md px-2 py-0.5 text-[10px] font-medium text-white"
+          style={{ background: "var(--accent)" }}
+        >
+          保存
+        </button>
+      )}
+
+      {!kind.builtin &&
+        (confirming ? (
+          <button
+            onClick={() => void onDelete()}
+            className="shrink-0 rounded-md bg-rose-500/12 px-2 py-0.5 text-[10px] font-medium text-rose-500"
+            title="用着这个类型的事项会退回「未分拣」，内容不会丢"
+          >
+            {draft ? "取消" : "确认删除"}
+          </button>
+        ) : (
+          <button
+            onClick={() => (draft ? void onDelete() : setConfirming(true))}
+            className="grid size-5 shrink-0 place-items-center rounded text-[11px] text-[var(--text-dim)] hover:bg-rose-500/10 hover:text-rose-500"
+            title={draft ? "取消" : "删除这个类型"}
+          >
+            {draft ? "✕" : "🗑"}
+          </button>
+        ))}
     </div>
   );
 }

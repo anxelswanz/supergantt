@@ -31,7 +31,7 @@ export type AppView = string;
  * 只有「确实只对内置视图有意义」的地方用它 —— 比如状态栏的 HintsFor，
  * 插件视图该显示什么提示是插件自己的事，宿主猜不出来。
  */
-export type BuiltinView = "gantt" | "board" | "timeline" | "review";
+export type BuiltinView = "gantt" | "board" | "timeline" | "review" | "items";
 
 export interface ViewMeta {
   key: BuiltinView;
@@ -52,7 +52,80 @@ export const APP_VIEWS: ViewMeta[] = [
   { key: "board", label: "看板", hint: "此刻谁没开始、谁在做、谁卡住了" },
   { key: "timeline", label: "时间线", hint: "逐日流水：每天发生了什么" },
   { key: "review", label: "复盘", hint: "计划与实际差在哪、为什么、丢了多少天" },
+  { key: "items", label: "事项", hint: "还没成为计划的那些：代办、问题、风险、阻碍" },
 ];
+
+/* ------------------------------------------------------------------ */
+/* 开关                                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * **甘特不可关。**
+ *
+ * 它是唯一能拖日期、改工期的面 —— 关掉之后这个应用就没有生产排期的能力了，
+ * 剩下四个全是只读或半只读的投影。「至少保留一个视图」这条约束因此自动满足，
+ * 不需要界面上再写一遍计数校验。
+ */
+export const PERMANENT_VIEW: BuiltinView = "gantt";
+
+/** 可以关掉的四个。顺序和 APP_VIEWS 一致，设置界面照着排 */
+export const OPTIONAL_VIEWS: BuiltinView[] = ["board", "timeline", "review", "items"];
+
+/**
+ * 默认全开。
+ *
+ * 新装的用户应该先看到这个软件会什么，再决定关掉哪些 —— 反过来（默认只留
+ * 甘特，让人自己去找）等于把四个视图藏起来，而没人会去设置里找自己不知道
+ * 存在的东西。
+ */
+export const DEFAULT_ENABLED: BuiltinView[] = [PERMANENT_VIEW, ...OPTIONAL_VIEWS];
+
+/**
+ * 读 `settings.enabled_views` 那个 JSON 数组。
+ *
+ * 任何读不懂的值都回退到「全开」，而不是「全关」：一个被手工改坏的设置项
+ * 不该让用户打开应用发现只剩一个视图 —— 那看起来像功能丢了，而且他不会
+ * 猜到是设置的问题。
+ *
+ * **插件视图不受这个开关管。** 它们的开关是「装不装这个插件」（设置 → 插件），
+ * 在这里再加一道等于同一件事有两个开关，用户关了一个发现没反应。
+ * 所以未知的 key 一律丢掉，只认内置的那几个。
+ */
+export function parseEnabledViews(raw: string | null | undefined): BuiltinView[] {
+  if (!raw) return [...DEFAULT_ENABLED];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [...DEFAULT_ENABLED];
+  }
+  if (!Array.isArray(parsed)) return [...DEFAULT_ENABLED];
+
+  const wanted = new Set(
+    parsed.filter((v): v is BuiltinView => typeof v === "string" && isOptionalView(v)),
+  );
+  // 甘特永远在，而且永远在第一个 —— ⌘1 不该因为一次设置变成别的东西
+  return [PERMANENT_VIEW, ...OPTIONAL_VIEWS.filter((v) => wanted.has(v))];
+}
+
+export const serializeEnabledViews = (views: BuiltinView[]): string =>
+  JSON.stringify(views.filter((v) => v === PERMANENT_VIEW || isOptionalView(v)));
+
+const isOptionalView = (v: string): v is BuiltinView =>
+  (OPTIONAL_VIEWS as string[]).includes(v);
+
+/** 开关一个视图。甘特关不掉，传它进来原样返回 */
+export function toggleView(
+  enabled: BuiltinView[],
+  key: BuiltinView,
+  on: boolean,
+): BuiltinView[] {
+  if (key === PERMANENT_VIEW) return enabled;
+  const set = new Set(enabled);
+  if (on) set.add(key);
+  else set.delete(key);
+  return [PERMANENT_VIEW, ...OPTIONAL_VIEWS.filter((v) => set.has(v))];
+}
 
 /**
  * key 的字符集约束，和 plugins/manifest.ts 的 ID_PATTERN 同源。
