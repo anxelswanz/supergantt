@@ -442,11 +442,14 @@ function InlineComposer({ tasks, day }: { tasks: ResolvedTask[]; day: number }) 
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-[var(--rule)] bg-[var(--surface-alt)] px-4 py-2">
       {/*
-        标题框比旁边那几个下拉**明显大一号**。
+        标题框比旁边那几个下拉**明显大一号**：44px 对 26px，差着一截。
 
         这一行里只有它是必填的，其余三个都可以不动就 Enter 存下 ——
         版面上的大小差别要把这件事说出来，否则四个等高的控件读起来像四个
         同等重要的字段，而那恰好是「录入要快」的反面。
+
+        高度写死成 h-11 而不是靠 padding 撑：padding 撑出来的高度会随字号
+        和行高变，而这一行的视觉重心不该因为将来某次改字号就悄悄塌回去。
       */}
       <input
         ref={inputRef}
@@ -457,7 +460,7 @@ function InlineComposer({ tasks, day }: { tasks: ResolvedTask[]; day: number }) 
           if (e.key === "Enter" && dropdownOpen.current === 0) void submit();
         }}
         placeholder="记一条…（↵ 保存并接着记）"
-        className="min-w-[200px] flex-1 rounded-lg border border-[var(--rule)] bg-[var(--surface)] px-3 py-2 text-[13px] leading-5 text-[var(--text)] outline-none focus:border-[var(--accent)]"
+        className="h-11 min-w-[200px] flex-1 rounded-lg border border-[var(--rule)] bg-[var(--surface)] px-3 text-[13px] text-[var(--text)] outline-none focus:border-[var(--accent)]"
       />
       <FilterSelect
         value={personId}

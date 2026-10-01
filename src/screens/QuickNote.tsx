@@ -194,7 +194,8 @@ export function QuickNote() {
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="会上提到的那件事…"
-            className="w-full rounded-lg border border-[var(--rule)] bg-[var(--surface-alt)] px-2.5 py-2 text-[13px] text-[var(--text)] outline-none focus:border-[var(--accent)]"
+            /* 弹窗里它是唯一的主角，比事项视图那个常驻输入行再高一点 */
+            className="h-12 w-full rounded-lg border border-[var(--rule)] bg-[var(--surface-alt)] px-3 text-[14px] text-[var(--text)] outline-none focus:border-[var(--accent)]"
           />
 
           {/* Tab 顺序就是这个顺序：标题 → 负责人 → 任务 → 优先级 */}
