@@ -441,6 +441,13 @@ function InlineComposer({ tasks, day }: { tasks: ResolvedTask[]; day: number }) 
 
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-[var(--rule)] bg-[var(--surface-alt)] px-4 py-2">
+      {/*
+        标题框比旁边那几个下拉**明显大一号**。
+
+        这一行里只有它是必填的，其余三个都可以不动就 Enter 存下 ——
+        版面上的大小差别要把这件事说出来，否则四个等高的控件读起来像四个
+        同等重要的字段，而那恰好是「录入要快」的反面。
+      */}
       <input
         ref={inputRef}
         value={name}
@@ -450,7 +457,7 @@ function InlineComposer({ tasks, day }: { tasks: ResolvedTask[]; day: number }) 
           if (e.key === "Enter" && dropdownOpen.current === 0) void submit();
         }}
         placeholder="记一条…（↵ 保存并接着记）"
-        className="min-w-[160px] flex-1 rounded-lg border border-[var(--rule)] bg-[var(--surface)] px-2.5 py-1.5 text-[11px] text-[var(--text)] outline-none focus:border-[var(--accent)]"
+        className="min-w-[200px] flex-1 rounded-lg border border-[var(--rule)] bg-[var(--surface)] px-3 py-2 text-[13px] leading-5 text-[var(--text)] outline-none focus:border-[var(--accent)]"
       />
       <FilterSelect
         value={personId}
@@ -672,6 +679,22 @@ function Row({
         </button>
 
         {/*
+          日期在行首。
+
+          清单是按记录时间倒序读的，把这一列摆在最左边，它就成了一道
+          日期标尺 —— 顺着往下扫能看出「这几条是同一天记的」。摆在右边时
+          它只是一个贴在行尾的属性，回答不了那个问题。
+
+          固定宽度 + tabular-nums，所以标题的起点在每一行都对齐。
+        */}
+        <span
+          className="w-[32px] shrink-0 font-mono text-[10px] tabular-nums text-[var(--text-dim)]"
+          title={`记录于 ${new Date(row.createdAt * 1000).toLocaleDateString("zh-CN")}`}
+        >
+          {shortDate(row.createdAt)}
+        </span>
+
+        {/*
           标题。拿掉两列之后它终于能铺满剩下的宽度 ——
           一条事项的全部价值就在这句话里，别的都是它的属性
         */}
@@ -697,13 +720,6 @@ function Row({
         {/* 右侧属性区：多急 · 什么时候记的 · 下一步点哪 */}
         <PriorityTag value={row.priority} onPick={setPriority} />
 
-        <span
-          className="w-[34px] shrink-0 text-right font-mono text-[10px] tabular-nums text-[var(--text-dim)]"
-          title={`记录于 ${new Date(row.createdAt * 1000).toLocaleDateString("zh-CN")}`}
-        >
-          {shortDate(row.createdAt)}
-        </span>
-
         {/*
           固定宽度的槽位，标签本身保持自然宽度、靠右贴齐。
           不给槽位的话，「加入到事项 ▾」比「阻碍」宽一倍多，右侧那几列
@@ -728,7 +744,7 @@ function Row({
         不该为了对齐而空占 18 像素。缩进对齐到标题的起点
       */}
       {(meta.length > 0 || row.resolution || row.dangling) && (
-        <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 pl-[25px] text-[10px] leading-snug">
+        <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 pl-[67px] text-[10px] leading-snug">
           {row.dangling && (
             <>
               <span className="font-medium text-rose-500" title="它当初分拣成的那个阻碍/风险已经被删掉了">
@@ -778,7 +794,7 @@ function Row({
       {/* 写结论的输入框。圆圈长得像 checkbox，但点下去的后果是「开始写一句话」——
           这一步摩擦是故意的，它正是「关闭要留下怎么关的」这条规则的全部意义 */}
       {writing && (
-        <div className="mt-1 flex items-start gap-1.5 pl-[25px]">
+        <div className="mt-1 flex items-start gap-1.5 pl-[67px]">
           <textarea
             autoFocus
             value={how}
