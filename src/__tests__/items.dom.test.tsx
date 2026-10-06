@@ -215,6 +215,19 @@ describe("事项视图", () => {
    * 未分拣那一行：右侧是一句召唤（「加入到事项 ▾」），而圆圈点不动 ——
    * 还没决定它是什么，谈不上完成。
    */
+  /** 未关闭里一条都没命中、答案却折在已关闭里：直接摊开，而不是说「没有」 */
+  it("搜索只命中已关闭的那条时，已关闭区自动展开", async () => {
+    const store = await openWorkspace();
+    store.getState().setActiveView("items");
+
+    await screen.findByText("下周一确认夹具方案");
+    fireEvent.change(screen.getByPlaceholderText("搜索标题或结论…"), {
+      target: { value: "打过电话" },
+    });
+    expect(await screen.findByText("已经办完的那条")).toBeTruthy();
+    expect(screen.getByText(/已关闭里命中的 1 条/)).toBeTruthy();
+  });
+
   it("未分拣的那条给出「加入到事项」，并且不能关闭", async () => {
     const store = await openWorkspace();
     store.getState().setActiveView("items");

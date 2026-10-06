@@ -415,7 +415,7 @@ export interface ItemFilter {
   /** 负责人 id；null = 筛「未指派」。空数组 = 不筛 */
   people: (number | null)[];
   onlyOpen: boolean;
-  /** 搜索词，对标题做大小写无关的包含匹配 */
+  /** 搜索词，对标题和结论做大小写无关的包含匹配 */
   query: string;
 }
 
@@ -441,7 +441,9 @@ export function filterItems(rows: ItemRow[], f: ItemFilter): ItemRow[] {
     if (f.priorities.length > 0 && (r.priority == null || !f.priorities.includes(r.priority)))
       return false;
     if (f.people.length > 0 && !f.people.includes(r.personId)) return false;
-    if (q && !r.title.toLowerCase().includes(q)) return false;
+    // 结论也搜：「上次那个怎么解决的」是翻已关闭事项的主要理由
+    if (q && !r.title.toLowerCase().includes(q) && !(r.resolution ?? "").toLowerCase().includes(q))
+      return false;
     return true;
   });
 }

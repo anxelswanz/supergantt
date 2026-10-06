@@ -130,7 +130,14 @@ export function ItemsView() {
     return () => clearTimeout(id);
   }, [autoSort, setPendingSortNote]);
 
+  // 头部计数说的是「整个项目还有多少没处理」，不跟着筛选器变 ——
+  // 筛出来多少条写在筛选栏自己那一行
+  const openTotal = rows.filter((r) => !r.closed).length;
   const unsorted = rows.filter((r) => r.kind == null && !r.closed).length;
+  const filtering = hasFilter(filter);
+  // 未关闭里一条都没命中、而已关闭里有：直接摊开。不然用户看到的是「没有」，
+  // 而答案其实就折在下面
+  const showClosed = closedOpen || (filtering && open.length === 0 && closed.length > 0);
 
   return (
     <div className="flex min-h-0 w-full flex-col bg-[var(--surface)]">
@@ -139,21 +146,32 @@ export function ItemsView() {
         <div className="flex items-baseline gap-2">
           <h2 className="text-sm font-semibold text-[var(--text)]">事项</h2>
           <span className="text-[10px] text-[var(--text-dim)]">
-            {open.length} 条未关闭
+            {openTotal} 条未关闭
             {unsorted > 0 && ` · ${unsorted} 条还没分拣`}
             {" · 按记录时间倒序"}
           </span>
 
+          {/*
+            不再放「＋ 记一条」按钮：下面就是常驻录入行，同一个视图里两个入口
+            做同一件事只会让人犹豫点哪个。⌘K 那个弹窗是给**别的**视图用的，
+            这里只提一句它的存在
+          */}
           <button
             onClick={() => setQuickNoteOpen(true)}
-            title={`快速记录（${shortcut("mod", "K")} 在任何视图下都能用）`}
-            className="ml-auto shrink-0 rounded-full border border-[var(--rule)] px-2.5 py-1 text-[10px] font-medium text-[var(--text-dim)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
+            title="在任何视图下都能唤出快速记录"
+            className="ml-auto shrink-0 text-[10px] text-[var(--text-dim)] transition-colors hover:text-[var(--text)]"
           >
-            ＋ 记一条　{shortcut("mod", "K")}
+            <Kbd>{shortcut("mod", "K")}</Kbd> 随处记一条
           </button>
         </div>
 
-        <Filters filter={filter} onChange={setFilter} kinds={kinds} people={people} />
+        <Filters
+          filter={filter}
+          onChange={setFilter}
+          kinds={kinds}
+          people={people}
+          matched={visible.length}
+        />
       </div>
 
       {/*
@@ -166,13 +184,27 @@ export function ItemsView() {
       <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
         {open.length === 0 && (
           <div className="px-2 py-10 text-center text-[11px] leading-relaxed text-[var(--text-dim)]">
-            {hasFilter(filter)
-              ? "这些筛选条件下没有事项。"
-              : `还没有事项。想到什么先按 ${shortcut("mod", "K")} 记下来 ——`}
-            <br />
-            {hasFilter(filter)
-              ? "清掉筛选器看看全部。"
-              : "不用先想清楚它是什么，也不用填日期。"}
+            {!filtering ? (
+              <>
+                {closed.length > 0 ? "全部处理完了。" : "还没有事项。"}想到什么就在上面记一句 ——
+                <br />
+                不用先想清楚它是什么，也不用填日期。
+              </>
+            ) : closed.length > 0 ? (
+              <>未关闭的事项里没有匹配的，下面是已关闭里命中的 {closed.length} 条。</>
+            ) : (
+              <>
+                这些筛选条件下没有事项。
+                <div className="mt-2">
+                  <button
+                    onClick={() => setFilter(EMPTY_FILTER)}
+                    className="rounded-md border border-[var(--rule)] px-2.5 py-1 text-[10px] font-medium text-[var(--text)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                  >
+                    清除筛选
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         )}
 
@@ -201,10 +233,10 @@ export function ItemsView() {
               onClick={() => setClosedOpen((v) => !v)}
               className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[10px] font-medium text-[var(--text-dim)] transition-colors hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
             >
-              <span className="w-2">{closedOpen ? "▾" : "▸"}</span>
+              <span className="w-2">{showClosed ? "▾" : "▸"}</span>
               已关闭 ({closed.length})
             </button>
-            {closedOpen && (
+            {showClosed && (
               <div className="mt-0.5 flex flex-col gap-0.5">
                 {closed.map((row) => (
                   <Row
@@ -249,21 +281,35 @@ export function ItemsView() {
 /* ------------------------------------------------------------------ */
 
 /**
- * 四个可叠加的筛选器 + 一个搜索框。
+ * 一个搜索框 + 三个可叠加的筛选器。
  *
  * 类型筛选器里有一项「未分拣」—— `null` 是一个真实的值，不是「不筛」。
  * 「现在有哪些还没想清楚」是这个视图被打开的主要理由之一。
+ *
+ * ## 搜索在最前
+ *
+ * 和 Linear / GitHub Issues 一样：找一条记得大概说了什么的事项，是比
+ * 「按维度收窄」更常见的动作，它不该排在三个 chip 后面、缩成一个小框。
+ *
+ * ## 为什么没有「仅未关闭」
+ *
+ * 已关闭的本来就折在列表底部，不点开就看不到 —— 那个开关做的事和折叠
+ * 一模一样，却还会把「有筛选」的状态点亮，让空状态说出「这些筛选条件下
+ * 没有事项」这种误导的话。
  */
 function Filters({
   filter,
   onChange,
   kinds,
   people,
+  matched,
 }: {
   filter: ItemFilter;
   onChange: (f: ItemFilter) => void;
   kinds: ItemKind[];
   people: { id: number; name: string; color: string }[];
+  /** 筛完还剩几条（含已关闭）。只在有筛选时显示 */
+  matched: number;
 }) {
   const kindOptions = [
     { value: null as string | null, label: UNSORTED_KIND.label, color: UNSORTED_KIND.color },
@@ -272,8 +318,40 @@ function Filters({
     ...kinds.map((k) => ({ value: k.key as string | null, label: k.label, color: k.color })),
   ];
 
+  // 旧状态里可能还留着 onlyOpen（界面上已经没有开关了）—— 当作没开
+  const active = hasFilter({ ...filter, onlyOpen: false });
+
   return (
-    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+    <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+      <label className="flex h-6 w-44 items-center gap-1.5 rounded-full border border-[var(--rule)] bg-[var(--surface)] px-2.5 transition-colors focus-within:border-[var(--accent)]">
+        <span className="text-[11px] leading-none text-[var(--text-dim)]" aria-hidden>
+          ⌕
+        </span>
+        <input
+          value={filter.query}
+          onChange={(e) => onChange({ ...filter, query: e.target.value })}
+          onKeyDown={(e) => {
+            if (e.key === "Escape" && filter.query) {
+              e.stopPropagation();
+              onChange({ ...filter, query: "" });
+            }
+          }}
+          placeholder="搜索标题或结论…"
+          className="min-w-0 flex-1 bg-transparent text-[10px] text-[var(--text)] outline-none placeholder:text-[var(--text-dim)]"
+        />
+        {filter.query && (
+          <button
+            onClick={() => onChange({ ...filter, query: "" })}
+            title="清空搜索"
+            className="text-[10px] leading-none text-[var(--text-dim)] hover:text-[var(--text)]"
+          >
+            ×
+          </button>
+        )}
+      </label>
+
+      <span className="mx-0.5 h-3.5 w-px bg-[var(--rule)]" aria-hidden />
+
       <Chips
         label="类型"
         options={kindOptions}
@@ -300,34 +378,27 @@ function Filters({
         onChange={(sel) => onChange({ ...filter, people: sel })}
       />
 
-      <button
-        onClick={() => onChange({ ...filter, onlyOpen: !filter.onlyOpen })}
-        className="rounded-full border px-2.5 py-0.5 text-[10px] font-medium transition-colors"
-        style={
-          filter.onlyOpen
-            ? { borderColor: "var(--accent)", color: "var(--accent)" }
-            : { borderColor: "var(--rule)", color: "var(--text-dim)" }
-        }
-      >
-        仅未关闭
-      </button>
-
-      <input
-        value={filter.query}
-        onChange={(e) => onChange({ ...filter, query: e.target.value })}
-        placeholder="搜索…"
-        className="w-28 rounded-full border border-[var(--rule)] bg-[var(--surface)] px-2.5 py-0.5 text-[10px] text-[var(--text)] outline-none focus:border-[var(--accent)]"
-      />
-
-      {hasFilter(filter) && (
-        <button
-          onClick={() => onChange(EMPTY_FILTER)}
-          className="text-[10px] text-[var(--text-dim)] underline hover:text-[var(--text)]"
-        >
-          清掉筛选
-        </button>
+      {active && (
+        <span className="ml-auto flex items-center gap-2 text-[10px] text-[var(--text-dim)]">
+          筛出 {matched} 条
+          <button
+            onClick={() => onChange(EMPTY_FILTER)}
+            className="rounded-md px-1.5 py-0.5 font-medium text-[var(--text-dim)] transition-colors hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
+          >
+            清除全部
+          </button>
+        </span>
       )}
     </div>
+  );
+}
+
+/** 键帽。只用来**提一句**快捷键，不是可点的东西 */
+function Kbd({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd className="rounded border border-[var(--rule)] bg-[var(--surface-alt)] px-1 font-sans text-[9px] leading-[14px] text-[var(--text-dim)]">
+      {children}
+    </kbd>
   );
 }
 
@@ -369,21 +440,48 @@ function Chips<T>({
       selected.includes(value) ? selected.filter((v) => v !== value) : [...selected, value],
     );
 
+  // 选中了什么就写什么（「类型：阻碍 +1」），而不是「类型 2」——
+  // 后者逼人点开才知道自己筛的是哪两个
+  const first = options.find((o) => o.value === selected[0]);
+  const summary = on
+    ? `${label}：${first?.label ?? "?"}${selected.length > 1 ? ` +${selected.length - 1}` : ""}`
+    : `${label} ▾`;
+
   return (
     <>
-      <button
+      <span
         ref={setAnchor}
-        onClick={() => (open ? close() : setOpen(true))}
-        className="rounded-full border px-2.5 py-0.5 text-[10px] font-medium transition-colors"
+        className="inline-flex h-6 items-center rounded-full border text-[10px] font-medium transition-colors"
         style={
           on
-            ? { borderColor: "var(--accent)", color: "var(--accent)" }
+            ? {
+                borderColor: "var(--accent)",
+                color: "var(--accent)",
+                background: "color-mix(in srgb, var(--accent) 8%, transparent)",
+              }
             : { borderColor: "var(--rule)", color: "var(--text-dim)" }
         }
       >
-        {label}
-        {on ? ` ${selected.length}` : " ▾"}
-      </button>
+        <button
+          onClick={() => (open ? close() : setOpen(true))}
+          title={on ? options.filter((o) => selected.includes(o.value)).map((o) => o.label).join("、") : undefined}
+          className={`h-full max-w-[160px] truncate pl-2.5 ${on ? "pr-1" : "pr-2.5"} hover:text-[var(--text)]`}
+          style={on ? { color: "inherit" } : undefined}
+        >
+          {summary}
+        </button>
+        {/* 一键去掉这一维。不给的话清一个维度要「点开 → 滚到底 → 不筛这一维」三步 */}
+        {on && (
+          <button
+            onClick={() => onChange([])}
+            title={`清除「${label}」筛选`}
+            aria-label={`清除${label}筛选`}
+            className="grid h-full place-items-center rounded-r-full pl-0.5 pr-2 leading-none opacity-70 hover:opacity-100"
+          >
+            ×
+          </button>
+        )}
+      </span>
       <Popover anchor={anchor} open={open} onClose={close} width={172}>
         {many && (
           <div className="px-1.5 pb-1">
@@ -426,7 +524,7 @@ function Chips<T>({
         {on && (
           <>
             <MenuDivider />
-            <MenuItem onClick={() => onChange([])}>不筛这一维</MenuItem>
+            <MenuItem onClick={() => onChange([])}>清除这一项筛选</MenuItem>
           </>
         )}
       </Popover>
@@ -539,13 +637,16 @@ function InlineComposer({ tasks, day }: { tasks: ResolvedTask[]; day: number }) 
         onOpenChange={(o) => (dropdownOpen.current += o ? 1 : -1)}
         width={92}
       />
+      {/* 和标题框同高：它是这一行的终点，不该比旁边的下拉还矮 */}
       <button
         onClick={() => void submit()}
         disabled={!name.trim()}
-        className="shrink-0 rounded-lg px-2.5 py-1.5 text-[11px] font-medium text-white disabled:opacity-40"
+        title="保存并接着记"
+        className="flex h-[30px] shrink-0 items-center gap-1.5 rounded-lg px-3 text-[11px] font-medium text-white transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
         style={{ background: "var(--accent)" }}
       >
         记下来
+        <span className="text-[10px] opacity-70">↵</span>
       </button>
     </div>
   );
@@ -645,6 +746,14 @@ function Row({
     setHow("");
     setWriting(false);
   };
+
+  // 取消也清掉草稿 —— 下次再点圆圈是一次新的关闭，不该冒出上次写了一半的话
+  const cancelClose = () => {
+    setHow("");
+    setWriting(false);
+  };
+
+  const closeLabel = row.source === "risk" ? "关闭风险" : "关闭事项";
 
   const setPriority = (p: Priority) => {
     const s = store.getState();
@@ -841,38 +950,57 @@ function Row({
 
       {/* 写结论的输入框。圆圈长得像 checkbox，但点下去的后果是「开始写一句话」——
           这一步摩擦是故意的，它正是「关闭要留下怎么关的」这条规则的全部意义 */}
+      {/*
+        布局和应用里其他对话框一致（PromoteDialog / BlockedDetail）：
+        输入框占满一行，按钮在它**下方靠右**，次要的「取消」在左、主动作在最右。
+        之前是「关闭」在左「取消」在右、挤在输入框旁边 —— 和别处顺序相反，
+        手按习惯点最右边那个，结果点到的是取消。
+
+        主按钮也不再只写「关闭」：这一行里「关闭」既可能是关掉这个输入框，
+        也可能是关掉这条事项，正好是两个相反的结果。
+      */}
       {writing && (
-        <div className="mt-1 flex items-start gap-1.5 pl-[67px]">
-          <textarea
-            autoFocus
-            value={how}
-            onChange={(e) => setHow(e.target.value)}
-            onKeyDown={(e) => {
-              e.stopPropagation();
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                submitClose();
+        <div className="mt-1.5 pl-[67px] pr-7">
+          <div className="rounded-lg border border-[var(--accent)] bg-[var(--surface)] shadow-[0_0_0_3px_color-mix(in_srgb,var(--accent)_12%,transparent)]">
+            <textarea
+              autoFocus
+              value={how}
+              onChange={(e) => setHow(e.target.value)}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  submitClose();
+                }
+                if (e.key === "Escape") cancelClose();
+              }}
+              rows={2}
+              placeholder={
+                row.source === "risk" ? "这个风险是怎么处置的？" : "怎么解决的？一句话就够"
               }
-              if (e.key === "Escape") setWriting(false);
-            }}
-            rows={2}
-            placeholder={`怎么解决的？（${shortcut("shift", "↵")} 换行）`}
-            className="min-w-0 flex-1 resize-none rounded-md border border-[var(--rule)] bg-[var(--surface)] px-1.5 py-1 text-[10px] leading-relaxed text-[var(--text)] outline-none focus:border-[var(--accent)]"
-          />
-          <button
-            onClick={submitClose}
-            disabled={!how.trim()}
-            className="shrink-0 rounded-md px-2 py-1 text-[10px] font-medium text-white disabled:opacity-40"
-            style={{ background: "var(--accent)" }}
-          >
-            关闭
-          </button>
-          <button
-            onClick={() => setWriting(false)}
-            className="shrink-0 px-1 py-1 text-[10px] text-[var(--text-dim)] hover:text-[var(--text)]"
-          >
-            取消
-          </button>
+              className="block w-full resize-none rounded-t-lg bg-transparent px-2.5 py-2 text-[12px] leading-relaxed text-[var(--text)] outline-none placeholder:text-[var(--text-dim)]"
+            />
+            <div className="flex items-center gap-2 border-t border-[var(--rule)] px-2 py-1.5">
+              <span className="text-[9px] text-[var(--text-dim)]">
+                <Kbd>↵</Kbd> {closeLabel}　<Kbd>{shortcut("shift", "↵")}</Kbd> 换行　<Kbd>Esc</Kbd> 取消
+              </span>
+              <button
+                onClick={cancelClose}
+                className="ml-auto rounded-md px-2.5 py-1 text-[11px] text-[var(--text-dim)] transition-colors hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
+              >
+                取消
+              </button>
+              <button
+                onClick={submitClose}
+                disabled={!how.trim()}
+                title={how.trim() ? undefined : "先写一句结论"}
+                className="rounded-md px-3 py-1 text-[11px] font-medium text-white transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
+                style={{ background: "var(--accent)" }}
+              >
+                {closeLabel}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1304,7 +1432,12 @@ function RowMenu({
         ref={setAnchor}
         onClick={() => setOpen((v) => !v)}
         title="更多"
-        className="grid size-5 shrink-0 place-items-center rounded text-[11px] leading-none text-[var(--text-dim)] opacity-0 transition-opacity hover:bg-[var(--row-hover)] hover:text-[var(--text)] group-hover:opacity-100"
+        aria-label="更多操作"
+        // 平时隐身，悬停 / 键盘聚焦 / 菜单开着时都要看得见 —— 只认悬停的话，
+        // 键盘用户 Tab 到它时是在对着一块空白按回车
+        className={`grid size-5 shrink-0 place-items-center rounded text-[11px] leading-none text-[var(--text-dim)] transition-opacity hover:bg-[var(--row-hover)] hover:text-[var(--text)] focus-visible:opacity-100 group-hover:opacity-100 ${
+          open ? "bg-[var(--row-hover)] opacity-100" : "opacity-0"
+        }`}
       >
         ⋯
       </button>

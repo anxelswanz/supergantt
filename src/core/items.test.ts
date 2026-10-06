@@ -292,6 +292,16 @@ describe("filterItems", () => {
   it("搜索对标题做大小写无关的包含匹配", () => {
     expect(keys(filterItems(rows, { ...EMPTY_FILTER, query: "夹具" }))).toEqual(["note:2"]);
   });
+
+  it("搜索也命中结论 —— 翻已关闭事项时找的往往是「当时怎么解决的」", () => {
+    const withHow = mergeItems({
+      notes: [note({ id: 9, name: "电机延期", kind: "todo", closedAt: unix("2026-10-03"), resolution: "改走空运" })],
+      tasks: [],
+      risks: [],
+      today: TODAY,
+    });
+    expect(keys(filterItems(withHow, { ...EMPTY_FILTER, query: "空运" }))).toEqual(["note:9"]);
+  });
 });
 
 describe("closePolicy", () => {
