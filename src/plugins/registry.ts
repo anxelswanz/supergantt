@@ -37,6 +37,7 @@ import type { ComponentType } from "react";
 
 import { api } from "../db/api";
 import type { BlockedPeriod } from "../core/blocked";
+import { kindLabel, mergeItems } from "../core/items";
 import type { Task } from "../gantt/model";
 import { useAppStore } from "../store/useAppStore";
 import { HOST_API_VERSION, validateManifest } from "./manifest";
@@ -50,6 +51,7 @@ import type {
   PluginSettingField,
   PluginToolbarItem,
   PluginViewDeclaration,
+  ItemView,
   RegisteredView,
   TaskView,
 } from "./types";
@@ -317,6 +319,48 @@ function countOpenBlockers(blocked: BlockedPeriod[] | undefined): number {
   return blocked.filter((b) => b.open === true).length;
 }
 
+/**
+ * 事项清单快照。走和事项视图同一个合并层，见 types.ts 里 items 的说明。
+ * 不排序 —— 顺序是视图的事，插件要什么顺序自己排。
+ */
+export function itemSnapshot(): ItemView[] {
+  const s = useAppStore.getState();
+  if (!s.project) return [];
+  const tasks = [...s.tasks.values()];
+  const taskName = new Map(tasks.map((t) => [t.id, t.name]));
+  const personName = new Map(s.people.map((p) => [p.id, p.name]));
+
+  return mergeItems({
+    notes: s.itemNotes,
+    tasks: tasks.map((t) => ({ id: t.id, name: t.name, personId: t.personId, blocked: t.blocked })),
+    risks: s.projectRisks,
+    today: todayDays(),
+  }).map((r) => ({
+    key: r.key,
+    source: r.source,
+    title: r.title,
+    kind: r.kind,
+    kindLabel: kindLabel(r.kind, s.itemKinds),
+    priority: r.priority,
+    personId: r.personId,
+    personName: r.personId == null ? null : (personName.get(r.personId) ?? null),
+    taskId: r.taskId,
+    taskName: r.taskId == null ? null : (taskName.get(r.taskId) ?? null),
+    // 阻碍没有记录时刻，用它开始的那天；其余按本地时区取日期 ——
+    // 「今天记的」说的是用户墙上的今天，不是 UTC 的今天
+    day: r.blocker ? daysToIso(r.blocker.period.from) : localDate(r.createdAt),
+    closed: r.closed,
+    resolution: r.resolution,
+    riskLevel: r.risk ? r.risk.level : null,
+  }));
+}
+
+function localDate(unix: number): string {
+  const d = new Date(unix * 1000);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
 /** 当前任务快照。一次遍历 Map 构造数组，代价可以忽略 */
 function taskSnapshot(): TaskView[] {
   const out: TaskView[] = [];
@@ -471,6 +515,23 @@ function makeApi(manifest: PluginManifest, disposables: Disposable[]): PluginApi
         },
         add(taskId, content, level) {
           void store().addRisk(taskId, content, level);
+        },
+      },
+      items: {
+        list: itemSnapshot,
+        subscribe(listener) {
+          // 只在这几样变了时通知 —— 拖一下甘特条不该让日报重算一遍
+          const off = useAppStore.subscribe((next, prev) => {
+            if (
+              next.itemNotes !== prev.itemNotes ||
+              next.projectRisks !== prev.projectRisks ||
+              next.itemKinds !== prev.itemKinds ||
+              next.project !== prev.project
+            )
+              listener();
+          });
+          track(disposable(off));
+          return off;
         },
       },
     },

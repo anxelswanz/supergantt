@@ -7,7 +7,7 @@
  *   · Excel     —— 按任务排的排期表，给人核计划用
  *   · 时间线    —— 按日期排的流水，给人看「那几天到底发生了什么」
  *   · 事项类型  —— 这个团队把事情分成哪几类，给人对口径用
- *   · 事项清单  —— 事项视图里筛出来的那些，发给相关的人
+ *   · 事项清单  —— 事项视图里筛出来的那些，Excel 或 Word，发给相关的人
  */
 
 import { save } from "@tauri-apps/plugin-dialog";
@@ -161,28 +161,41 @@ export async function exportItemKindsToExcel(): Promise<ExportResult> {
 }
 
 /**
- * 事项清单 → Excel。导出的是**屏幕上那张清单**（筛过、排过序的），
+ * 事项清单 → Excel 或 Word。导出的是**屏幕上那张清单**（筛过、排过序的），
  * 所以行由调用方（事项视图）传进来，这里不再自己筛一遍 —— 两处各筛一次，
  * 迟早会出现「屏幕上 5 条、文件里 6 条」。
  */
-export async function exportItemsToExcel(
+export async function exportItems(
+  format: "xlsx" | "docx",
   input: Omit<import("./items").ItemsExportInput, "projectName" | "exportedAt">,
 ): Promise<ExportResult> {
-  const { buildItemsWorkbook, itemsFileName } = await import("./items");
+  // exceljs 和 docx 都在 items.ts 里，导出时才拉进来
+  const { buildItemsWorkbook, buildItemsDocx, itemsFileName } = await import("./items");
 
   const { project } = useAppStore.getState();
   if (!project) throw new Error("没有打开的项目");
   const exportedAt = new Date();
+  const full = { ...input, projectName: project.name, exportedAt };
 
-  const workbook = buildItemsWorkbook({ ...input, projectName: project.name, exportedAt });
-  const buffer = await workbook.xlsx.writeBuffer();
+  // 同另外几条路：先生成再弹对话框，不让用户选完路径才知道导不出来
+  let bytes: ArrayBuffer;
+  if (format === "xlsx") {
+    bytes = (await buildItemsWorkbook(full).xlsx.writeBuffer()) as ArrayBuffer;
+  } else {
+    const { Packer } = await import("docx");
+    bytes = await Packer.toArrayBuffer(buildItemsDocx(full));
+  }
 
   const path = await save({
-    defaultPath: itemsFileName(project.name, exportedAt),
-    filters: [{ name: "Excel 工作簿", extensions: ["xlsx"] }],
+    defaultPath: itemsFileName(project.name, exportedAt, format),
+    filters: [
+      format === "xlsx"
+        ? { name: "Excel 工作簿", extensions: ["xlsx"] }
+        : { name: "Word 文档", extensions: ["docx"] },
+    ],
   });
   if (!path) return { path: null };
 
-  await api.writeExport(path, toBase64(buffer));
+  await api.writeExport(path, toBase64(bytes));
   return { path };
 }

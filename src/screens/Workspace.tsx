@@ -490,12 +490,16 @@ export function Workspace() {
 
         {/* 放在工具条而不是设置面板里：导出是面向产出的动作，不是配置。
             埋进设置里等于没有 —— 需要它的人正准备开周会，不会想到去齿轮图标下面翻。
-            时间线自己那份 HTML 导出在 TimelineView 里，跟着它的内容走 */}
-        <ExportButton
-          label="⤓ 导出"
-          title="把整个项目导出成 Excel：甘特图 + 风险点记录"
-          run={async () => (await import("../export/run")).exportProjectToExcel()}
-        />
+            时间线自己那份 HTML 导出在 TimelineView 里，跟着它的内容走。
+            只在甘特视图出现：它导的是甘特图，在事项页点它得到的却是一张排期表，
+            而事项页自己有一颗导出按钮 —— 两颗「导出」并排，没人知道该点哪个 */}
+        {activeView === "gantt" && (
+          <ExportButton
+            label="⤓ 导出"
+            title="把整个项目导出成 Excel：甘特图 + 风险点记录"
+            run={async () => (await import("../export/run")).exportProjectToExcel()}
+          />
+        )}
 
         <button
           onClick={() => openSettings("appearance")}

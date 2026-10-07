@@ -176,6 +176,32 @@ export interface TaskView {
      不给更糟 —— 插件读到旧备注再写回去，就把用户刚写的内容覆盖了。 */
 }
 
+/** 事项清单里的一行。core/items.ItemRow 的只读投影 —— 理由同 TaskView */
+export interface ItemView {
+  /** 跨来源唯一，如 "note:3" / "risk:7" / "blocker:12/b1" */
+  key: string;
+  source: "note" | "blocker" | "risk";
+  title: string;
+  /** 类型 key：'todo' / 'issue' / 'custom:…' / 'blocker' / 'risk'；null = 未分拣 */
+  kind: string | null;
+  /** 类型的显示名（用户可能改过名），未分拣为「未分拣」 */
+  kindLabel: string;
+  /** 0–3；null = 没填过 */
+  priority: number | null;
+  personId: number | null;
+  /** 负责人名字，方便直接写进文本；没有就是 null */
+  personName: string | null;
+  taskId: number | null;
+  taskName: string | null;
+  /** 记录的那一天，本地日期 "YYYY-MM-DD"。阻碍是它开始的那天 */
+  day: string;
+  closed: boolean;
+  /** 怎么关掉的 */
+  resolution: string | null;
+  /** 风险等级 0 高 / 1 中 / 2 低；不是风险为 null */
+  riskLevel: number | null;
+}
+
 /**
  * 插件的数据 API。
  *
@@ -213,6 +239,18 @@ export interface PluginDataApi {
     /** 未关闭的风险 */
     open(): { id: number; taskId: number; content: string; level: number }[];
     add(taskId: number, content: string, level: number): void;
+  };
+  /**
+   * 事项视图里那张清单（API 1.1 起）。**只读**。
+   *
+   * 和事项视图同一个合并层（core/items.mergeItems）：事项、阻碍、风险三个来源
+   * 摊平成一个形状。插件拿到的和用户在事项页看到的是同一批东西 —— 自己去拼
+   * 三张表的话，迟早会漏掉「不是从事项分拣来的阻碍」这一类。
+   */
+  items: {
+    list(): ItemView[];
+    /** 事项、风险、类型表变了就通知。返回值取消订阅 */
+    subscribe(listener: () => void): () => void;
   };
   /* 笔记是插件自己的数据。宿主不提供存储 —— 插件作者用 settings
      存小配置，要存大量结构化数据就自己在插件目录里写文件（走 fs 能力）。*/

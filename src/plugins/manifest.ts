@@ -17,7 +17,8 @@ import { APP_VIEWS } from "../core/views";
  *   - 删字段、改语义 → major + 1，旧插件拒绝加载
  *   - 只加新方法 → minor + 1，旧插件照常跑
  */
-export const HOST_API_VERSION: Version = { major: 1, minor: 0 };
+export const HOST_API_VERSION: Version = { major: 1, minor: 1 };
+/* 1.1：data.items（事项清单，只读） */
 
 /**
  * 内置视图的 key。插件视图不能用这些，否则会把甘特图顶掉。

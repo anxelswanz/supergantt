@@ -203,22 +203,25 @@ export function ItemsView() {
 
           {/* 导出的是**筛出来的这些**，按屏幕上的顺序 —— 见 export/items.ts */}
           <ExportButton
-            label="⤓ 导出 Excel"
+            label="⤓ 导出"
             title={
               filtering
-                ? `把筛出来的 ${visible.length} 条事项导出成 Excel`
-                : "把全部事项导出成 Excel（先筛选就只导筛出来的）"
+                ? `把筛出来的 ${visible.length} 条事项导出成 Excel 或 Word`
+                : "把全部事项导出成 Excel 或 Word（先筛选就只导筛出来的）"
             }
             size="sm"
-            run={async () =>
-              (await import("../export/run")).exportItemsToExcel({
-                rows: [...open, ...closed],
-                kinds,
-                people,
-                taskName,
-                filterSummary: describeFilter(filter, { kinds, people, taskName }),
-              })
-            }
+            formats={(["xlsx", "docx"] as const).map((format) => ({
+              label: format === "xlsx" ? "Excel 表格" : "Word 文档",
+              hint: `.${format}`,
+              run: async () =>
+                (await import("../export/run")).exportItems(format, {
+                  rows: [...open, ...closed],
+                  kinds,
+                  people,
+                  taskName,
+                  filterSummary: describeFilter(filter, { kinds, people, taskName }),
+                }),
+            }))}
           />
         </div>
 

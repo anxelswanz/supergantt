@@ -707,10 +707,22 @@ describe("事项视图：任务按钮、筛选、排序", () => {
     expect(settings["items_order.7"]).toBe("");
   });
 
-  it("头部有导出 Excel 的按钮", async () => {
+  it("事项页的导出可以选 Excel 或 Word", async () => {
     const store = await openWorkspace();
     store.getState().setActiveView("items");
     await screen.findByText("下周一确认夹具方案");
-    expect(screen.getByText("⤓ 导出 Excel")).toBeTruthy();
+
+    fireEvent.click(screen.getByText("⤓ 导出 ▾"));
+    expect(await screen.findByText("Excel 表格")).toBeTruthy();
+    expect(screen.getByText("Word 文档")).toBeTruthy();
+  });
+
+  /** 工具条上那颗导的是甘特图 —— 只在甘特视图出现，别处不和本页的导出并排 */
+  it("甘特图的导出只在甘特视图里有", async () => {
+    const store = await openWorkspace();
+    expect(screen.getByText("⤓ 导出")).toBeTruthy();
+
+    store.getState().setActiveView("board");
+    await waitFor(() => expect(screen.queryByText("⤓ 导出")).toBe(null));
   });
 });

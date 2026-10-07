@@ -19,28 +19,38 @@
 import { useState } from "react";
 import { api } from "../db/api";
 import { useAppStore } from "../store/useAppStore";
+import { MenuItem, Popover } from "./Popover";
+
+type Run = () => Promise<{ path: string | null }>;
 
 interface Props {
   label: string;
   title: string;
   /** 真正干活的那一步；path 为 null 表示用户取消了保存对话框 */
-  run: () => Promise<{ path: string | null }>;
+  run?: Run;
+  /**
+   * 多种格式时传这个：点按钮先弹菜单选格式，选完才走导出。
+   * 和 `run` 二选一 —— 只有一种格式时多一次点击是纯摩擦。
+   */
+  formats?: { label: string; hint?: string; run: Run }[];
   /** 时间线里那颗按钮跟「记一笔」并排，需要小一号 */
   size?: "md" | "sm";
 }
 
-export function ExportButton({ label, title, run, size = "md" }: Props) {
+export function ExportButton({ label, title, run, formats, size = "md" }: Props) {
   const [state, setState] = useState<"idle" | "working" | "done" | "error">("idle");
   const [detail, setDetail] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
 
   const pad = size === "sm" ? "px-2.5 py-1 text-[11px]" : "px-3 py-1 text-xs";
 
-  const go = async () => {
-    if (state === "working") return;
+  const go = async (job: Run | undefined) => {
+    if (state === "working" || !job) return;
     setState("working");
     try {
       await useAppStore.getState().persistence?.flush();
-      const { path } = await run();
+      const { path } = await job();
       if (!path) return setState("idle");
       setDetail(path);
       setState("done");
@@ -76,13 +86,32 @@ export function ExportButton({ label, title, run, size = "md" }: Props) {
   }
 
   return (
-    <button
-      onClick={() => void go()}
-      disabled={state === "working"}
-      title={title}
-      className={`rounded-full border border-[var(--rule)] font-medium text-[var(--text-dim)] transition-colors hover:text-[var(--text)] disabled:opacity-50 ${pad}`}
-    >
-      {state === "working" ? "导出中…" : label}
-    </button>
+    <>
+      <button
+        ref={setAnchor}
+        onClick={() => (formats ? setMenuOpen((v) => !v) : void go(run))}
+        disabled={state === "working"}
+        title={title}
+        className={`rounded-full border border-[var(--rule)] font-medium text-[var(--text-dim)] transition-colors hover:text-[var(--text)] disabled:opacity-50 ${pad}`}
+      >
+        {state === "working" ? "导出中…" : formats ? `${label} ▾` : label}
+      </button>
+      {formats && (
+        <Popover anchor={anchor} open={menuOpen} onClose={() => setMenuOpen(false)} align="right" width={180}>
+          {formats.map((f) => (
+            <MenuItem
+              key={f.label}
+              hint={f.hint}
+              onClick={() => {
+                setMenuOpen(false);
+                void go(f.run);
+              }}
+            >
+              {f.label}
+            </MenuItem>
+          ))}
+        </Popover>
+      )}
+    </>
   );
 }

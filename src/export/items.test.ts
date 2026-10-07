@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { buildItemsWorkbook, itemsFileName } from "./items";
+import { Packer } from "docx";
+import JSZip from "jszip";
+import { buildItemsDocx, buildItemsWorkbook, itemsFileName } from "./items";
 import type { ItemRow } from "../core/items";
 import { BUILTIN_KINDS } from "../core/items";
 
@@ -25,16 +27,17 @@ const row = (over: Partial<ItemRow> & { key: string }): ItemRow => ({
   ...over,
 });
 
-const build = (rows: ItemRow[], filterSummary = "") =>
-  buildItemsWorkbook({
+const input = (rows: ItemRow[], filterSummary = "") => ({
     projectName: "产线改造",
     rows,
     kinds: BUILTIN_KINDS,
     people: [{ id: 3, name: "张三" }],
-    taskName: (id) => (id == null ? null : `#${id} 电机安装`),
+    taskName: (id: number | null) => (id == null ? null : `#${id} 电机安装`),
     filterSummary,
     exportedAt: new Date(2026, 9, 7, 9, 0),
-  }).worksheets[0];
+});
+const build = (rows: ItemRow[], filterSummary = "") =>
+  buildItemsWorkbook(input(rows, filterSummary)).worksheets[0];
 
 describe("buildItemsWorkbook", () => {
   it("按传进来的顺序逐行写出，字段齐全", () => {
@@ -63,5 +66,26 @@ describe("buildItemsWorkbook", () => {
 
   it("文件名带项目名和日期，去掉路径非法字符", () => {
     expect(itemsFileName("a/b", new Date(2026, 9, 7))).toBe("a b-事项-20261007.xlsx");
+    expect(itemsFileName("a", new Date(2026, 9, 7), "docx")).toBe("a-事项-20261007.docx");
+  });
+});
+
+describe("buildItemsDocx", () => {
+  /** 和 Excel 同一张表（itemsTable）—— 两份文件的内容不能对不上 */
+  it("生成的 docx 里有标题、筛选说明和每一行", async () => {
+    const doc = buildItemsDocx(
+      input(
+        [
+          row({ key: "b", title: "第二条", kind: "todo", personId: 3, taskId: 12 }),
+          row({ key: "a", title: "第一条", closed: true, resolution: "打过电话了" }),
+        ],
+        "负责人：张三",
+      ),
+    );
+    const zip = await JSZip.loadAsync(await Packer.toArrayBuffer(doc));
+    const xml = await zip.file("word/document.xml")!.async("string");
+    for (const text of ["产线改造 · 事项", "筛选：负责人：张三", "第二条", "#12 电机安装", "打过电话了", "已关闭"])
+      expect(xml).toContain(text);
+    expect(xml.indexOf("第二条")).toBeLessThan(xml.indexOf("第一条"));
   });
 });
