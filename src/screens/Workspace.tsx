@@ -261,14 +261,16 @@ export function Workspace() {
       }
       if (inInput) return;
 
-      // 增删任务、缩进这些结构性操作只属于计划表
-      if (!canEdit("structure", store.viewMode)) {
+      // 增删任务、缩进这些结构性操作只属于计划表 —— 事项视图里也不响应：
+      // 那里看不到任务，选中行还是从甘特带过来的，按 ⌫ 会删掉一条看不见的活
+      if (!canEdit("structure", store.viewMode) || store.activeView === "items") {
         const structural =
           e.key === "Enter" ||
           e.key === "Backspace" ||
           e.key === "Delete" ||
           (isMod(e) && (e.key === "]" || e.key === "["));
-        if (structural) {
+        const moving = e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown");
+        if (structural || moving) {
           e.preventDefault();
           return;
         }
@@ -450,7 +452,11 @@ export function Workspace() {
           </ToolButton>
         </div>
 
-        {canEdit("structure", viewMode) && <NewTaskButton selectedId={selectedId} />}
+        {/* 事项视图不给「+ 任务」：那一页记的是还没变成任务的东西，
+            新建任务的入口摆在那里只会让人把一句话直接建成一条活 */}
+        {canEdit("structure", viewMode) && activeView !== "items" && (
+          <NewTaskButton selectedId={selectedId} />
+        )}
 
         <div className="ml-auto flex items-center gap-1">
           {activeView === "gantt" && (
@@ -560,11 +566,15 @@ export function Workspace() {
         <span className="font-medium text-[var(--text)]">
           ⌘1–{Math.min(views.length, VIEW_HOTKEY_MAX)} 切视图
         </span>
-        <span>Enter 新建</span>
-        <span>⇧Enter 子任务</span>
-        <span>⌘] / ⌘[ 缩进</span>
+        {activeView !== "items" && (
+          <>
+            <span>Enter 新建</span>
+            <span>⇧Enter 子任务</span>
+            <span>⌘] / ⌘[ 缩进</span>
+          </>
+        )}
         <span>⌘Z 撤销</span>
-        <span>⌫ 删除</span>
+        {activeView !== "items" && <span>⌫ 删除</span>}
         <span className="font-medium text-[var(--text)]">⌘K 记一条</span>
         <HintsFor view={active} viewMode={viewMode} />
       </div>
@@ -620,8 +630,9 @@ function HintsFor({ view, viewMode }: { view: ViewEntry; viewMode: ViewMode }) {
         <>
           <span>点类型标签分拣</span>
           <span>点圆圈关闭</span>
+          <span>拖 ⋮⋮ 调整顺序</span>
           <span className="ml-auto">
-            按记录时间倒序 · 阻碍和风险是实体，在这里改会同步到看板和复盘
+            阻碍和风险是实体，在这里改会同步到看板和复盘
           </span>
         </>
       );

@@ -15,6 +15,7 @@ import {
   SORT_ACTION_LABEL,
   UNSORTED_KIND,
   MANY_KINDS,
+  applyManualOrder,
   closePolicy,
   filterItems,
   frequentKinds,
@@ -22,6 +23,7 @@ import {
   kindColor,
   kindLabel,
   mergeItems,
+  moveItem,
   searchKinds,
   shortDate,
   sortItems,
@@ -34,6 +36,7 @@ import { FilterSelect, type SelectOption } from "./FilterSelect";
 import type { ItemKind, Person } from "../db/api";
 import { BlockedDetail } from "./BlockedDetail";
 import { PromoteDialog, type PromoteTarget } from "./PromoteDialog";
+import { ExportButton } from "./ExportButton";
 
 /**
  * 事项视图 —— 系统里唯一一个**不需要日期**的面。
@@ -53,6 +56,9 @@ import { PromoteDialog, type PromoteTarget } from "./PromoteDialog";
  *
  * 因为**分拣不该改变行的位置**。记完抬头一看那条还在原地；按类型分组的话，
  * 每点一次分拣那一行就跳到别处去了，而分拣恰恰是这个视图最高频的动作。
+ *
+ * 用户也可以拖行首的 ⋮⋮ 手动排。排过之后顺序存在 settings 里（按项目），
+ * 新记的那条排在最上面；头部能一键恢复时间顺序。
  */
 export function ItemsView() {
   const notes = useAppStore((s) => s.itemNotes);
@@ -64,6 +70,8 @@ export function ItemsView() {
   const setQuickNoteOpen = useAppStore((s) => s.setQuickNoteOpen);
   const pendingSortNoteId = useAppStore((s) => s.pendingSortNoteId);
   const setPendingSortNote = useAppStore((s) => s.setPendingSortNote);
+  const itemOrder = useAppStore((s) => s.itemOrder);
+  const setItemOrder = useAppStore((s) => s.setItemOrder);
 
   const [filter, setFilter] = useState<ItemFilter>(EMPTY_FILTER);
   const [closedOpen, setClosedOpen] = useState(false);
@@ -86,21 +94,25 @@ export function ItemsView() {
 
   const rows = useMemo(
     () =>
-      sortItems(
-        mergeItems({
-          notes,
-          tasks: tasks.map((t) => ({
-            id: t.id,
-            name: t.name,
-            personId: t.personId,
-            blocked: t.blocked,
-          })),
-          risks,
-          today: day,
-        }),
+      applyManualOrder(
+        sortItems(
+          mergeItems({
+            notes,
+            tasks: tasks.map((t) => ({
+              id: t.id,
+              name: t.name,
+              personId: t.personId,
+              blocked: t.blocked,
+            })),
+            risks,
+            today: day,
+          }),
+        ),
+        itemOrder,
       ),
-    [notes, tasks, risks, day],
+    [notes, tasks, risks, day, itemOrder],
   );
+  const manual = itemOrder.length > 0;
 
   const visible = useMemo(() => filterItems(rows, filter), [rows, filter]);
   const open = visible.filter((r) => !r.closed);
@@ -116,6 +128,22 @@ export function ItemsView() {
     const byId = new Map(people.map((p) => [p.id, p]));
     return (id: number | null) => (id == null ? null : byId.get(id) ?? null);
   }, [people]);
+
+  /**
+   * 挪一行。操作的是**全部行**的顺序（见 core/items.moveItem），
+   * 所以有筛选时拖动，被筛掉的那些不会跟着乱。
+   */
+  const move = (from: string, to: string, place: "before" | "after") =>
+    setItemOrder(moveItem(rows.map((r) => r.key), from, to, place));
+
+  /** ⋯ 菜单里的上移 / 下移：和**屏幕上**相邻的那一行换位置 */
+  const moveBy = (row: ItemRow, list: ItemRow[], delta: -1 | 1) => {
+    const i = list.findIndex((r) => r.key === row.key);
+    const next = list[i + delta];
+    if (next) move(row.key, next.key, delta < 0 ? "before" : "after");
+  };
+
+  const drag = useRowDrag(move);
 
   const period = blockedDetail
     ? taskMap.get(blockedDetail.taskId)?.blocked.find((p) => p.id === blockedDetail.periodId)
@@ -148,8 +176,17 @@ export function ItemsView() {
           <span className="text-[10px] text-[var(--text-dim)]">
             {openTotal} 条未关闭
             {unsorted > 0 && ` · ${unsorted} 条还没分拣`}
-            {" · 按记录时间倒序"}
+            {manual ? " · 手动排序" : " · 按记录时间倒序"}
           </span>
+          {manual && (
+            <button
+              onClick={() => setItemOrder([])}
+              title="丢掉手动排的顺序，回到按记录时间倒序"
+              className="text-[10px] text-[var(--text-dim)] underline-offset-2 transition-colors hover:text-[var(--text)] hover:underline"
+            >
+              恢复时间顺序
+            </button>
+          )}
 
           {/*
             不再放「＋ 记一条」按钮：下面就是常驻录入行，同一个视图里两个入口
@@ -163,6 +200,26 @@ export function ItemsView() {
           >
             <Kbd>{shortcut("mod", "K")}</Kbd> 随处记一条
           </button>
+
+          {/* 导出的是**筛出来的这些**，按屏幕上的顺序 —— 见 export/items.ts */}
+          <ExportButton
+            label="⤓ 导出 Excel"
+            title={
+              filtering
+                ? `把筛出来的 ${visible.length} 条事项导出成 Excel`
+                : "把全部事项导出成 Excel（先筛选就只导筛出来的）"
+            }
+            size="sm"
+            run={async () =>
+              (await import("../export/run")).exportItemsToExcel({
+                rows: [...open, ...closed],
+                kinds,
+                people,
+                taskName,
+                filterSummary: describeFilter(filter, { kinds, people, taskName }),
+              })
+            }
+          />
         </div>
 
         <Filters
@@ -170,6 +227,7 @@ export function ItemsView() {
           onChange={setFilter}
           kinds={kinds}
           people={people}
+          tasks={tasks}
           matched={visible.length}
         />
       </div>
@@ -209,7 +267,7 @@ export function ItemsView() {
         )}
 
         <div className="flex flex-col gap-0.5">
-          {open.map((row) => (
+          {open.map((row, i) => (
             <Row
               key={row.key}
               row={row}
@@ -219,6 +277,9 @@ export function ItemsView() {
               autoSort={row.note?.id != null && row.note.id === autoSort}
               onOpenBlocked={setBlockedDetail}
               onPromote={(noteId, target) => setPromoting({ noteId, target })}
+              drag={drag}
+              onMoveUp={i > 0 ? () => moveBy(row, open, -1) : undefined}
+              onMoveDown={i < open.length - 1 ? () => moveBy(row, open, 1) : undefined}
             />
           ))}
         </div>
@@ -238,7 +299,7 @@ export function ItemsView() {
             </button>
             {showClosed && (
               <div className="mt-0.5 flex flex-col gap-0.5">
-                {closed.map((row) => (
+                {closed.map((row, i) => (
                   <Row
                     key={row.key}
                     row={row}
@@ -247,6 +308,9 @@ export function ItemsView() {
                     person={personOf(row.personId)}
                     onOpenBlocked={setBlockedDetail}
                     onPromote={(noteId, target) => setPromoting({ noteId, target })}
+                    drag={drag}
+                    onMoveUp={i > 0 ? () => moveBy(row, closed, -1) : undefined}
+                    onMoveDown={i < closed.length - 1 ? () => moveBy(row, closed, 1) : undefined}
                   />
                 ))}
               </div>
@@ -254,6 +318,16 @@ export function ItemsView() {
           </div>
         )}
       </div>
+
+      {/* 跟手的小标签：拖的是哪一条，一眼就知道 */}
+      {drag.ghost && (
+        <div
+          className="pointer-events-none fixed z-50 max-w-[260px] truncate rounded-lg border border-[var(--accent)] bg-[var(--surface)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--text)] shadow-lg"
+          style={{ left: drag.ghost.x + 12, top: drag.ghost.y + 8 }}
+        >
+          {drag.ghost.title}
+        </div>
+      )}
 
       {blockedDetail && period && (
         <BlockedDetail
@@ -302,12 +376,14 @@ function Filters({
   onChange,
   kinds,
   people,
+  tasks,
   matched,
 }: {
   filter: ItemFilter;
   onChange: (f: ItemFilter) => void;
   kinds: ItemKind[];
   people: { id: number; name: string; color: string }[];
+  tasks: ResolvedTask[];
   /** 筛完还剩几条（含已关闭）。只在有筛选时显示 */
   matched: number;
 }) {
@@ -377,6 +453,23 @@ function Filters({
         selected={filter.people}
         onChange={(sel) => onChange({ ...filter, people: sel })}
       />
+      {/*
+        按关联的任务筛。任务通常比类型和负责人多得多，选项一多就自动给搜索框
+        （见 Chips）；按名字和 #编号都能搜到
+      */}
+      <Chips
+        label="任务"
+        options={[
+          { value: null as number | null, label: "未关联任务", color: UNSORTED_KIND.color },
+          ...tasks.map((t) => ({
+            value: t.id as number | null,
+            label: `#${t.id} ${t.name || "未命名"}`,
+          })),
+        ]}
+        selected={filter.tasks ?? []}
+        onChange={(sel) => onChange({ ...filter, tasks: sel })}
+        width={240}
+      />
 
       {active && (
         <span className="ml-auto flex items-center gap-2 text-[10px] text-[var(--text-dim)]">
@@ -414,11 +507,14 @@ function Chips<T>({
   options,
   selected,
   onChange,
+  width = 172,
 }: {
   label: string;
   options: { value: T; label: string; color?: string }[];
   selected: T[];
   onChange: (next: T[]) => void;
+  /** 弹出层宽度。任务名长，那一维给宽一点 */
+  width?: number;
 }) {
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
@@ -482,7 +578,7 @@ function Chips<T>({
           </button>
         )}
       </span>
-      <Popover anchor={anchor} open={open} onClose={close} width={172}>
+      <Popover anchor={anchor} open={open} onClose={close} width={width}>
         {many && (
           <div className="px-1.5 pb-1">
             <input
@@ -690,6 +786,9 @@ function Row({
   autoSort,
   onOpenBlocked,
   onPromote,
+  drag,
+  onMoveUp,
+  onMoveDown,
 }: {
   row: ItemRow;
   kinds: ItemKind[];
@@ -699,6 +798,10 @@ function Row({
   autoSort?: boolean;
   onOpenBlocked: (ref: { taskId: number; periodId: string }) => void;
   onPromote: (noteId: number, target: PromoteTarget) => void;
+  drag: RowDrag;
+  /** 已经在最上面 / 最下面时不传 */
+  onMoveUp?: () => void;
+  onMoveDown?: () => void;
 }) {
   const store = useAppStore;
   const [writing, setWriting] = useState(false);
@@ -802,18 +905,43 @@ function Row({
     .filter(Boolean)
     .join("\n");
 
+  const dropAt = drag.over?.key === row.key ? drag.over.place : null;
+
   return (
     <div
-      className="group rounded-lg px-2 py-1.5 transition-colors hover:bg-[var(--row-hover)]"
-      style={
+      ref={drag.rowRef(row.key, row.closed)}
+      className="group relative rounded-lg px-2 py-1.5 transition-colors hover:bg-[var(--row-hover)]"
+      style={{
         // 持续中的阻碍是唯一一类「现在就要人去处理」的行，给它一道底色。
         // 其余一律不上色 —— 一张人人高亮的列表等于没有高亮
-        row.blocker?.live && !row.closed
-          ? { background: withAlpha(BLOCKER_KIND.color, 0.05) }
-          : undefined
-      }
+        background:
+          row.blocker?.live && !row.closed ? withAlpha(BLOCKER_KIND.color, 0.05) : undefined,
+        opacity: drag.dragKey === row.key ? 0.4 : 1,
+      }}
     >
+      {/* 落点指示线：落下之后这一条会出现在线的位置 */}
+      {dropAt && (
+        <span
+          className="pointer-events-none absolute inset-x-1 h-0.5 rounded-full"
+          style={{ background: "var(--accent)", [dropAt === "before" ? "top" : "bottom"]: -1.5 }}
+        />
+      )}
+      {/*
+        拖动手柄。只有它能起拖 —— 整行可拖的话，选中标题里的文字、
+        点圆圈和类型按钮都会和拖动抢同一个按下。
+
+        绝对定位在行的左内边距里：不占布局，附注行和结论框的缩进不用跟着改
+      */}
+      <span
+        onPointerDown={(e) => drag.start(row, e)}
+        title="拖动调整顺序"
+        aria-hidden
+        className="absolute left-0 top-1.5 grid h-5 w-2 cursor-grab select-none place-items-center text-[9px] leading-none tracking-[-2px] text-[var(--text-dim)] opacity-0 transition-opacity active:cursor-grabbing group-hover:opacity-100"
+      >
+        ⋮⋮
+      </span>
       <div className="flex items-center gap-2.5">
+
         {/* 圆圈。点下去的后果按类型不同 —— 见 core/items.closePolicy */}
         <button
           onClick={toggleClose}
@@ -893,7 +1021,13 @@ function Row({
           />
         </span>
 
-        <RowMenu row={row} taskName={taskName} onOpenBlocked={onOpenBlocked} />
+        <RowMenu
+          row={row}
+          taskName={taskName}
+          onOpenBlocked={onOpenBlocked}
+          onMoveUp={onMoveUp}
+          onMoveDown={onMoveDown}
+        />
       </div>
 
       {/*
@@ -1407,10 +1541,14 @@ function RowMenu({
   row,
   taskName,
   onOpenBlocked,
+  onMoveUp,
+  onMoveDown,
 }: {
   row: ItemRow;
   taskName: string | null;
   onOpenBlocked: (ref: { taskId: number; periodId: string }) => void;
+  onMoveUp?: () => void;
+  onMoveDown?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
@@ -1487,6 +1625,33 @@ function RowMenu({
           </MenuItem>
         )}
 
+        {/* 拖不动的时候（触控板、键盘）也得有办法排 */}
+        {(onMoveUp || onMoveDown) && (
+          <>
+            <MenuDivider />
+            {onMoveUp && (
+              <MenuItem
+                onClick={() => {
+                  setOpen(false);
+                  onMoveUp();
+                }}
+              >
+                上移一位
+              </MenuItem>
+            )}
+            {onMoveDown && (
+              <MenuItem
+                onClick={() => {
+                  setOpen(false);
+                  onMoveDown();
+                }}
+              >
+                下移一位
+              </MenuItem>
+            )}
+          </>
+        )}
+
         <MenuDivider />
         {confirming ? (
           <MenuItem danger onClick={remove}>
@@ -1505,3 +1670,121 @@ function RowMenu({
 /** 事项视图里能挂实体的那些活 —— 给分拣对话框用，判据和别处共用一个 */
 export const promotable = (tasks: ResolvedTask[], day: number): ResolvedTask[] =>
   tasks.filter((t) => !t.hasChildren && isInProgress(t, day));
+
+/* ------------------------------------------------------------------ */
+/* 手动排序                                                            */
+/* ------------------------------------------------------------------ */
+
+/** 按下之后挪过这么多像素才算开始拖 —— 否则点一下手柄会闪一下拖拽态 */
+const DRAG_THRESHOLD = 4;
+
+type RowDrag = ReturnType<typeof useRowDrag>;
+
+/**
+ * 行拖拽，用指针事件实现 —— 和看板卡片同一个理由（BoardView.useCardDrag）：
+ * Tauri 在 Windows 上接管了窗口的拖放，HTML5 draggable 在那里整个失效。
+ *
+ * 只能落在**同一区**（未关闭 / 已关闭）的行上：把一条未关闭的拖进已关闭区
+ * 不会关掉它，落点指示线却在暗示它会 —— 那条线就成了谎话。
+ */
+function useRowDrag(onDrop: (from: string, to: string, place: "before" | "after") => void) {
+  const rows = useRef(new Map<string, { el: HTMLElement; closed: boolean }>());
+  const dropRef = useRef(onDrop);
+  dropRef.current = onDrop;
+  const stopRef = useRef<(() => void) | null>(null);
+
+  const [dragKey, setDragKey] = useState<string | null>(null);
+  const [over, setOver] = useState<{ key: string; place: "before" | "after" } | null>(null);
+  const [ghost, setGhost] = useState<{ x: number; y: number; title: string } | null>(null);
+
+  // 拖到一半视图被切走：别把监听器留在 window 上
+  useEffect(() => () => stopRef.current?.(), []);
+
+  const rowRef = (key: string, closed: boolean) => (el: HTMLElement | null) => {
+    if (el) rows.current.set(key, { el, closed });
+    else rows.current.delete(key);
+  };
+
+  const targetAt = (y: number, closed: boolean, self: string) => {
+    for (const [key, r] of rows.current) {
+      if (r.closed !== closed) continue;
+      const box = r.el.getBoundingClientRect();
+      if (y < box.top || y > box.bottom) continue;
+      if (key === self) return null;
+      return { key, place: (y < box.top + box.height / 2 ? "before" : "after") as "before" | "after" };
+    }
+    return null;
+  };
+
+  const start = (row: ItemRow, e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault(); // 不让按下拖动的同时选中一片文字
+    stopRef.current?.();
+
+    const origin = { x: e.clientX, y: e.clientY };
+    let active = false;
+    let target: { key: string; place: "before" | "after" } | null = null;
+
+    const move = (ev: PointerEvent) => {
+      if (!active) {
+        if (Math.hypot(ev.clientX - origin.x, ev.clientY - origin.y) < DRAG_THRESHOLD) return;
+        active = true;
+        setDragKey(row.key);
+      }
+      target = targetAt(ev.clientY, row.closed, row.key);
+      setOver(target);
+      setGhost({ x: ev.clientX, y: ev.clientY, title: row.title || "（没写内容）" });
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", stop);
+      stopRef.current = null;
+      setDragKey(null);
+      setOver(null);
+      setGhost(null);
+    };
+    const up = () => {
+      const t = active ? target : null;
+      stop();
+      if (t) dropRef.current(row.key, t.key, t.place);
+    };
+
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", stop);
+    stopRef.current = stop;
+  };
+
+  return { dragKey, over, ghost, rowRef, start };
+}
+
+/**
+ * 筛选条件 → 一句人读的话，写进导出文件的表头。
+ * 一份 5 行的表，收到的人要能看出那是「全部只有 5 条」还是「筛出来 5 条」。
+ */
+function describeFilter(
+  f: ItemFilter,
+  ctx: {
+    kinds: ItemKind[];
+    people: { id: number; name: string }[];
+    taskName: (id: number | null) => string | null;
+  },
+): string {
+  const parts: string[] = [];
+  if (f.query.trim()) parts.push(`搜索「${f.query.trim()}」`);
+  if (f.kinds.length) parts.push(`类型：${f.kinds.map((k) => kindLabel(k, ctx.kinds)).join("、")}`);
+  if (f.priorities.length)
+    parts.push(`优先级：${f.priorities.map((p) => `P${p}`).join("、")}`);
+  if (f.people.length)
+    parts.push(
+      `负责人：${f.people
+        .map((id) => (id == null ? "未指派" : (ctx.people.find((p) => p.id === id)?.name ?? `#${id}`)))
+        .join("、")}`,
+    );
+  if (f.tasks?.length)
+    parts.push(
+      `关联任务：${f.tasks.map((id) => (id == null ? "未关联任务" : ctx.taskName(id))).join("、")}`,
+    );
+  return parts.join("；");
+}

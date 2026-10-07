@@ -3,10 +3,11 @@
  *
  * 内容全部在前端生成，Rust 只负责写字节（见 src-tauri/src/export.rs 的说明）。
  *
- * 三个出口，对应三种问法：
+ * 四个出口，对应四种问法：
  *   · Excel     —— 按任务排的排期表，给人核计划用
  *   · 时间线    —— 按日期排的流水，给人看「那几天到底发生了什么」
  *   · 事项类型  —— 这个团队把事情分成哪几类，给人对口径用
+ *   · 事项清单  —— 事项视图里筛出来的那些，发给相关的人
  */
 
 import { save } from "@tauri-apps/plugin-dialog";
@@ -151,6 +152,33 @@ export async function exportItemKindsToExcel(): Promise<ExportResult> {
 
   const path = await save({
     defaultPath: itemKindsFileName(exportedAt),
+    filters: [{ name: "Excel 工作簿", extensions: ["xlsx"] }],
+  });
+  if (!path) return { path: null };
+
+  await api.writeExport(path, toBase64(buffer));
+  return { path };
+}
+
+/**
+ * 事项清单 → Excel。导出的是**屏幕上那张清单**（筛过、排过序的），
+ * 所以行由调用方（事项视图）传进来，这里不再自己筛一遍 —— 两处各筛一次，
+ * 迟早会出现「屏幕上 5 条、文件里 6 条」。
+ */
+export async function exportItemsToExcel(
+  input: Omit<import("./items").ItemsExportInput, "projectName" | "exportedAt">,
+): Promise<ExportResult> {
+  const { buildItemsWorkbook, itemsFileName } = await import("./items");
+
+  const { project } = useAppStore.getState();
+  if (!project) throw new Error("没有打开的项目");
+  const exportedAt = new Date();
+
+  const workbook = buildItemsWorkbook({ ...input, projectName: project.name, exportedAt });
+  const buffer = await workbook.xlsx.writeBuffer();
+
+  const path = await save({
+    defaultPath: itemsFileName(project.name, exportedAt),
     filters: [{ name: "Excel 工作簿", extensions: ["xlsx"] }],
   });
   if (!path) return { path: null };

@@ -11,6 +11,9 @@ import {
   mergeItems,
   parseBlockerRef,
   sortItems,
+  applyManualOrder,
+  moveItem,
+  parseItemOrder,
   type ItemRow,
   type ItemTask,
 } from "./items";
@@ -468,5 +471,54 @@ describe("searchKinds", () => {
   /** key 也参与匹配：搜 custom 能把自定义的那些一次捞出来 */
   it("按 key 匹配", () => {
     expect(searchKinds(kinds, "custom").map((k) => k.key)).toEqual(["custom:qc"]);
+  });
+});
+
+describe("按关联任务筛", () => {
+  const rows = mergeItems({
+    notes: [note({ id: 1, taskId: 12 }), note({ id: 2, taskId: 13 }), note({ id: 3 })],
+    tasks: [],
+    risks: [],
+    today: TODAY,
+  });
+
+  it("选一条任务只留挂在它上面的", () => {
+    expect(filterItems(rows, { ...EMPTY_FILTER, tasks: [12] }).map((r) => r.key)).toEqual([
+      "note:1",
+    ]);
+  });
+
+  it("null 是「未关联任务」，可以和具体任务叠选", () => {
+    const got = filterItems(rows, { ...EMPTY_FILTER, tasks: [null, 13] }).map((r) => r.key);
+    expect(got.sort()).toEqual(["note:2", "note:3"]);
+  });
+});
+
+describe("手动顺序", () => {
+  const rows = ["a", "b", "c", "d"].map((k) => ({ key: k }) as ItemRow);
+  const keys = (rs: ItemRow[]) => rs.map((r) => r.key);
+
+  it("没排过就原样返回", () => {
+    expect(keys(applyManualOrder(rows, []))).toEqual(["a", "b", "c", "d"]);
+  });
+
+  it("按 order 排；不在 order 里的（新记的）排在最前，指向不存在的 key 忽略", () => {
+    expect(keys(applyManualOrder(rows, ["c", "gone", "a", "b"]))).toEqual(["d", "c", "a", "b"]);
+  });
+
+  it("moveItem：挪到目标前 / 后", () => {
+    expect(moveItem(["a", "b", "c", "d"], "d", "b", "before")).toEqual(["a", "d", "b", "c"]);
+    expect(moveItem(["a", "b", "c", "d"], "a", "c", "after")).toEqual(["b", "c", "a", "d"]);
+  });
+
+  it("moveItem：自己挪到自己、或 key 不存在，不变", () => {
+    expect(moveItem(["a", "b"], "a", "a", "after")).toEqual(["a", "b"]);
+    expect(moveItem(["a", "b"], "x", "a", "after")).toEqual(["a", "b"]);
+  });
+
+  it("settings 里的坏数据当作没排过", () => {
+    expect(parseItemOrder(null)).toEqual([]);
+    expect(parseItemOrder("{oops")).toEqual([]);
+    expect(parseItemOrder('["a",1,"b"]')).toEqual(["a", "b"]);
   });
 });

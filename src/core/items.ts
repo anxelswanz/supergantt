@@ -404,6 +404,59 @@ export function sortItems(rows: ItemRow[]): ItemRow[] {
 }
 
 /* ------------------------------------------------------------------ */
+/* 手动顺序                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 按用户手动排好的顺序重排。`order` 是行 key 的列表。
+ *
+ * **不在 order 里的行排在最前**，彼此之间保持传进来的（默认）顺序。
+ * 排完之后新记的那条没有位置 —— 放到最上面，和默认顺序下「新的在上」
+ * 是同一个直觉；放到最下面的话，刚记的东西会被埋在一长串旧事项后面。
+ *
+ * order 里指向已经不存在的行的 key 直接忽略，不需要清理。
+ *
+ * 未关闭 / 已关闭的分区不在这里做 —— 视图拿到结果之后自己按 closed 拆开，
+ * 两个区各自保持这里排出来的相对顺序。
+ */
+export function applyManualOrder(rows: ItemRow[], order: string[]): ItemRow[] {
+  if (order.length === 0) return rows;
+  const pos = new Map(order.map((k, i) => [k, i]));
+  const fresh = rows.filter((r) => !pos.has(r.key));
+  const placed = rows.filter((r) => pos.has(r.key)).sort((a, b) => pos.get(a.key)! - pos.get(b.key)!);
+  return [...fresh, ...placed];
+}
+
+/**
+ * 把 `from` 挪到 `to` 的前面或后面，返回新的完整 key 列表。
+ *
+ * 操作的是**全部行**的顺序，不是筛出来的那几条：有筛选时拖动一条，
+ * 被筛掉的那些相对位置不变，清掉筛选后不会出现一次莫名其妙的大洗牌。
+ */
+export function moveItem(
+  keys: string[],
+  from: string,
+  to: string,
+  place: "before" | "after",
+): string[] {
+  if (from === to || !keys.includes(from) || !keys.includes(to)) return keys;
+  const rest = keys.filter((k) => k !== from);
+  const at = rest.indexOf(to) + (place === "after" ? 1 : 0);
+  return [...rest.slice(0, at), from, ...rest.slice(at)];
+}
+
+/** settings 里存的那串 JSON → key 列表。坏数据当作没排过 */
+export function parseItemOrder(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.filter((k): k is string => typeof k === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* 筛选                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -414,6 +467,8 @@ export interface ItemFilter {
   priorities: Priority[];
   /** 负责人 id；null = 筛「未指派」。空数组 = 不筛 */
   people: (number | null)[];
+  /** 关联任务 id；null = 筛「未关联任务」。空数组 = 不筛 */
+  tasks: (number | null)[];
   onlyOpen: boolean;
   /** 搜索词，对标题和结论做大小写无关的包含匹配 */
   query: string;
@@ -423,6 +478,7 @@ export const EMPTY_FILTER: ItemFilter = {
   kinds: [],
   priorities: [],
   people: [],
+  tasks: [],
   onlyOpen: false,
   query: "",
 };
@@ -441,6 +497,8 @@ export function filterItems(rows: ItemRow[], f: ItemFilter): ItemRow[] {
     if (f.priorities.length > 0 && (r.priority == null || !f.priorities.includes(r.priority)))
       return false;
     if (f.people.length > 0 && !f.people.includes(r.personId)) return false;
+    // 旧状态里可能没有 tasks 这一维 —— 当作不筛
+    if (f.tasks?.length > 0 && !f.tasks.includes(r.taskId)) return false;
     // 结论也搜：「上次那个怎么解决的」是翻已关闭事项的主要理由
     if (q && !r.title.toLowerCase().includes(q) && !(r.resolution ?? "").toLowerCase().includes(q))
       return false;
@@ -452,6 +510,7 @@ export const hasFilter = (f: ItemFilter): boolean =>
   f.kinds.length > 0 ||
   f.priorities.length > 0 ||
   f.people.length > 0 ||
+  (f.tasks?.length ?? 0) > 0 ||
   f.onlyOpen ||
   f.query.trim() !== "";
 

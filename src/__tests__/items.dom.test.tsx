@@ -650,3 +650,67 @@ describe("类型多起来之后", () => {
     expect(await screen.findByPlaceholderText("搜类型…")).toBeTruthy();
   });
 });
+
+describe("事项视图：任务按钮、筛选、排序", () => {
+  /** 事项页记的是还没变成任务的东西 —— 那里不给「+ 任务」，Enter 也不建任务 */
+  it("事项视图里没有「+ 任务」，Enter 也不会建任务", async () => {
+    const store = await openWorkspace();
+    expect(screen.getByText("+ 任务")).toBeTruthy();
+
+    store.getState().setActiveView("items");
+    await screen.findByText("下周一确认夹具方案");
+    expect(screen.queryByText("+ 任务")).toBe(null);
+
+    const before = store.getState().tasks.size;
+    fireEvent.keyDown(window, { key: "Enter" });
+    expect(store.getState().tasks.size).toBe(before);
+  });
+
+  it("按关联任务筛：只留挂在那条任务上的", async () => {
+    const store = await openWorkspace();
+    store.getState().setActiveView("items");
+    await screen.findByText("下周一确认夹具方案");
+
+    fireEvent.click(screen.getByText("任务 ▾"));
+    fireEvent.click(await screen.findByText("#12 电机安装"));
+
+    await waitFor(() => expect(screen.queryByText("下周一确认夹具方案")).toBe(null));
+    expect(screen.getByText("等料")).toBeTruthy();
+    expect(screen.getByText(/筛出 1 条/)).toBeTruthy();
+  });
+
+  it("⋯ 菜单下移一位：顺序变了，存进本项目的设置，并可以恢复时间顺序", async () => {
+    const store = await openWorkspace();
+    store.getState().setActiveView("items");
+    await screen.findByText("下周一确认夹具方案");
+
+    const titles = () =>
+      ["等料", "下周一确认夹具方案"].sort(
+        (a, b) =>
+          screen.getByText(a).compareDocumentPosition(screen.getByText(b)) &
+          Node.DOCUMENT_POSITION_FOLLOWING
+            ? -1
+            : 1,
+      );
+    // 默认时间倒序：10-01 的阻碍在 09-30 的事项前面
+    expect(titles()).toEqual(["等料", "下周一确认夹具方案"]);
+
+    fireEvent.click(screen.getAllByTitle("更多")[0]);
+    fireEvent.click(await screen.findByText("下移一位"));
+
+    await waitFor(() => expect(titles()).toEqual(["下周一确认夹具方案", "等料"]));
+    expect(JSON.parse(settings["items_order.7"])[0]).toBe("note:1");
+    expect(screen.getByText(/手动排序/)).toBeTruthy();
+
+    fireEvent.click(screen.getByText("恢复时间顺序"));
+    await waitFor(() => expect(titles()).toEqual(["等料", "下周一确认夹具方案"]));
+    expect(settings["items_order.7"]).toBe("");
+  });
+
+  it("头部有导出 Excel 的按钮", async () => {
+    const store = await openWorkspace();
+    store.getState().setActiveView("items");
+    await screen.findByText("下周一确认夹具方案");
+    expect(screen.getByText("⤓ 导出 Excel")).toBeTruthy();
+  });
+});

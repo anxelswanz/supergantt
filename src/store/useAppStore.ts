@@ -42,7 +42,7 @@ import {
   type AppView,
   type BuiltinView,
 } from "../core/views";
-import { BUILTIN_KINDS, blockerRef, parseBlockerRef } from "../core/items";
+import { BUILTIN_KINDS, blockerRef, parseBlockerRef, parseItemOrder } from "../core/items";
 import type { DailyNote, ItemKind, ItemNote, Risk } from "../db/api";
 
 /**
@@ -202,6 +202,16 @@ interface AppState {
   itemNotes: ItemNote[];
 
   /**
+   * 事项视图的手动顺序：行 key（`note:1` / `blocker:12/b1` / `risk:3`）的列表。
+   * 空数组 = 没排过，用默认的时间倒序。
+   *
+   * 存的是 key 而不是给三张表各加一个 sort_order 列：清单里的行来自
+   * item_notes / risks / tasks.blocked 三处，顺序是**这张清单**的属性，
+   * 不是哪个实体的属性。按项目存在 settings 表里（ITEM_ORDER_KEY）。
+   */
+  itemOrder: string[];
+
+  /**
    * 事项类型清单。**全局**，不随项目走（migrations/011_item_kinds.sql）。
    *
    * 初值是代码里的常量而不是空数组：事项视图在第一帧就要渲染类型标签，
@@ -305,6 +315,8 @@ interface AppState {
   openSettings: (tab?: string) => void;
   closeSettings: () => void;
   loadItemNotes: () => Promise<void>;
+  /** 记下手动排好的顺序；传空数组 = 恢复默认的时间倒序 */
+  setItemOrder: (order: string[]) => void;
   loadItemKinds: () => Promise<void>;
   /** 记一条。返回新建的那条，录入弹窗据此清空标题继续记 */
   addItemNote: (
@@ -402,6 +414,8 @@ const ROW_HEIGHT_KEY = "row_height";
 const VIEW_MODE_KEY = "view_mode";
 const ACTIVE_VIEW_KEY = "active_view";
 const ENABLED_VIEWS_KEY = "enabled_views";
+/** 事项视图的手动顺序，按项目分开存 */
+const itemOrderKey = (projectId: number) => `items_order.${projectId}`;
 
 export const useAppStore = create<AppState>((set, get) => {
   /**
@@ -518,6 +532,7 @@ export const useAppStore = create<AppState>((set, get) => {
     projectRisks: [],
     dailyNotes: [],
     itemNotes: [],
+    itemOrder: [],
     itemKinds: BUILTIN_KINDS,
     quickNoteOpen: false,
     pendingSortNoteId: null,
@@ -666,13 +681,22 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async loadItemNotes() {
       const { project } = get();
-      if (!project) return set({ itemNotes: [] });
-      try {
-        set({ itemNotes: await api.loadItemNotes(project.id) });
-      } catch {
+      if (!project) return set({ itemNotes: [], itemOrder: [] });
+      const [notes, order] = await Promise.all([
         // 事项读不出来不该拦住整个应用 —— 视图里显示成空
-        set({ itemNotes: [] });
-      }
+        api.loadItemNotes(project.id).catch(() => [] as ItemNote[]),
+        api.getSetting(itemOrderKey(project.id)).catch(() => null),
+      ]);
+      set({ itemNotes: notes, itemOrder: parseItemOrder(order) });
+    },
+
+    setItemOrder(order) {
+      const { project } = get();
+      set({ itemOrder: order });
+      if (!project) return;
+      void api
+        .setSetting(itemOrderKey(project.id), order.length ? JSON.stringify(order) : "")
+        .catch(() => {});
     },
 
     async loadItemKinds() {
