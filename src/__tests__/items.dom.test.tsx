@@ -679,7 +679,7 @@ describe("事项视图：任务按钮、筛选、排序", () => {
     expect(screen.getByText(/筛出 1 条/)).toBeTruthy();
   });
 
-  it("⋯ 菜单下移一位：顺序变了，存进本项目的设置，并可以恢复时间顺序", async () => {
+  it("按住整行拖动排序：顺序变了，存进本项目的设置，并可以恢复时间顺序", async () => {
     const store = await openWorkspace();
     store.getState().setActiveView("items");
     await screen.findByText("下周一确认夹具方案");
@@ -695,8 +695,17 @@ describe("事项视图：任务按钮、筛选、排序", () => {
     // 默认时间倒序：10-01 的阻碍在 09-30 的事项前面
     expect(titles()).toEqual(["等料", "下周一确认夹具方案"]);
 
-    fireEvent.click(screen.getAllByTitle("更多")[0]);
-    fireEvent.click(await screen.findByText("下移一位"));
+    // jsdom 不排版：给两行各一个假的位置，阻碍在上（0–30），事项在下（30–60）
+    const rowOf = (text: string) => screen.getByText(text).closest(".group") as HTMLElement;
+    const box = (top: number) => () => ({ top, bottom: top + 30, height: 30 }) as DOMRect;
+    rowOf("等料").getBoundingClientRect = box(0);
+    rowOf("下周一确认夹具方案").getBoundingClientRect = box(30);
+
+    // 从标题上按下（不是按钮），拖到第一行的上半截
+    fireEvent.pointerDown(screen.getByText("下周一确认夹具方案"), { button: 0, clientX: 50, clientY: 45 });
+    fireEvent.pointerMove(window, { clientX: 50, clientY: 20 });
+    fireEvent.pointerMove(window, { clientX: 50, clientY: 5 });
+    fireEvent.pointerUp(window, { clientX: 50, clientY: 5 });
 
     await waitFor(() => expect(titles()).toEqual(["下周一确认夹具方案", "等料"]));
     expect(JSON.parse(settings["items_order.7"])[0]).toBe("note:1");
@@ -705,6 +714,55 @@ describe("事项视图：任务按钮、筛选、排序", () => {
     fireEvent.click(screen.getByText("恢复时间顺序"));
     await waitFor(() => expect(titles()).toEqual(["等料", "下周一确认夹具方案"]));
     expect(settings["items_order.7"]).toBe("");
+  });
+
+  it("⋯ 菜单里不再有上移 / 下移", async () => {
+    const store = await openWorkspace();
+    store.getState().setActiveView("items");
+    await screen.findByText("下周一确认夹具方案");
+
+    fireEvent.click(screen.getAllByTitle("更多")[1]);
+    await screen.findByText("删除");
+    expect(screen.queryByText("上移一位")).toBe(null);
+    expect(screen.queryByText("下移一位")).toBe(null);
+  });
+
+  it("记下来之后可以再关联任务，也可以换掉 / 取消关联", async () => {
+    const store = await openWorkspace();
+    store.getState().setActiveView("items");
+    await screen.findByText("下周一确认夹具方案");
+
+    // 第二行是那条没关联任务的事项
+    fireEvent.click(screen.getAllByTitle("更多")[1]);
+    fireEvent.click(await screen.findByText("关联任务…"));
+    fireEvent.click(await screen.findByText("#12 电机安装"));
+
+    await waitFor(() =>
+      expect(store.getState().itemNotes.find((n) => n.id === 1)?.taskId).toBe(12),
+    );
+    expect(invoke).toHaveBeenCalledWith(
+      "update_item_note",
+      expect.objectContaining({ id: 1, taskId: 12 }),
+    );
+
+    // 再打开：文案变成「更换」，并且能取消关联
+    fireEvent.click(screen.getAllByTitle("更多")[1]);
+    fireEvent.click(await screen.findByText("更换关联任务…"));
+    fireEvent.click(await screen.findByText("取消关联"));
+    await waitFor(() =>
+      expect(store.getState().itemNotes.find((n) => n.id === 1)?.taskId).toBe(null),
+    );
+  });
+
+  /** 阻碍是那条活 blocked 列里的一段 —— 换任务等于拆掉重建，不该藏在「更换关联」后面 */
+  it("阻碍行没有「更换关联任务」", async () => {
+    const store = await openWorkspace();
+    store.getState().setActiveView("items");
+    await screen.findByText("等料");
+
+    fireEvent.click(screen.getAllByTitle("更多")[0]);
+    await screen.findByText("删除");
+    expect(screen.queryByText(/关联任务…/)).toBe(null);
   });
 
   it("事项页的导出可以选 Excel 或 Word", async () => {

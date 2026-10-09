@@ -57,7 +57,7 @@ import { ExportButton } from "./ExportButton";
  * 因为**分拣不该改变行的位置**。记完抬头一看那条还在原地；按类型分组的话，
  * 每点一次分拣那一行就跳到别处去了，而分拣恰恰是这个视图最高频的动作。
  *
- * 用户也可以拖行首的 ⋮⋮ 手动排。排过之后顺序存在 settings 里（按项目），
+ * 用户也可以按住一行上下拖着手动排。排过之后顺序存在 settings 里（按项目），
  * 新记的那条排在最上面；头部能一键恢复时间顺序。
  */
 export function ItemsView() {
@@ -136,12 +136,7 @@ export function ItemsView() {
   const move = (from: string, to: string, place: "before" | "after") =>
     setItemOrder(moveItem(rows.map((r) => r.key), from, to, place));
 
-  /** ⋯ 菜单里的上移 / 下移：和**屏幕上**相邻的那一行换位置 */
-  const moveBy = (row: ItemRow, list: ItemRow[], delta: -1 | 1) => {
-    const i = list.findIndex((r) => r.key === row.key);
-    const next = list[i + delta];
-    if (next) move(row.key, next.key, delta < 0 ? "before" : "after");
-  };
+  const taskOptions = useMemo(() => taskPickOptions(tasks, day), [tasks, day]);
 
   const drag = useRowDrag(move);
 
@@ -270,19 +265,18 @@ export function ItemsView() {
         )}
 
         <div className="flex flex-col gap-0.5">
-          {open.map((row, i) => (
+          {open.map((row) => (
             <Row
               key={row.key}
               row={row}
               kinds={kinds}
               taskName={taskName(row.taskId)}
+              taskOptions={taskOptions}
               person={personOf(row.personId)}
               autoSort={row.note?.id != null && row.note.id === autoSort}
               onOpenBlocked={setBlockedDetail}
               onPromote={(noteId, target) => setPromoting({ noteId, target })}
               drag={drag}
-              onMoveUp={i > 0 ? () => moveBy(row, open, -1) : undefined}
-              onMoveDown={i < open.length - 1 ? () => moveBy(row, open, 1) : undefined}
             />
           ))}
         </div>
@@ -302,18 +296,17 @@ export function ItemsView() {
             </button>
             {showClosed && (
               <div className="mt-0.5 flex flex-col gap-0.5">
-                {closed.map((row, i) => (
+                {closed.map((row) => (
                   <Row
                     key={row.key}
                     row={row}
                     kinds={kinds}
                     taskName={taskName(row.taskId)}
+                    taskOptions={taskOptions}
                     person={personOf(row.personId)}
                     onOpenBlocked={setBlockedDetail}
                     onPromote={(noteId, target) => setPromoting({ noteId, target })}
                     drag={drag}
-                    onMoveUp={i > 0 ? () => moveBy(row, closed, -1) : undefined}
-                    onMoveDown={i < closed.length - 1 ? () => moveBy(row, closed, 1) : undefined}
                   />
                 ))}
               </div>
@@ -635,6 +628,27 @@ function Chips<T>({
 /* 常驻录入行                                                          */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 「关联到哪条任务」的选项：受阻 → 进行中 → 待开始 → 其余。
+ * 录入行和行尾菜单里的「更换关联任务」共用这一份，两处顺序不会不一样
+ */
+function taskPickOptions(tasks: ResolvedTask[], day: number): SelectOption<number | null>[] {
+  const rank = (t: ResolvedTask) => {
+    const col = columnOf(t, day);
+    return col === "blocked" ? 0 : col === "doing" ? 1 : col === "todo" ? 2 : 3;
+  };
+  return [
+    { value: null, label: "不关联任务" },
+    ...[...tasks]
+      .sort((a, b) => rank(a) - rank(b) || a.sortOrder - b.sortOrder)
+      .map((t) => ({
+        value: t.id as number | null,
+        label: `#${t.id} ${t.name || "未命名"}`,
+        search: t.name,
+      })),
+  ];
+}
+
 function InlineComposer({ tasks, day }: { tasks: ResolvedTask[]; day: number }) {
   const addItemNote = useAppStore((s) => s.addItemNote);
   const people = useAppStore((s) => s.people);
@@ -648,22 +662,7 @@ function InlineComposer({ tasks, day }: { tasks: ResolvedTask[]; day: number }) 
   const dropdownOpen = useRef(0);
   const inputRef = useRef<GrowingTextareaHandle>(null);
 
-  const taskOptions = useMemo<SelectOption<number | null>[]>(() => {
-    const rank = (t: ResolvedTask) => {
-      const col = columnOf(t, day);
-      return col === "blocked" ? 0 : col === "doing" ? 1 : col === "todo" ? 2 : 3;
-    };
-    return [
-      { value: null, label: "不关联任务" },
-      ...[...tasks]
-        .sort((a, b) => rank(a) - rank(b) || a.sortOrder - b.sortOrder)
-        .map((t) => ({
-          value: t.id as number | null,
-          label: `#${t.id} ${t.name || "未命名"}`,
-          search: t.name,
-        })),
-    ];
-  }, [tasks, day]);
+  const taskOptions = useMemo(() => taskPickOptions(tasks, day), [tasks, day]);
 
   const submit = async () => {
     if (!name.trim()) return;
@@ -785,26 +784,24 @@ function Row({
   row,
   kinds,
   taskName,
+  taskOptions,
   person,
   autoSort,
   onOpenBlocked,
   onPromote,
   drag,
-  onMoveUp,
-  onMoveDown,
 }: {
   row: ItemRow;
   kinds: ItemKind[];
   /** 只进 title，不占版面 —— 见上面那段 */
   taskName: string | null;
+  /** 行尾菜单里「关联 / 更换关联任务」的候选 */
+  taskOptions: SelectOption<number | null>[];
   person: Person | null;
   autoSort?: boolean;
   onOpenBlocked: (ref: { taskId: number; periodId: string }) => void;
   onPromote: (noteId: number, target: PromoteTarget) => void;
   drag: RowDrag;
-  /** 已经在最上面 / 最下面时不传 */
-  onMoveUp?: () => void;
-  onMoveDown?: () => void;
 }) {
   const store = useAppStore;
   const [writing, setWriting] = useState(false);
@@ -913,7 +910,9 @@ function Row({
   return (
     <div
       ref={drag.rowRef(row.key, row.closed)}
-      className="group relative rounded-lg px-2 py-1.5 transition-colors hover:bg-[var(--row-hover)]"
+      // 整行都能按住拖。按钮、输入框上按下不起拖（见 useRowDrag.start）
+      onPointerDown={(e) => drag.start(row, e)}
+      className="group relative cursor-grab rounded-lg px-2 py-1.5 transition-colors hover:bg-[var(--row-hover)] active:cursor-grabbing"
       style={{
         // 持续中的阻碍是唯一一类「现在就要人去处理」的行，给它一道底色。
         // 其余一律不上色 —— 一张人人高亮的列表等于没有高亮
@@ -930,16 +929,15 @@ function Row({
         />
       )}
       {/*
-        拖动手柄。只有它能起拖 —— 整行可拖的话，选中标题里的文字、
-        点圆圈和类型按钮都会和拖动抢同一个按下。
+        拖动提示。整行都能拖（按钮和输入框除外），这个 ⋮⋮ 只是告诉人「这行能拖」。
+        之前只有它能起拖，8px 宽、平时透明 —— 没人找得到，结果大家都去 ⋯ 里点上移下移。
 
         绝对定位在行的左内边距里：不占布局，附注行和结论框的缩进不用跟着改
       */}
       <span
-        onPointerDown={(e) => drag.start(row, e)}
-        title="拖动调整顺序"
+        title="按住整行拖动调整顺序"
         aria-hidden
-        className="absolute left-0 top-1.5 grid h-5 w-2 cursor-grab select-none place-items-center text-[9px] leading-none tracking-[-2px] text-[var(--text-dim)] opacity-0 transition-opacity active:cursor-grabbing group-hover:opacity-100"
+        className="pointer-events-none absolute left-0 top-1.5 grid h-5 w-2 select-none place-items-center text-[9px] leading-none tracking-[-2px] text-[var(--text-dim)] opacity-0 transition-opacity group-hover:opacity-100"
       >
         ⋮⋮
       </span>
@@ -1027,9 +1025,8 @@ function Row({
         <RowMenu
           row={row}
           taskName={taskName}
+          taskOptions={taskOptions}
           onOpenBlocked={onOpenBlocked}
-          onMoveUp={onMoveUp}
-          onMoveDown={onMoveDown}
         />
       </div>
 
@@ -1543,20 +1540,54 @@ function KindMenuItem({
 function RowMenu({
   row,
   taskName,
+  taskOptions,
   onOpenBlocked,
-  onMoveUp,
-  onMoveDown,
 }: {
   row: ItemRow;
   taskName: string | null;
+  taskOptions: SelectOption<number | null>[];
   onOpenBlocked: (ref: { taskId: number; periodId: string }) => void;
-  onMoveUp?: () => void;
-  onMoveDown?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const [confirming, setConfirming] = useState(false);
+  /** 菜单切到「选一条任务」那一页 */
+  const [linking, setLinking] = useState(false);
+  const [query, setQuery] = useState("");
   const store = useAppStore;
+
+  const close = () => {
+    setOpen(false);
+    setConfirming(false);
+    setLinking(false);
+    setQuery("");
+  };
+
+  /**
+   * 只有事项行能改关联。阻碍和风险是**挂在**那条任务上的实体 ——
+   * 阻碍就是那条活 blocked 列里的一段，换任务等于拆掉重建，代价和改类型一样，
+   * 不该藏在一个看起来很轻的「更换关联」后面
+   */
+  const linkable = row.source === "note" && row.note != null;
+
+  const link = (taskId: number | null) => {
+    const note = row.note;
+    close();
+    if (!note || taskId === note.taskId) return;
+    // 和录入行同一个习惯：还没指派负责人时，带上那条任务的负责人
+    const owner = taskId == null ? null : (store.getState().tasks.get(taskId)?.personId ?? null);
+    void store.getState().patchItemNote(note.id, {
+      taskId,
+      ...(note.personId == null && owner != null ? { personId: owner } : {}),
+    });
+  };
+
+  const q = query.trim().toLowerCase();
+  const shownTasks = q
+    ? taskOptions.filter(
+        (o) => o.label.toLowerCase().includes(q) || (o.search ?? "").toLowerCase().includes(q),
+      )
+    : taskOptions;
 
   const remove = () => {
     const s = store.getState();
@@ -1582,88 +1613,115 @@ function RowMenu({
       >
         ⋯
       </button>
-      <Popover
-        anchor={anchor}
-        open={open}
-        onClose={() => {
-          setOpen(false);
-          setConfirming(false);
-        }}
-        align="right"
-        width={188}
-      >
-        {row.blocker && (
-          <MenuItem
-            onClick={() => {
-              setOpen(false);
-              onOpenBlocked({ taskId: row.blocker!.taskId, periodId: row.blocker!.period.id });
-            }}
-          >
-            打开阻碍详情…
-          </MenuItem>
-        )}
-        {/*
-          菜单项里**写明是哪条任务**。行上已经不显示关联任务了（见 Row 的
-          注释），一句「打开这条任务」等于让用户闭着眼点 —— 他看不出这一行
-          挂着的是哪条活，也就不知道点下去会跳到哪。
-        */}
-        {row.taskId != null && (
-          <MenuItem
-            onClick={() => {
-              setOpen(false);
-              store.getState().openDetail(row.taskId!);
-            }}
-          >
-            打开 {taskName ?? `#${row.taskId}`}
-          </MenuItem>
-        )}
-        {row.fromNoteId != null && (
-          <MenuItem
-            onClick={() => {
-              setOpen(false);
-              void store.getState().unpromoteNote(row.fromNoteId!);
-            }}
-          >
-            撤销分拣（删掉这个实体）
-          </MenuItem>
-        )}
-
-        {/* 拖不动的时候（触控板、键盘）也得有办法排 */}
-        {(onMoveUp || onMoveDown) && (
+      <Popover anchor={anchor} open={open} onClose={close} align="right" width={linking ? 240 : 188}>
+        {linking ? (
+          /*
+            第二页：选一条任务。就地换页而不是再弹一层 —— 弹出层套弹出层，
+            关掉里面那层时外面那层要不要跟着关，怎么做都有人觉得不对
+          */
           <>
-            <MenuDivider />
-            {onMoveUp && (
+            <div className="flex items-center gap-1 px-1.5 pb-1">
+              <button
+                onClick={() => {
+                  setLinking(false);
+                  setQuery("");
+                }}
+                title="返回"
+                className="grid size-5 shrink-0 place-items-center rounded text-[11px] text-[var(--text-dim)] hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
+              >
+                ‹
+              </button>
+              <input
+                autoFocus
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  // 不外泄：Esc 在 Popover 那层是关窗，Enter 在工作区是新建任务
+                  e.stopPropagation();
+                  if (e.key === "Enter" && shownTasks.length > 0) {
+                    e.preventDefault();
+                    link(shownTasks[0].value);
+                  }
+                  if (e.key === "Escape") close();
+                }}
+                placeholder="搜任务名或 #编号…"
+                className="min-w-0 flex-1 rounded border border-[var(--rule)] bg-[var(--surface-alt)] px-1.5 py-1 text-[10px] text-[var(--text)] outline-none focus:border-[var(--accent)]"
+              />
+            </div>
+            <div className="max-h-56 overflow-y-auto">
+              {shownTasks.map((o) => {
+                const current = o.value === row.taskId;
+                return (
+                  <MenuItem key={String(o.value)} active={current} onClick={() => link(o.value)}>
+                    <span className="flex items-center gap-2">
+                      <span className="w-2 shrink-0 text-[9px]">{current ? "✓" : ""}</span>
+                      <span className="min-w-0 flex-1 truncate">
+                        {o.value == null ? "取消关联" : o.label}
+                      </span>
+                    </span>
+                  </MenuItem>
+                );
+              })}
+              {shownTasks.length === 0 && (
+                <div className="px-2.5 py-1.5 text-[10px] text-[var(--text-dim)]">没有匹配的任务</div>
+              )}
+            </div>
+          </>
+        ) : (
+          <>
+            {row.blocker && (
               <MenuItem
                 onClick={() => {
-                  setOpen(false);
-                  onMoveUp();
+                  close();
+                  onOpenBlocked({ taskId: row.blocker!.taskId, periodId: row.blocker!.period.id });
                 }}
               >
-                上移一位
+                打开阻碍详情…
               </MenuItem>
             )}
-            {onMoveDown && (
+            {/*
+              菜单项里**写明是哪条任务**。行上已经不显示关联任务了（见 Row 的
+              注释），一句「打开这条任务」等于让用户闭着眼点 —— 他看不出这一行
+              挂着的是哪条活，也就不知道点下去会跳到哪。
+            */}
+            {row.taskId != null && (
               <MenuItem
                 onClick={() => {
-                  setOpen(false);
-                  onMoveDown();
+                  close();
+                  store.getState().openDetail(row.taskId!);
                 }}
               >
-                下移一位
+                打开 {taskName ?? `#${row.taskId}`}
+              </MenuItem>
+            )}
+            {/* 记下来之后还能再挂到某条任务上，或者换一条 */}
+            {linkable && (
+              <MenuItem onClick={() => setLinking(true)}>
+                {row.taskId == null ? "关联任务…" : "更换关联任务…"}
+              </MenuItem>
+            )}
+            {row.fromNoteId != null && (
+              <MenuItem
+                onClick={() => {
+                  close();
+                  void store.getState().unpromoteNote(row.fromNoteId!);
+                }}
+              >
+                撤销分拣（删掉这个实体）
+              </MenuItem>
+            )}
+
+            <MenuDivider />
+            {confirming ? (
+              <MenuItem danger onClick={remove}>
+                真的删掉？这条点一下就没了
+              </MenuItem>
+            ) : (
+              <MenuItem danger onClick={() => setConfirming(true)}>
+                删除
               </MenuItem>
             )}
           </>
-        )}
-
-        <MenuDivider />
-        {confirming ? (
-          <MenuItem danger onClick={remove}>
-            真的删掉？这条点一下就没了
-          </MenuItem>
-        ) : (
-          <MenuItem danger onClick={() => setConfirming(true)}>
-            删除
-          </MenuItem>
         )}
       </Popover>
     </>
@@ -1719,8 +1777,13 @@ function useRowDrag(onDrop: (from: string, to: string, place: "before" | "after"
     return null;
   };
 
-  const start = (row: ItemRow, e: React.PointerEvent) => {
+  const start = (row: ItemRow, e: React.PointerEvent<HTMLElement>) => {
     if (e.button !== 0) return;
+    const hit = e.target as HTMLElement;
+    // 弹出层是 portal 出去的，React 事件却照样冒泡到行上 —— DOM 上不在行里的不算
+    if (!e.currentTarget.contains(hit)) return;
+    // 圆圈、优先级、类型按钮、写结论的框：按下是它们自己的事，不是起拖
+    if (hit.closest("button, input, textarea, select, a, [contenteditable]")) return;
     e.preventDefault(); // 不让按下拖动的同时选中一片文字
     stopRef.current?.();
 
