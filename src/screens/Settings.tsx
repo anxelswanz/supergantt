@@ -13,6 +13,7 @@ import { APP_VIEWS, OPTIONAL_VIEWS, PERMANENT_VIEW } from "../core/views";
 import { BLOCKER_KIND, RISK_KIND, newKindKey } from "../core/items";
 import type { ItemKind } from "../db/api";
 import { plugins } from "../plugins/registry";
+import { compareVersions, validateManifest } from "../plugins/manifest";
 import type { PluginRecord, PluginSettingField } from "../plugins/types";
 import { useRegistry } from "../plugins/usePlugins";
 import {
@@ -151,9 +152,9 @@ const PLUGIN_STATUS: Record<PluginRecord["status"], { label: string; cls: string
  *   3. 某个插件有什么开关？ —— 挂在各自那张卡片下面。插件注册的设置项
  *      不定长，所以不做成全局区块，跟插件走才不会张冠李戴。
  *
- * 页面上**没有**安装/卸载。装 = 把目录拷进插件目录，卸 = 删掉它 ——
- * 这两件事用资源管理器做比在这画一个文件浏览器快得多，也不会被本程序
- * 的权限边界绊住（插件目录是宿主唯一不会去写的地方，见 plugin.rs）。
+ * 安装只针对**随应用附带**的插件（「可安装」那一栏）：点一下拷进插件目录，
+ * 再点启用。自己写的插件照旧是把目录拷进去 —— 那种情况用资源管理器比
+ * 在这里画一个文件浏览器快得多。卸载对两种都一样：删掉那个目录。
  */
 function PluginsPane() {
   const { records, settingFields, booted, bootError } = useRegistry();
@@ -232,6 +233,8 @@ function PluginsPane() {
         </div>
       )}
 
+      <BundledList records={records} onError={setMessage} />
+
       {!booted && <p className="text-xs text-[var(--text-dim)]">正在扫描插件目录…</p>}
 
       {booted && records.length === 0 && !bootError && (
@@ -294,6 +297,27 @@ function PluginsPane() {
                       {isBusy ? "…" : "重新加载"}
                     </button>
                   )}
+                  {!r.enabled && (
+                    <button
+                      onClick={() => {
+                        if (
+                          !window.confirm(
+                            `卸载「${r.manifest.name}」？\n\n插件目录会被整个删掉，包括它保存的数据（比如同步记录）。`,
+                          )
+                        )
+                          return;
+                        run(r.manifest.id, async () => {
+                          await api.uninstallPlugin(r.manifest.id);
+                          await plugins.rescan();
+                        });
+                      }}
+                      disabled={isBusy}
+                      title="删掉插件目录"
+                      className="rounded-lg border border-[var(--rule)] px-2.5 py-1 text-[10px] text-[var(--text-dim)] hover:text-rose-500 disabled:opacity-50"
+                    >
+                      卸载
+                    </button>
+                  )}
                   <button
                     onClick={() =>
                       run(r.manifest.id, () =>
@@ -351,6 +375,117 @@ function PluginsPane() {
         插件跑在本程序里，看得到全部数据。装之前先确认来源。
       </p>
     </Section>
+  );
+}
+
+/**
+ * 随应用附带、可以一键安装的插件。
+ *
+ * 一个都没有（比如开发者自己构建时没带资源）就整段不出现。已装且版本相同的
+ * 也照样列着，按钮写「已安装」—— 用户要能确认「附带的那几个我都装了」。
+ */
+function BundledList({ records, onError }: { records: PluginRecord[]; onError: (m: string) => void }) {
+  const [list, setList] = useState<
+    { id: string; name: string; version: string; description?: string; installed: string | null }[]
+  >([]);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const load = () =>
+    api
+      .listBundledPlugins()
+      .then((raw) =>
+        setList(
+          raw.flatMap((b) => {
+            const m = validateManifest(b.manifest_raw, b.dir_name);
+            if (!m.ok) return [];
+            let installed: string | null = null;
+            if (b.installed_manifest_raw) {
+              try {
+                installed = String(JSON.parse(b.installed_manifest_raw).version ?? "0.0.0");
+              } catch {
+                installed = "0.0.0";
+              }
+            }
+            return [
+              {
+                id: m.manifest.id,
+                name: m.manifest.name,
+                version: m.manifest.version,
+                description: m.manifest.description,
+                installed,
+              },
+            ];
+          }),
+        ),
+      )
+      .catch(() => setList([]));
+
+  // records 变了（装了、卸了）就重读一次已安装版本
+  useEffect(() => {
+    void load();
+  }, [records]);
+
+  if (list.length === 0) return null;
+
+  const install = async (id: string) => {
+    setBusy(id);
+    try {
+      const wasEnabled = records.find((r) => r.manifest.id === id)?.enabled ?? false;
+      await api.installBundledPlugin(id);
+      await plugins.rescan();
+      // 更新一个正在用的插件：重载，让新代码立刻生效
+      if (wasEnabled) await plugins.reload(id);
+      await load();
+    } catch (e) {
+      onError(`${id}：${(e as Error)?.message ?? e}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="mb-4">
+      <div className="mb-1.5 text-[10px] font-medium text-[var(--text-dim)]">可安装</div>
+      <div className="space-y-1.5">
+        {list.map((b) => {
+          const state =
+            b.installed == null ? "install" : compareVersions(b.version, b.installed) > 0 ? "update" : "current";
+          return (
+            <div
+              key={b.id}
+              className="flex items-center gap-3 rounded-xl border border-dashed border-[var(--rule)] p-2.5"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="flex items-baseline gap-2">
+                  <span className="truncate text-xs font-semibold text-[var(--text)]">{b.name}</span>
+                  <span className="shrink-0 font-mono text-[10px] text-[var(--text-dim)]">v{b.version}</span>
+                </div>
+                {b.description && (
+                  <div className="mt-0.5 text-[10px] leading-relaxed text-[var(--text-dim)]">{b.description}</div>
+                )}
+              </div>
+              <button
+                onClick={() => void install(b.id)}
+                disabled={state === "current" || busy === b.id}
+                className={`shrink-0 rounded-lg px-2.5 py-1 text-[10px] font-medium disabled:opacity-50 ${
+                  state === "current"
+                    ? "border border-[var(--rule)] text-[var(--text-dim)]"
+                    : "bg-[var(--accent)] text-white"
+                }`}
+              >
+                {busy === b.id
+                  ? "…"
+                  : state === "install"
+                    ? "安装"
+                    : state === "update"
+                      ? `更新（当前 v${b.installed}）`
+                      : "已安装"}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 

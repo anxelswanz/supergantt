@@ -24,7 +24,7 @@
 
 use gantt_core::calendar::{days_to_iso, parse_cli_date, parse_cli_duration, resolve_span};
 use gantt_core::model::*;
-use gantt_core::{locate, query, write};
+use gantt_core::{feishu, locate, query, write};
 use rusqlite::Connection;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -109,7 +109,7 @@ impl Args {
     // 传了它、命令成功、结果是它以为的另一样东西，而错误要等它去别处才发现。
     const KNOWN_SWITCHES: &'static [&'static str] = &[
         "json", "force", "milestone", "yes", "no-auto-rollover",
-        "auto-rollover", "create-missing", "clear-assignee",
+        "auto-rollover", "create-missing", "clear-assignee", "pending", "dry-run",
     ];
 
     fn parse(raw: &[String]) -> CliResult<Args> {
@@ -253,7 +253,7 @@ fn run(argv: Vec<String>) -> CliResult<()> {
 
     let (rest, group) = hoist_globals(&argv)?;
     let group = group.ok_or_else(|| {
-        CliError::args("没给命令。可用：project / task / people / risk / comment / note / baseline / setting / check。敲 `gantt help` 看用法。")
+        CliError::args("没给命令。可用：project / task / people / risk / comment / note / baseline / setting / feishu / check。敲 `gantt help` 看用法。")
     })?;
 
     match group.as_str() {
@@ -265,9 +265,10 @@ fn run(argv: Vec<String>) -> CliResult<()> {
         "note" => dispatch_note(&rest),
         "baseline" => dispatch_baseline(&rest),
         "setting" => dispatch_setting(&rest),
+        "feishu" => dispatch_feishu(&rest),
         "check" => cmd_check(&Args::parse(&rest)?),
         other => Err(CliError::args(format!(
-            "不认识的命令「{other}」。可用：project / task / people / risk / comment / note / baseline / setting / check。敲 `gantt help` 看用法。"
+            "不认识的命令「{other}」。可用：project / task / people / risk / comment / note / baseline / setting / feishu / check。敲 `gantt help` 看用法。"
         ))),
     }
 }
@@ -384,6 +385,20 @@ fn dispatch_setting(rest: &[String]) -> CliResult<()> {
         "list" => cmd_setting_list(&args),
         other => Err(CliError::args(format!(
             "setting 没有子命令「{other}」。可用：get / set / list。"
+        ))),
+    }
+}
+
+fn dispatch_feishu(rest: &[String]) -> CliResult<()> {
+    let (sub, tail) = split_sub(rest, "feishu")?;
+    let args = Args::parse(tail)?;
+    match sub.as_str() {
+        "queue" => cmd_feishu_queue(&args),
+        "write" => cmd_feishu_write(&args),
+        "mark-synced" => cmd_feishu_mark_synced(&args),
+        "mark-failed" => cmd_feishu_mark_failed(&args),
+        other => Err(CliError::args(format!(
+            "feishu 没有子命令「{other}」。可用：queue / write / mark-synced / mark-failed。"
         ))),
     }
 }
@@ -2097,6 +2112,366 @@ fn read_note_json(conn: &Connection, id: i64) -> CliResult<DailyNote> {
     .map_err(|e| CliError::db(e.to_string()))
 }
 
+/* ------------------------------------------------------------------ */
+/* feishu 命令：飞书同步插件的队列（见 gantt_core::feishu）              */
+/* ------------------------------------------------------------------ */
+
+const RISK_LABELS: [&str; 3] = ["高", "中", "低"];
+
+/// 列出同步队列，给 Agent 填飞书表用。
+///
+/// 输出里的日期、持续天数、负责人的飞书身份都是**算好的** —— 模型不该自己
+/// 算日期（铁律之外的同一条约定），也不该自己去通讯录里猜人。
+fn cmd_feishu_queue(args: &Args) -> CliResult<()> {
+    let dir = resolve_data_dir(args)?;
+    let qpath = feishu::queue_path(&dir);
+    let queue = feishu::load(&qpath).map_err(CliError::db)?;
+    let config = feishu::load(&feishu::config_path(&dir)).map_err(CliError::db)?;
+    let target = args.get("target").map(feishu::parse_target).transpose().map_err(CliError::args)?;
+    let target_key = target.as_ref().map(|(b, t)| format!("{b}:{t}"));
+    let keys: Option<Vec<&str>> = args.get("keys").map(|k| k.split(',').map(str::trim).filter(|s| !s.is_empty()).collect());
+    let pending_only = args.has("pending");
+
+    // 只读打开主库，补任务和项目信息。应用开着也没关系（铁律 1 只管写）
+    let conn = open_ro(args)?;
+    let today = gantt_core::calendar::today_days();
+
+    let mut items = Vec::new();
+    for e in feishu::entries(&queue) {
+        let key = e.get("key").and_then(serde_json::Value::as_str).unwrap_or_default();
+        if let Some(ks) = &keys {
+            if !ks.contains(&key) {
+                continue;
+            }
+        }
+        let status = target_key.as_deref().map(|t| feishu::status_of(e, t));
+        if pending_only && matches!(status, Some("synced")) {
+            continue;
+        }
+        items.push(feishu_item_json(&conn, e, &config, target_key.as_deref(), status, today));
+    }
+
+    if let Some(ks) = &keys {
+        let found: Vec<&str> = items.iter().filter_map(|i| i["key"].as_str()).collect();
+        let missing: Vec<&&str> = ks.iter().filter(|k| !found.contains(k)).collect();
+        if !missing.is_empty() {
+            return Err(CliError::validation(format!(
+                "同步队列里没有：{}。先在应用的事项页把它们「加入飞书」",
+                missing.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("、")
+            )));
+        }
+    }
+
+    let rules = serde_json::json!({
+        "global": config.get("globalRules").and_then(serde_json::Value::as_str).unwrap_or(""),
+        "table": target_key.as_deref()
+            .and_then(|t| config.pointer(&format!("/tableRules/{}", t.replace('~', "~0").replace('/', "~1"))))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(""),
+    });
+
+    if args.json() {
+        return print_json(&serde_json::json!({
+            "queueFile": qpath.to_string_lossy(),
+            "today": days_to_iso(today),
+            "target": target.as_ref().map(|(b, t)| serde_json::json!({ "baseToken": b, "tableId": t, "key": format!("{b}:{t}") })),
+            "rules": rules,
+            "items": items,
+        }));
+    }
+
+    if items.is_empty() {
+        println!("（同步队列是空的。在应用的事项页，对已分拣的事项点分拣菜单里的「加入飞书」）");
+        return Ok(());
+    }
+    for i in &items {
+        println!(
+            "{:<14} {:<8} {:<6} {}{}",
+            i["key"].as_str().unwrap_or(""),
+            i["status"].as_str().unwrap_or("-"),
+            i["kindLabel"].as_str().unwrap_or(""),
+            truncate(i["title"].as_str().unwrap_or(""), 40),
+            if i["deleted"].as_bool() == Some(true) { "（源事项已删除）" } else { "" },
+        );
+    }
+    Ok(())
+}
+
+fn feishu_item_json(
+    conn: &Connection,
+    e: &serde_json::Value,
+    config: &serde_json::Value,
+    target: Option<&str>,
+    status: Option<&str>,
+    today: i64,
+) -> serde_json::Value {
+    use serde_json::{json, Value};
+    let item = e.get("item").cloned().unwrap_or(Value::Null);
+    let s = |k: &str| item.get(k).and_then(Value::as_str).map(str::to_string);
+    let n = |k: &str| item.get(k).and_then(Value::as_i64);
+
+    let project_id = e.get("projectId").and_then(Value::as_i64);
+    let project_name: Option<String> = project_id.and_then(|id| {
+        conn.query_row("SELECT name FROM projects WHERE id = ?1", [id], |r| r.get(0)).ok()
+    });
+
+    let task = n("taskId").and_then(|id| {
+        conn.query_row(
+            "SELECT name, start_date, end_date, progress, note FROM tasks WHERE id = ?1",
+            [id],
+            |r| {
+                Ok(json!({
+                    "id": id,
+                    "name": r.get::<_, String>(0)?,
+                    "start": r.get::<_, String>(1)?,
+                    "end": r.get::<_, String>(2)?,
+                    "progress": r.get::<_, f64>(3)?,
+                    "note": r.get::<_, String>(4)?,
+                }))
+            },
+        )
+        .ok()
+    });
+
+    let owner = n("personId").map(|pid| {
+        let mapped = config.pointer(&format!("/people/{pid}"));
+        json!({
+            "name": s("personName"),
+            "feishuOpenId": mapped.and_then(|m| m.get("openId")).and_then(Value::as_str).filter(|v| !v.is_empty()),
+            "feishuName": mapped.and_then(|m| m.get("name")).and_then(Value::as_str).filter(|v| !v.is_empty()),
+        })
+    });
+
+    let start = s("day");
+    let close = s("closedDay");
+    let lasting = start.as_deref().and_then(gantt_core::calendar::iso_to_days).map(|from| {
+        let to = close.as_deref().and_then(gantt_core::calendar::iso_to_days).unwrap_or(today);
+        (to - from).max(0)
+    });
+
+    let sync = target.and_then(|t| e.get("syncs").and_then(|m| m.get(t)));
+    json!({
+        "key": e.get("key"),
+        "status": status,
+        "recordId": sync.and_then(|v| v.get("recordId")).and_then(Value::as_str),
+        "lastError": sync.and_then(|v| v.get("error")).filter(|v| !v.is_null()),
+        "deleted": e.get("missing").and_then(Value::as_bool).unwrap_or(false),
+        "project": { "id": project_id, "name": project_name },
+        "source": s("source"),
+        "kind": s("kind"),
+        "kindLabel": s("kindLabel"),
+        "title": s("title"),
+        "priority": n("priority").map(|p| format!("P{p}")),
+        "riskLevel": n("riskLevel").and_then(|l| RISK_LABELS.get(l as usize)).copied(),
+        "owner": owner,
+        "task": task,
+        "startDate": start,
+        "closeDate": close,
+        "lastingDays": lasting,
+        "closed": item.get("closed").and_then(Value::as_bool).unwrap_or(false),
+        "resolution": s("resolution"),
+    })
+}
+
+/// 改队列文件：读 → 改 → 原子写回。不碰 gantt.db，所以应用开着也能写
+fn edit_feishu_queue(
+    args: &Args,
+    f: impl FnOnce(&mut serde_json::Value, &str, &str, &str) -> std::result::Result<(), String>,
+) -> CliResult<String> {
+    let key = args
+        .positionals
+        .first()
+        .ok_or_else(|| CliError::args("要给出队列项的 key，例如 note:12"))?
+        .clone();
+    let target = args.require("target")?;
+    let (b, t) = feishu::parse_target(target).map_err(CliError::args)?;
+    let target = format!("{b}:{t}");
+    let dir = resolve_data_dir(args)?;
+    let path = feishu::queue_path(&dir);
+    let mut queue = feishu::load(&path).map_err(CliError::db)?;
+    let now = query::now();
+    f(&mut queue, &key, &target, &now).map_err(CliError::validation)?;
+    feishu::save(&path, &queue).map_err(CliError::db)?;
+    Ok(key)
+}
+
+/// 写一条事项到飞书：没写过就**新建**，写过就**更新它自己那条记录**。
+///
+/// 这是 Agent 唯一的写入口（后台同步只放行它，不放行 lark-cli 的任何写命令）。
+/// 几道关全在这里，不靠提示词：
+///
+/// - 不删除：这里只调 `+record-upsert`，没有任何删除路径
+/// - 不改别人的记录：record id 只从队列里取（这条事项当初在这张表上建的那条），
+///   命令行上不接受 --record-id
+/// - 不清空：值为空的字段直接丢掉（见 feishu::strip_empty）
+/// - 不重复建：整个过程持有写入锁，建完立刻把 record id 记进队列
+/// - 源事项已删除的不写
+fn cmd_feishu_write(args: &Args) -> CliResult<()> {
+    use serde_json::Value;
+
+    let key = args
+        .positionals
+        .first()
+        .ok_or_else(|| CliError::args("要给出队列项的 key，例如 `gantt feishu write note:12 --target <base>:<table> --fields '{...}'`"))?
+        .clone();
+    if args.get("record-id").is_some() {
+        return Err(CliError::args(
+            "write 不接受 --record-id：要更新哪条记录由同步队列决定（这条事项当初建的那条），不能手动指定",
+        ));
+    }
+    let (base, table) = feishu::parse_target(args.require("target")?).map_err(CliError::args)?;
+    let target = format!("{base}:{table}");
+
+    let raw = match (args.get("fields"), args.get("fields-file")) {
+        (Some(f), None) => f.to_string(),
+        (None, Some(path)) => std::fs::read_to_string(path)
+            .map_err(|e| CliError::args(format!("读不了 --fields-file {path}：{e}")))?,
+        _ => return Err(CliError::args("要给 --fields '<字段 JSON>' 或 --fields-file <文件> 其中一个")),
+    };
+    let fields: serde_json::Map<String, Value> = match serde_json::from_str(&raw) {
+        Ok(Value::Object(m)) => m,
+        Ok(_) => return Err(CliError::args("--fields 必须是一个 JSON 对象：{\"字段名\": 值, ...}")),
+        Err(e) => return Err(CliError::args(format!("--fields 不是合法的 JSON：{e}"))),
+    };
+    let (fields, dropped) = feishu::strip_empty(&fields);
+    if fields.is_empty() {
+        return Err(CliError::validation("没有可写的字段（全部为空）。对不上的字段本来就该忽略，但至少要有一个"));
+    }
+
+    let dir = resolve_data_dir(args)?;
+    let qpath = feishu::queue_path(&dir);
+    let _lock = feishu::WriteLock::acquire(&dir).map_err(CliError::validation)?;
+
+    let queue = feishu::load(&qpath).map_err(CliError::db)?;
+    let entry = feishu::entries(&queue)
+        .into_iter()
+        .find(|e| e.get("key").and_then(Value::as_str) == Some(key.as_str()))
+        .ok_or_else(|| CliError::validation(format!("同步队列里没有「{key}」。先在应用的事项页把它「加入飞书同步」")))?;
+    if entry.get("missing").and_then(Value::as_bool) == Some(true) {
+        return Err(CliError::validation(format!("「{key}」的源事项已在 gantt 里删除，不再写入飞书")));
+    }
+    let existing = feishu::existing_record(entry, &target);
+    let action = if existing.is_some() { "update" } else { "create" };
+
+    let json_arg = serde_json::to_string(&fields).map_err(|e| CliError::db(e.to_string()))?;
+    let mut lark_args: Vec<String> = vec![
+        "base".into(), "+record-upsert".into(), "--as".into(), "user".into(),
+        "--base-token".into(), base.clone(), "--table-id".into(), table.clone(),
+    ];
+    if let Some(id) = &existing {
+        lark_args.push("--record-id".into());
+        lark_args.push(id.clone());
+    }
+    lark_args.push("--json".into());
+    lark_args.push(json_arg);
+
+    if args.has("dry-run") {
+        return print_json(&serde_json::json!({
+            "key": key, "action": action, "recordId": existing, "dryRun": true,
+            "fields": fields, "ignoredEmpty": dropped,
+        }));
+    }
+
+    let (ok, out) = run_lark(&lark_args)?;
+    let now = query::now();
+    let parsed: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
+    let lark_error = if !ok || parsed.get("ok") == Some(&Value::Bool(false)) || parsed.is_null() {
+        let e = parsed.get("error");
+        let msg = [e.and_then(|e| e.get("message")), e.and_then(|e| e.get("hint"))]
+            .iter()
+            .filter_map(|v| v.and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("；");
+        Some(if msg.is_empty() { out.trim().chars().take(300).collect() } else { msg })
+    } else {
+        None
+    };
+
+    // 结果写回队列。重新读一遍：写飞书的这几秒里应用可能刷新过快照
+    let mut queue = feishu::load(&qpath).map_err(CliError::db)?;
+    if let Some(err) = lark_error {
+        let _ = feishu::mark_failed(&mut queue, &key, &target, &err, &now);
+        let _ = feishu::save(&qpath, &queue);
+        return Err(CliError::validation(format!("写入飞书失败（{action}）：{err}")));
+    }
+    let record_id = match (&existing, feishu::find_record_id(&parsed)) {
+        (_, Some(id)) => id,
+        (Some(id), None) => id.clone(),
+        (None, None) => {
+            let msg = "飞书返回成功，但输出里没找到 record_id —— 为免重复新建，这条先记为失败，请到表里核对";
+            let _ = feishu::mark_failed(&mut queue, &key, &target, msg, &now);
+            let _ = feishu::save(&qpath, &queue);
+            return Err(CliError::validation(msg));
+        }
+    };
+    feishu::mark_synced(&mut queue, &key, &target, &record_id, &now).map_err(CliError::validation)?;
+    feishu::save(&qpath, &queue).map_err(CliError::db)?;
+
+    let written: Vec<&String> = fields.keys().collect();
+    let ignored_by_feishu = parsed.pointer("/data/ignored_fields").cloned().unwrap_or(Value::Null);
+    if args.json() {
+        print_json(&serde_json::json!({
+            "key": key, "action": action, "recordId": record_id,
+            "fieldsWritten": written, "ignoredEmpty": dropped, "ignoredByFeishu": ignored_by_feishu,
+        }))
+    } else {
+        println!(
+            "✓ {key} 已{}（记录 {record_id}），写了 {} 个字段",
+            if action == "create" { "新建" } else { "更新" },
+            written.len()
+        );
+        Ok(())
+    }
+}
+
+/// 跑 lark-cli，返回（退出码是否为 0, stdout 或 stderr）。
+///
+/// 找程序：LARK_CLI 环境变量 > PATH > npm 全局目录的默认位置（~/.npm-global/bin，
+/// 很多人的 shell 没把它加进 PATH）。
+fn run_lark(args: &[String]) -> CliResult<(bool, String)> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(p) = std::env::var_os("LARK_CLI") {
+        candidates.push(PathBuf::from(p));
+    }
+    candidates.push(PathBuf::from("lark-cli"));
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(PathBuf::from(home).join(".npm-global/bin/lark-cli"));
+    }
+    for exe in candidates {
+        match std::process::Command::new(&exe).args(args).output() {
+            Ok(o) => {
+                let out = if o.stdout.is_empty() { o.stderr } else { o.stdout };
+                return Ok((o.status.success(), String::from_utf8_lossy(&out).to_string()));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(CliError::db(format!("启动 lark-cli 失败：{e}"))),
+        }
+    }
+    Err(CliError::validation("找不到 lark-cli。装上它（npm i -g @larksuite/cli），或用 LARK_CLI 环境变量指定路径"))
+}
+
+fn cmd_feishu_mark_synced(args: &Args) -> CliResult<()> {
+    let record = args.require("record-id")?.to_string();
+    let key = edit_feishu_queue(args, |q, k, t, now| feishu::mark_synced(q, k, t, &record, now))?;
+    if args.json() {
+        print_json(&serde_json::json!({ "key": key, "recordId": record, "status": "synced" }))
+    } else {
+        println!("✓ {key} 已记为同步（记录 {record}）");
+        Ok(())
+    }
+}
+
+fn cmd_feishu_mark_failed(args: &Args) -> CliResult<()> {
+    let error = args.require("error")?.to_string();
+    let key = edit_feishu_queue(args, |q, k, t, now| feishu::mark_failed(q, k, t, &error, now))?;
+    if args.json() {
+        print_json(&serde_json::json!({ "key": key, "status": "failed" }))
+    } else {
+        println!("✗ {key} 已记为失败");
+        Ok(())
+    }
+}
+
 fn print_json<T: serde::Serialize>(value: &T) -> CliResult<()> {
     let s = serde_json::to_string_pretty(value)
         .map_err(|e| CliError::db(format!("序列化 JSON 失败：{e}")))?;
@@ -2164,6 +2539,13 @@ fn print_usage() {
   gantt setting get <key> [--json]
   gantt setting set <key> --value <值> [--json]
   gantt setting list [--prefix <前缀>] [--json]
+
+飞书同步（读写 feishu-sync 插件的队列；不写 gantt.db，应用开着也能用）：
+  gantt feishu queue [--target <base-token>:<table-id>] [--keys note:1,risk:2] [--pending] [--json]
+  gantt feishu write <key> --target <base-token>:<table-id> --fields '<字段 JSON>' [--dry-run] [--json]
+      没同步过就新建，同步过就更新它自己那条；不删除、不接受 --record-id、空值字段不写
+  gantt feishu mark-synced <key> --target <base-token>:<table-id> --record-id <rec…> [--json]
+  gantt feishu mark-failed <key> --target <base-token>:<table-id> --error <原因> [--json]
 
 自检：
   gantt check [--json]

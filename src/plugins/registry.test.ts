@@ -84,6 +84,22 @@ describe("itemSnapshot", () => {
     expect(byKey.get("blocker:12/b1")).toMatchObject({ kind: "blocker", day: "2026-10-01" });
   });
 
+  it("1.2：noteId 认住事项本身，closedDay 给出关闭的那天", () => {
+    const s = useAppStore.getState();
+    useAppStore.setState({
+      itemNotes: [
+        { ...s.itemNotes[0], closedAt: unix("2026-10-09"), resolution: "换了供应商" },
+        // 分拣成风险的那条：行 key 是 risk:5，但 noteId 还是 2
+        { ...s.itemNotes[0], id: 2, promotedKind: "risk", promotedRef: "5" },
+      ],
+    });
+    const byKey = new Map(itemSnapshot().map((i) => [i.key, i]));
+    expect(byKey.get("note:1")).toMatchObject({ noteId: 1, closed: true, closedDay: "2026-10-09" });
+    expect(byKey.get("risk:5")).toMatchObject({ noteId: 2, closedDay: null });
+    // 直接在甘特上标的阻碍没有事项来源
+    expect(byKey.get("blocker:12/b1")).toMatchObject({ noteId: null, closedDay: null });
+  });
+
   it("没打开项目时是空的", () => {
     useAppStore.setState({ project: null });
     expect(itemSnapshot()).toEqual([]);

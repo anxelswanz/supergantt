@@ -47,6 +47,24 @@ export interface PluginManifest {
   main?: string;
   /** 视图注册的声明式部分。真正的渲染函数在 onload 里给 */
   views?: PluginViewDeclaration[];
+  /**
+   * 插件要用到的宿主能力（API 1.2）。不声明就拿不到 —— 一个日报插件
+   * 不该因为宿主有子进程能力就能起进程。
+   */
+  permissions?: PluginPermissions;
+  /**
+   * 插件附带的 Claude Skill（API 1.2）。启用时宿主把 `<插件目录>/<dir>`
+   * 软链接到 `~/.claude/skills/<name>`，停用时移除。
+   */
+  skills?: { dir: string; name: string }[];
+}
+
+export interface PluginPermissions {
+  /**
+   * 允许运行的程序（裸程序名，如 "lark-cli"）。宿主在 PATH 和常见安装
+   * 目录里找它，工作目录固定是插件自己的目录。shell 一律不许。
+   */
+  exec?: string[];
 }
 
 /**
@@ -200,6 +218,78 @@ export interface ItemView {
   resolution: string | null;
   /** 风险等级 0 高 / 1 中 / 2 低；不是风险为 null */
   riskLevel: number | null;
+  /**
+   * 关闭的那一天，本地日期；没关为 null（API 1.2）。
+   * 阻碍是区间结束的那天，风险是处置的那天，事项是关闭的那天。
+   */
+  closedDay: string | null;
+  /**
+   * 这一行背后那条事项的 id（API 1.2）：事项行是它自己，从事项分拣出来的
+   * 阻碍/风险是原来那条事项，直接在甘特上建的阻碍/风险为 null。
+   *
+   * 插件要「认住」一条事项时用它而不是 key —— 分拣会让 key 从 "note:3"
+   * 变成 "risk:7"，但 noteId 不变。
+   */
+  noteId: number | null;
+}
+
+/**
+ * 插件挂在事项分拣菜单里的一项（API 1.2）。
+ *
+ * label 是函数：同一个插件对不同的行要显示不同的字（「加入飞书」/「移出飞书」），
+ * 返回 null 表示这一行不显示这一项。
+ */
+export interface PluginItemAction {
+  id: string;
+  label: (item: ItemView) => string | null;
+  hint?: string;
+  run: (item: ItemView) => void | Promise<void>;
+}
+
+/** 插件挂在事项行标题旁边的小标签（API 1.2）。返回 null 不显示 */
+export interface PluginItemBadge {
+  id: string;
+  render: (item: ItemView) => { text: string; title?: string; color?: string } | null;
+}
+
+/** 子进程的一次运行（API 1.2） */
+export interface PluginProcess {
+  /** 结束时 resolve。code 为 null 表示被信号杀掉或出错 */
+  done: Promise<{ code: number | null }>;
+  kill(): void;
+}
+
+export interface PluginProcApi {
+  /** 在宿主的 PATH 里找程序，返回绝对路径；找不到为 null */
+  which(program: string): Promise<string | null>;
+  /** 起进程，输出按行回调。程序必须在 manifest 的 permissions.exec 里 */
+  spawn(
+    program: string,
+    args: string[],
+    opts?: {
+      stdin?: string;
+      onStdout?: (line: string) => void;
+      onStderr?: (line: string) => void;
+    },
+  ): Promise<PluginProcess>;
+  /** spawn 的便捷版：等它跑完，把输出攒起来一次给 */
+  exec(
+    program: string,
+    args: string[],
+    opts?: { stdin?: string },
+  ): Promise<{ code: number | null; stdout: string; stderr: string }>;
+}
+
+/**
+ * 插件私有存储（API 1.2）：`<插件目录>/data/<name>`。
+ *
+ * 和 settings 的分工：settings 是小开关，存在数据库里；这里是插件自己的
+ * 结构化数据（比如同步队列），存成文件 —— 这样外部程序（gantt CLI）也能读写。
+ * 写入是原子的（临时文件 + rename）。
+ */
+export interface PluginStorage {
+  read(name: string): Promise<string | null>;
+  write(name: string, content: string): Promise<void>;
 }
 
 /**
@@ -247,6 +337,12 @@ export interface PluginDataApi {
    * 摊平成一个形状。插件拿到的和用户在事项页看到的是同一批东西 —— 自己去拼
    * 三张表的话，迟早会漏掉「不是从事项分拣来的阻碍」这一类。
    */
+  /** 当前打开的项目；在项目列表页时为 null（API 1.2） */
+  project(): { id: number; name: string } | null;
+  /** 全部负责人（API 1.2） */
+  people: {
+    list(): { id: number; name: string }[];
+  };
   items: {
     list(): ItemView[];
     /** 事项、风险、类型表变了就通知。返回值取消订阅 */
@@ -313,6 +409,19 @@ export interface PluginApi {
   settings: PluginSettings;
   data: PluginDataApi;
   act: PluginActionApi;
+  /** 插件目录的绝对路径（API 1.2） */
+  readonly dir: string;
+  /** 事项页的扩展点（API 1.2） */
+  itemActions: {
+    register(action: PluginItemAction): Disposable;
+  };
+  itemBadges: {
+    register(badge: PluginItemBadge): Disposable;
+    /** 插件自己的状态变了、徽标要重画时调它 */
+    refresh(): void;
+  };
+  proc: PluginProcApi;
+  storage: PluginStorage;
   /** 工具函数。日期换算这类每个插件都要写一遍的东西 */
   util: {
     /** 天序号 → "YYYY-MM-DD" */

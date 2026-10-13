@@ -35,9 +35,11 @@
 import * as React from "react";
 import type { ComponentType } from "react";
 
+
 import { api } from "../db/api";
+import { attachRun, ensureProcListener } from "../db/proc";
 import type { BlockedPeriod } from "../core/blocked";
-import { kindLabel, mergeItems } from "../core/items";
+import { kindLabel, mergeItems, type ItemRow } from "../core/items";
 import type { Task } from "../gantt/model";
 import { useAppStore } from "../store/useAppStore";
 import { HOST_API_VERSION, validateManifest } from "./manifest";
@@ -45,7 +47,10 @@ import type {
   Disposable,
   PluginApi,
   PluginCommand,
+  PluginItemAction,
+  PluginItemBadge,
   PluginManifest,
+  PluginProcess,
   PluginModule,
   PluginRecord,
   PluginSettingField,
@@ -69,6 +74,15 @@ export interface RegistryState {
   commands: Map<string, PluginCommand>;
   toolbar: PluginToolbarItem[];
   settingFields: { pluginId: string; field: PluginSettingField }[];
+  /** 事项分拣菜单里的插件项（API 1.2） */
+  itemActions: { pluginId: string; action: PluginItemAction }[];
+  /** 事项行上的插件徽标（API 1.2） */
+  itemBadges: { pluginId: string; badge: PluginItemBadge }[];
+  /**
+   * 徽标内容的版本号。徽标的 render 读的是插件自己的状态，宿主看不见它变没变 ——
+   * 插件调 itemBadges.refresh() 让这个数加一，事项页据此重画
+   */
+  badgeVersion: number;
   /** 第一次扫描完成了没有。设置面板要区分「还没扫」和「扫了，一个都没有」 */
   booted: boolean;
   /** 扫描阶段的全局错误（比如读不了插件目录）。null = 没出错 */
@@ -81,6 +95,9 @@ const state: RegistryState = {
   commands: new Map(),
   toolbar: [],
   settingFields: [],
+  itemActions: [],
+  itemBadges: [],
+  badgeVersion: 0,
   booted: false,
   bootError: null,
 };
@@ -327,15 +344,39 @@ export function itemSnapshot(): ItemView[] {
   const s = useAppStore.getState();
   if (!s.project) return [];
   const tasks = [...s.tasks.values()];
-  const taskName = new Map(tasks.map((t) => [t.id, t.name]));
-  const personName = new Map(s.people.map((p) => [p.id, p.name]));
-
-  return mergeItems({
+  const rows = mergeItems({
     notes: s.itemNotes,
     tasks: tasks.map((t) => ({ id: t.id, name: t.name, personId: t.personId, blocked: t.blocked })),
     risks: s.projectRisks,
     today: todayDays(),
-  }).map((r) => ({
+  });
+  const view = itemViewer();
+  return rows.map(view);
+}
+
+/**
+ * ItemRow → ItemView 的投影函数。名字表只建一次，所以先拿函数再 map。
+ *
+ * 导出给事项页用：插件的分拣菜单项和徽标收到的必须是和 data.items.list()
+ * 同一个形状 —— 两处各投影一次，迟早会有一个字段只在一边有。
+ */
+let viewerCache: { key: unknown[]; fn: (r: ItemRow) => ItemView } | null = null;
+
+export function itemViewer(): (r: ItemRow) => ItemView {
+  const s = useAppStore.getState();
+  // 事项页每一行都要投影一次；名字表按输入的引用缓存，否则一屏几百行
+  // 就是几百次重建同一张表
+  const key = [s.tasks, s.people, s.itemKinds];
+  if (viewerCache && viewerCache.key.every((k, i) => k === key[i])) return viewerCache.fn;
+  const fn = buildViewer(s);
+  viewerCache = { key, fn };
+  return fn;
+}
+
+function buildViewer(s: ReturnType<typeof useAppStore.getState>): (r: ItemRow) => ItemView {
+  const taskName = new Map([...s.tasks.values()].map((t) => [t.id, t.name]));
+  const personName = new Map(s.people.map((p) => [p.id, p.name]));
+  return (r) => ({
     key: r.key,
     source: r.source,
     title: r.title,
@@ -352,7 +393,17 @@ export function itemSnapshot(): ItemView[] {
     closed: r.closed,
     resolution: r.resolution,
     riskLevel: r.risk ? r.risk.level : null,
-  }));
+    closedDay: closedDayOf(r),
+    noteId: r.note ? r.note.id : r.fromNoteId,
+  });
+}
+
+function closedDayOf(r: ItemRow): string | null {
+  if (!r.closed) return null;
+  if (r.blocker) return daysToIso(r.blocker.period.to);
+  if (r.risk) return r.risk.resolvedAt != null ? localDate(r.risk.resolvedAt) : null;
+  if (r.note?.closedAt != null) return localDate(r.note.closedAt);
+  return null;
 }
 
 function localDate(unix: number): string {
@@ -372,8 +423,19 @@ function taskSnapshot(): TaskView[] {
 /* 宿主 api 对象                                                       */
 /* ------------------------------------------------------------------ */
 
-function makeApi(manifest: PluginManifest, disposables: Disposable[]): PluginApi {
+function makeApi(manifest: PluginManifest, dir: string, disposables: Disposable[]): PluginApi {
   const id = manifest.id;
+  const allowedExec = new Set(manifest.permissions?.exec ?? []);
+  // 独立函数而不是对象方法：exec 要调它，插件也可能把 spawn 解构出来用，
+  // 两种情况下都不能依赖 this
+  const spawn: PluginApi["proc"]["spawn"] = (program, args, opts = {}) => {
+    if (!allowedExec.has(program)) {
+      return Promise.reject(
+        new Error(`插件 ${id} 没有声明可以运行「${program}」—— 在 manifest 的 permissions.exec 里加上它`),
+      );
+    }
+    return spawnProcess(id, program, args, opts, disposables);
+  };
   const track = <T extends Disposable>(d: T): T => {
     disposables.push(d);
     return d;
@@ -470,6 +532,15 @@ function makeApi(manifest: PluginManifest, disposables: Disposable[]): PluginApi
     },
 
     data: {
+      project() {
+        const p = store().project;
+        return p ? { id: p.id, name: p.name } : null;
+      },
+      people: {
+        list() {
+          return store().people.map((p) => ({ id: p.id, name: p.name }));
+        },
+      },
       tasks: {
         list: taskSnapshot,
         byId(taskId) {
@@ -588,6 +659,67 @@ function makeApi(manifest: PluginManifest, disposables: Disposable[]): PluginApi
       },
     },
 
+    dir,
+
+    itemActions: {
+      register(action: PluginItemAction) {
+        const entry = { pluginId: id, action };
+        state.itemActions = [...state.itemActions, entry];
+        commit();
+        return track(
+          disposable(() => {
+            state.itemActions = state.itemActions.filter((a) => a !== entry);
+            commit();
+          }),
+        );
+      },
+    },
+
+    itemBadges: {
+      register(badge: PluginItemBadge) {
+        const entry = { pluginId: id, badge };
+        state.itemBadges = [...state.itemBadges, entry];
+        commit();
+        return track(
+          disposable(() => {
+            state.itemBadges = state.itemBadges.filter((b) => b !== entry);
+            commit();
+          }),
+        );
+      },
+      refresh() {
+        state.badgeVersion += 1;
+        commit();
+      },
+    },
+
+    proc: {
+      which(program) {
+        return api.pluginWhich(program);
+      },
+      spawn,
+      async exec(program, args, opts = {}) {
+        let stdout = "";
+        let stderr = "";
+        const p = await spawn(program, args, {
+          stdin: opts.stdin,
+          onStdout: (l) => (stdout += l + "\n"),
+          onStderr: (l) => (stderr += l + "\n"),
+        });
+        const { code } = await p.done;
+        return { code, stdout, stderr };
+      },
+    },
+
+    storage: {
+      read(name) {
+        return api.pluginStorageRead(id, name);
+      },
+      write(name, content) {
+        return api.pluginStorageWrite(id, name, content);
+      },
+    },
+
     util: {
       toISODate: daysToIso,
       toDay: isoToDays,
@@ -598,6 +730,80 @@ function makeApi(manifest: PluginManifest, disposables: Disposable[]): PluginApi
       console.log(`[${manifest.name}]`, ...args);
     },
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* 子进程                                                              */
+/* ------------------------------------------------------------------ */
+
+/** 插件的回调抛错要记进插件日志（设置页看得到），不只是控制台 */
+const guarded = (fn?: (line: string) => void) =>
+  fn &&
+  ((line: string) => {
+    try {
+      fn(line);
+    } catch (e) {
+      warn(`子进程回调抛错：${e}`);
+    }
+  });
+
+async function spawnProcess(
+  pluginId: string,
+  program: string,
+  args: string[],
+  opts: { stdin?: string; onStdout?: (l: string) => void; onStderr?: (l: string) => void },
+  disposables: Disposable[],
+): Promise<PluginProcess> {
+  await ensureProcListener();
+  const runId = await api.pluginSpawn(pluginId, program, args, opts.stdin ?? null);
+
+  let finish!: (code: number | null) => void;
+  const done = new Promise<{ code: number | null }>((resolve) => {
+    finish = (code) => resolve({ code });
+  });
+  // 分发表在 db/proc.ts —— 内置的 AI 复盘也起进程，两家必须共用一份
+  attachRun(runId, {
+    onStdout: guarded(opts.onStdout),
+    onStderr: guarded(opts.onStderr),
+    finish,
+  });
+
+  const kill = () => void api.pluginKill(runId).catch(() => {});
+  // 插件被停用/重载时，它起的进程一起杀掉 —— 否则一个跑到一半的同步会
+  // 在后台继续写，而界面上已经没有任何东西能看到或停下它
+  const d = disposable(kill);
+  disposables.push(d);
+  void done.then(() => {
+    const i = disposables.indexOf(d);
+    if (i >= 0) disposables.splice(i, 1);
+  });
+  return { done, kill };
+}
+
+/* ------------------------------------------------------------------ */
+/* Claude Skill 链接                                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 启用时建链接、停用时拆。失败只记进插件的警告里，不挡加载 ——
+ * Skill 链接不上，插件页本身照样能用（后台同步会报找不到 Skill，那时
+ * 用户能在设置页看到原因）。
+ */
+async function linkSkills(record: PluginRecord): Promise<void> {
+  for (const sk of record.manifest.skills ?? []) {
+    try {
+      await api.pluginLinkSkill(record.manifest.id, sk.dir, sk.name);
+    } catch (e) {
+      const msg = `Skill「${sk.name}」没有链接到 ~/.claude/skills：${(e as Error)?.message ?? e}`;
+      if (!record.warnings.includes(msg)) record.warnings = [...record.warnings, msg];
+    }
+  }
+}
+
+async function unlinkSkills(manifest: PluginManifest): Promise<void> {
+  for (const sk of manifest.skills ?? []) {
+    await api.pluginUnlinkSkill(manifest.id, sk.name).catch(() => {});
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -719,6 +925,7 @@ export function scopeCss(css: string, pluginId: string): string {
 /** 把源码实例化成模块并调 onload */
 async function instantiate(
   manifest: PluginManifest,
+  dir: string,
   source: string,
   css: string | null,
 ): Promise<void> {
@@ -753,9 +960,9 @@ async function instantiate(
     throw new Error("入口文件没有导出 onload 函数");
   }
 
-  const api = makeApi(manifest, disposables);
+  const pluginApi = makeApi(manifest, dir, disposables);
   try {
-    await module.onload(api);
+    await module.onload(pluginApi);
   } catch (e) {
     // onload 抛错时它可能已经注册了一半东西，全部撤掉，否则会留下一个
     // 「状态是 error 但视图还挂在工具条上」的幽灵插件
@@ -896,7 +1103,8 @@ export async function boot(): Promise<void> {
         continue;
       }
       try {
-        await instantiate(manifest, r.entry_raw, r.css_raw);
+        await instantiate(manifest, r.path, r.entry_raw, r.css_raw);
+        await linkSkills(record);
       } catch (e) {
         record.status = "error";
         record.error = (e as Error).message;
@@ -950,7 +1158,8 @@ export async function enable(pluginId: string): Promise<void> {
   }
 
   try {
-    await instantiate(check.manifest, dir.entry_raw, dir.css_raw);
+    await instantiate(check.manifest, dir.path, dir.entry_raw, dir.css_raw);
+    await linkSkills(record);
     record.enabled = true;
     record.status = "loaded";
     record.error = undefined;
@@ -970,9 +1179,53 @@ export async function disable(pluginId: string): Promise<void> {
   if (!record) return;
 
   unload(pluginId);
+  await unlinkSkills(record.manifest);
   record.enabled = false;
   record.status = "disabled";
   record.error = undefined;
+  await persistEnabled();
+  commit();
+}
+
+/**
+ * 重新扫一遍目录，只增删记录，**不动已加载的插件**。
+ *
+ * 设置页装完/卸完附带插件后调它。不能直接调 boot()：boot 会把启用中的
+ * 插件再实例化一次，于是工具条上出现两个同名视图。
+ */
+export async function rescan(): Promise<void> {
+  const raw = await api.listPlugins().catch(() => null);
+  if (!raw) return;
+  const present = new Set(raw.map((r) => r.dir_name));
+
+  // 目录没了的：卸掉、拆链接、移出列表
+  for (const r of state.records) {
+    if (present.has(r.manifest.id)) continue;
+    unload(r.manifest.id);
+    await unlinkSkills(r.manifest);
+  }
+  const kept = state.records.filter((r) => present.has(r.manifest.id));
+
+  // 新出现的：一律先不启用，和 boot 对新插件的态度一致
+  const known = new Set(kept.map((r) => r.manifest.id));
+  for (const r of raw) {
+    if (known.has(r.dir_name)) continue;
+    const check = validateManifest(r.manifest_raw, r.dir_name);
+    kept.push(
+      check.ok
+        ? { manifest: check.manifest, path: r.path, enabled: false, status: "disabled", warnings: check.warnings }
+        : {
+            manifest: placeholderManifest(r.dir_name),
+            path: r.path,
+            enabled: false,
+            status: "error",
+            error: check.error,
+            warnings: [],
+          },
+    );
+  }
+  kept.sort((a, b) => a.manifest.id.localeCompare(b.manifest.id));
+  state.records = kept;
   await persistEnabled();
   commit();
 }
@@ -1017,6 +1270,7 @@ export const plugins = {
   enable,
   disable,
   reload,
+  rescan,
   allViews,
   viewsFor,
   findView,

@@ -19,6 +19,7 @@
 //! - [`write`] —— 写入。应用走整项目事务替换，CLI 走行级 upsert。
 //! - [`calendar`] —— 日期助手。不引 `chrono`。
 //! - [`locate`] —— 数据目录定位 + 应用存活探测。
+//! - [`feishu`] —— 飞书同步插件的队列文件（不在库里，在插件数据目录）。
 //!
 //! ## 错误约定
 //!
@@ -27,6 +28,7 @@
 //! 并据此决定退出码。库层就把 rusqlite 的英文报错翻掉，调用方不再各翻一遍。
 
 pub mod calendar;
+pub mod feishu;
 pub mod locate;
 pub mod model;
 pub mod query;

@@ -21,6 +21,7 @@ import { useViews, ViewRenderer, type ViewEntry } from "../plugins/usePlugins";
 import { BoardView } from "./BoardView";
 import { TimelineView } from "./TimelineView";
 import { ReviewView } from "./ReviewView";
+import { AiReviewView } from "./AiReviewView";
 import { ItemsView } from "./ItemsView";
 import { QuickNote } from "./QuickNote";
 import { api } from "../db/api";
@@ -69,14 +70,21 @@ const builtinViews = (enabled: BuiltinView[]): ViewEntry[] =>
  * 内置视图 key → 组件。
  *
  * 甘特不在这里：它带左侧网格、分隔条和一串相机 props，在 Workspace 里
- * 单独渲染。另外三个都是无参组件、各自占满，正好和插件视图同一个形状。
+ * 单独渲染。其余的都是无参组件、各自占满，正好和插件视图同一个形状。
  */
 const BUILTIN_BODIES: Record<string, ComponentType> = {
   board: BoardView,
   timeline: TimelineView,
   review: ReviewView,
+  "ai-review": AiReviewView,
   items: ItemsView,
 };
+
+/**
+ * 这个视图里有没有「增删任务」这回事。事项和 AI 复盘里看不到任务表，
+ * 工具条的「+ 任务」、状态栏的 Enter / ⌫ 提示、对应的快捷键都跟着收起来。
+ */
+const hasTaskOps = (view: string): boolean => view !== "items" && view !== "ai-review";
 
 /** ⌘1–⌘9 切视图。九个够用了；再多工具的快捷键就比工具本身还重要了 */
 const VIEW_HOTKEY_MAX = 9;
@@ -262,8 +270,10 @@ export function Workspace() {
       if (inInput) return;
 
       // 增删任务、缩进这些结构性操作只属于计划表 —— 事项视图里也不响应：
-      // 那里看不到任务，选中行还是从甘特带过来的，按 ⌫ 会删掉一条看不见的活
-      if (!canEdit("structure", store.viewMode) || store.activeView === "items") {
+      // 那里看不到任务，选中行还是从甘特带过来的，按 ⌫ 会删掉一条看不见的活。
+      // AI 复盘同理，而且更容易中招：点完一个选项焦点在按钮上，顺手按 Enter
+      // 想进下一题，结果是甘特里多出一条空任务
+      if (!canEdit("structure", store.viewMode) || !hasTaskOps(store.activeView)) {
         const structural =
           e.key === "Enter" ||
           e.key === "Backspace" ||
@@ -370,7 +380,7 @@ export function Workspace() {
         <span className="text-sm font-semibold text-[var(--text)]">{project.name}</span>
 
         {/* 顶层视图。同一批任务的几种问法，切换它不改任何数据。
-            内置四个在前，插件注册的接在后面（各带一个分隔点） */}
+            内置的在前，插件注册的接在后面（各带一个分隔点） */}
         <div className="ml-1 flex items-center gap-1 rounded-full bg-[var(--surface-alt)] p-1">
           {views.map((v, i) => (
             <Fragment key={v.key}>
@@ -454,7 +464,7 @@ export function Workspace() {
 
         {/* 事项视图不给「+ 任务」：那一页记的是还没变成任务的东西，
             新建任务的入口摆在那里只会让人把一句话直接建成一条活 */}
-        {canEdit("structure", viewMode) && activeView !== "items" && (
+        {canEdit("structure", viewMode) && hasTaskOps(activeView) && (
           <NewTaskButton selectedId={selectedId} />
         )}
 
@@ -570,7 +580,7 @@ export function Workspace() {
         <span className="font-medium text-[var(--text)]">
           ⌘1–{Math.min(views.length, VIEW_HOTKEY_MAX)} 切视图
         </span>
-        {activeView !== "items" && (
+        {hasTaskOps(activeView) && (
           <>
             <span>Enter 新建</span>
             <span>⇧Enter 子任务</span>
@@ -578,7 +588,7 @@ export function Workspace() {
           </>
         )}
         <span>⌘Z 撤销</span>
-        {activeView !== "items" && <span>⌫ 删除</span>}
+        {hasTaskOps(activeView) && <span>⌫ 删除</span>}
         <span className="font-medium text-[var(--text)]">⌘K 记一条</span>
         <HintsFor view={active} viewMode={viewMode} />
       </div>
@@ -629,6 +639,13 @@ function HintsFor({ view, viewMode }: { view: ViewEntry; viewMode: ViewMode }) {
       );
     case "review":
       return <span className="ml-auto">只读 · 数据来自计划与实施两组日期的差</span>;
+    case "ai-review":
+      return (
+        <>
+          <span>每答一题即存，可随时离开</span>
+          <span className="ml-auto">数据表由程序按快照生成 · 叙述与归因由 Claude 撰写</span>
+        </>
+      );
     case "items":
       return (
         <>

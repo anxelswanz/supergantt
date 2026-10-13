@@ -8,6 +8,7 @@
  *   · 时间线    —— 按日期排的流水，给人看「那几天到底发生了什么」
  *   · 事项类型  —— 这个团队把事情分成哪几类，给人对口径用
  *   · 事项清单  —— 事项视图里筛出来的那些，Excel 或 Word，发给相关的人
+ *   · AI 复盘   —— 那份问出来、写出来的复盘文档，Markdown 或 Word
  */
 
 import { save } from "@tauri-apps/plugin-dialog";
@@ -15,6 +16,7 @@ import { api } from "../db/api";
 import { resolve } from "../gantt/model";
 import { useAppStore } from "../store/useAppStore";
 import { buildTimelineHtml, timelineFileName } from "./timelineHtml";
+import type { DayRange } from "../core/timeline";
 
 export interface ExportResult {
   /** 用户取消保存对话框时为 null —— 这是正常路径，不是错误 */
@@ -71,7 +73,10 @@ export async function exportProjectToExcel(): Promise<ExportResult> {
  * 库是当下唯一确定的口径；而风险本来就只有库里有。两边取同一个源头，
  * 导出件里不会出现「记录里提到的事，风险表里查无此项」。
  */
-export async function exportTimelineToHtml(): Promise<ExportResult> {
+export async function exportTimelineToHtml(
+  /** 时间线上正筛着的那段日期；不筛就是 null，导出全部 */
+  range: DayRange | null = null,
+): Promise<ExportResult> {
   const state = useAppStore.getState();
   const { project, tasks: taskMap, people } = state;
   if (!project) throw new Error("没有打开的项目");
@@ -95,6 +100,7 @@ export async function exportTimelineToHtml(): Promise<ExportResult> {
     risks,
     people,
     exportedAt,
+    range,
   });
 
   const path = await save({
@@ -191,6 +197,42 @@ export async function exportItems(
     filters: [
       format === "xlsx"
         ? { name: "Excel 工作簿", extensions: ["xlsx"] }
+        : { name: "Word 文档", extensions: ["docx"] },
+    ],
+  });
+  if (!path) return { path: null };
+
+  await api.writeExport(path, toBase64(bytes));
+  return { path };
+}
+
+/**
+ * AI 复盘文档 → Markdown 或 Word。
+ *
+ * 内容由调用方给，不从 store 里取：用户可能正在编辑框里改到一半，导出的
+ * 必须是他眼前那一版，而不是上一次存下来的那一版。
+ */
+export async function exportAiReview(
+  format: "md" | "docx",
+  input: { projectName: string; title: string; markdown: string },
+): Promise<ExportResult> {
+  const { buildReviewDocx, reviewFileName } = await import("./aiReview");
+  const exportedAt = new Date();
+
+  // 同另外几条路：先生成再弹对话框
+  let bytes: ArrayBuffer | Uint8Array;
+  if (format === "md") {
+    bytes = new TextEncoder().encode(input.markdown);
+  } else {
+    const { Packer } = await import("docx");
+    bytes = await Packer.toArrayBuffer(buildReviewDocx(input.title, input.markdown));
+  }
+
+  const path = await save({
+    defaultPath: reviewFileName(input.projectName, input.title, exportedAt, format),
+    filters: [
+      format === "md"
+        ? { name: "Markdown", extensions: ["md"] }
         : { name: "Word 文档", extensions: ["docx"] },
     ],
   });

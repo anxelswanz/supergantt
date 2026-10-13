@@ -1,4 +1,5 @@
 import { Fragment, forwardRef, useEffect, useMemo, useRef, useState } from "react";
+import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import { useAppStore } from "../store/useAppStore";
 import { resolve, type Priority, type ResolvedTask } from "../gantt/model";
 import { columnOf, isInProgress } from "../core/board";
@@ -37,6 +38,8 @@ import type { ItemKind, Person } from "../db/api";
 import { BlockedDetail } from "./BlockedDetail";
 import { PromoteDialog, type PromoteTarget } from "./PromoteDialog";
 import { ExportButton } from "./ExportButton";
+import { itemViewer } from "../plugins/registry";
+import { useRegistry } from "../plugins/usePlugins";
 
 /**
  * 事项视图 —— 系统里唯一一个**不需要日期**的面。
@@ -60,6 +63,19 @@ import { ExportButton } from "./ExportButton";
  * 用户也可以按住一行上下拖着手动排。排过之后顺序存在 settings 里（按项目），
  * 新记的那条排在最上面；头部能一键恢复时间顺序。
  */
+/**
+ * 动效（DESIGN.md §9）：只用 snappy / smooth 两档 spring，只动 transform 和 opacity。
+ *
+ * 这张清单上的动效都在回答同一个问题 ——「刚才那一条去哪了」：
+ * 拖完落到新位置、关掉后滑进「已关闭」、筛选后剩下的几条并拢。
+ * 硬切的话，眼睛得重新扫一遍才能找回它。
+ */
+const SNAPPY = { type: "spring", stiffness: 400, damping: 30 } as const;
+const SMOOTH = { type: "spring", stiffness: 200, damping: 26 } as const;
+
+/** 首屏只错开头十几行；再往后的本来就在屏幕外，排队只会让滚动显得卡 */
+const STAGGER_ROWS = 14;
+
 export function ItemsView() {
   const notes = useAppStore((s) => s.itemNotes);
   const kinds = useAppStore((s) => s.itemKinds);
@@ -117,6 +133,9 @@ export function ItemsView() {
   const visible = useMemo(() => filterItems(rows, filter), [rows, filter]);
   const open = visible.filter((r) => !r.closed);
   const closed = visible.filter((r) => r.closed);
+  // 行的位移动画只在「顺序或成员变了」时才重新量位置。不给这个的话，
+  // 拖动时每一次指针移动都会让每一行重量一遍 —— 几百行的清单会拖不动
+  const layoutKey = useMemo(() => visible.map((r) => r.key).join("|"), [visible]);
 
   const taskName = useMemo(() => {
     const byId = new Map(tasks.map((t) => [t.id, t]));
@@ -163,6 +182,8 @@ export function ItemsView() {
   const showClosed = closedOpen || (filtering && open.length === 0 && closed.length > 0);
 
   return (
+    // reducedMotion="user"：系统开了「减弱动态效果」时，位移和缩放全部停掉，只留淡入淡出
+    <MotionConfig reducedMotion="user">
     <div className="flex min-h-0 w-full flex-col bg-[var(--surface)]">
       {/* 头部：计数 + 筛选器 */}
       <div className="shrink-0 border-b border-[var(--rule)] px-4 py-3">
@@ -237,9 +258,15 @@ export function ItemsView() {
       */}
       <InlineComposer tasks={tasks} day={day} />
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+      {/* layoutScroll：行的位移动画要把这个容器的滚动量算进去，否则滚过之后再排序会从错的位置飞进来 */}
+      <motion.div layoutScroll className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
         {open.length === 0 && (
-          <div className="px-2 py-10 text-center text-[11px] leading-relaxed text-[var(--text-dim)]">
+          <motion.div
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={SMOOTH}
+            className="px-2 py-10 text-center text-[11px] leading-relaxed text-[var(--text-dim)]"
+          >
             {!filtering ? (
               <>
                 {closed.length > 0 ? "全部处理完了。" : "还没有事项。"}想到什么就在上面记一句 ——
@@ -261,13 +288,16 @@ export function ItemsView() {
                 </div>
               </>
             )}
-          </div>
+          </motion.div>
         )}
 
         <div className="flex flex-col gap-0.5">
-          {open.map((row) => (
+          <AnimatePresence initial>
+          {open.map((row, i) => (
             <Row
               key={row.key}
+              index={i}
+              layoutKey={layoutKey}
               row={row}
               kinds={kinds}
               taskName={taskName(row.taskId)}
@@ -279,6 +309,7 @@ export function ItemsView() {
               drag={drag}
             />
           ))}
+          </AnimatePresence>
         </div>
 
         {/*
@@ -286,19 +317,33 @@ export function ItemsView() {
           本身是信息，但它不该和还没解决的东西抢同一块注意力。
         */}
         {closed.length > 0 && (
-          <div className="mt-3">
+          <motion.div
+            layout="position"
+            layoutDependency={layoutKey}
+            transition={SNAPPY}
+            className="mt-3"
+          >
             <button
               onClick={() => setClosedOpen((v) => !v)}
               className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[10px] font-medium text-[var(--text-dim)] transition-colors hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
             >
-              <span className="w-2">{showClosed ? "▾" : "▸"}</span>
+              <motion.span
+                className="grid w-2 place-items-center"
+                animate={{ rotate: showClosed ? 90 : 0 }}
+                transition={SNAPPY}
+              >
+                ▸
+              </motion.span>
               已关闭 ({closed.length})
             </button>
             {showClosed && (
               <div className="mt-0.5 flex flex-col gap-0.5">
-                {closed.map((row) => (
+                <AnimatePresence initial>
+                {closed.map((row, i) => (
                   <Row
                     key={row.key}
+                    index={i}
+                    layoutKey={layoutKey}
                     row={row}
                     kinds={kinds}
                     taskName={taskName(row.taskId)}
@@ -309,21 +354,33 @@ export function ItemsView() {
                     drag={drag}
                   />
                 ))}
+                </AnimatePresence>
               </div>
             )}
+          </motion.div>
+        )}
+      </motion.div>
+
+      {/* 跟手的小标签：拖的是哪一条，一眼就知道。
+          位置直接跟指针（不走 spring，否则会拖在手后面），弹出来的那一下才有动效 */}
+      <AnimatePresence>
+        {drag.ghost && (
+          <div
+            className="pointer-events-none fixed z-50"
+            style={{ left: drag.ghost.x + 12, top: drag.ghost.y + 8 }}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, rotate: 0 }}
+              animate={{ opacity: 1, scale: 1, rotate: -1.5 }}
+              exit={{ opacity: 0, scale: 0.94 }}
+              transition={SNAPPY}
+              className="max-w-[260px] origin-top-left truncate rounded-lg border border-[var(--accent)] bg-[var(--surface)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--text)] shadow-lg"
+            >
+              {drag.ghost.title}
+            </motion.div>
           </div>
         )}
-      </div>
-
-      {/* 跟手的小标签：拖的是哪一条，一眼就知道 */}
-      {drag.ghost && (
-        <div
-          className="pointer-events-none fixed z-50 max-w-[260px] truncate rounded-lg border border-[var(--accent)] bg-[var(--surface)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--text)] shadow-lg"
-          style={{ left: drag.ghost.x + 12, top: drag.ghost.y + 8 }}
-        >
-          {drag.ghost.title}
-        </div>
-      )}
+      </AnimatePresence>
 
       {blockedDetail && period && (
         <BlockedDetail
@@ -343,6 +400,7 @@ export function ItemsView() {
         />
       )}
     </div>
+    </MotionConfig>
   );
 }
 
@@ -782,6 +840,8 @@ function InlineComposer({ tasks, day }: { tasks: ResolvedTask[]; day: number }) 
  */
 function Row({
   row,
+  index,
+  layoutKey,
   kinds,
   taskName,
   taskOptions,
@@ -792,6 +852,10 @@ function Row({
   drag,
 }: {
   row: ItemRow;
+  /** 在列表里排第几，只用来错开首屏的入场 */
+  index: number;
+  /** 清单的顺序签名，见 ItemsView 里的 layoutKey */
+  layoutKey: string;
   kinds: ItemKind[];
   /** 只进 title，不占版面 —— 见上面那段 */
   taskName: string | null;
@@ -813,6 +877,13 @@ function Row({
   useEffect(() => {
     if (autoSort) setSortOpen(true);
   }, [autoSort]);
+
+  // 错开只属于入场那一下。留着的话，之后每次变半透明（起拖）都会慢半拍
+  const entering = useRef(true);
+  useEffect(() => {
+    entering.current = false;
+  }, []);
+  const stagger = entering.current ? Math.min(index, STAGGER_ROWS) * 0.022 : 0;
 
   const policy = closePolicy(row, kinds);
 
@@ -908,8 +979,27 @@ function Row({
   const dropAt = drag.over?.key === row.key ? drag.over.place : null;
 
   return (
-    <div
+    <motion.div
       ref={drag.rowRef(row.key, row.closed)}
+      // 只补位移，不补尺寸：展开「怎么解决的」输入框时行会变高，
+      // 让它跟着缩放的话里面的字会被压扁再弹回来
+      layout="position"
+      layoutDependency={layoutKey}
+      initial={{ opacity: 0, y: -8 }}
+      animate={{
+        // 正被拖着的那一行留在原地、退成半透明 —— 它的替身在指针上
+        opacity: drag.dragKey === row.key ? 0.35 : 1,
+        y: 0,
+        scale: drag.dragKey === row.key ? 0.985 : 1,
+      }}
+      // 离场要快：它已经不在这儿了，慢慢消失只会挡着下面的行并上来
+      exit={{ opacity: 0, x: 14, transition: { duration: 0.14 } }}
+      transition={{
+        ...SNAPPY,
+        opacity: { ...SMOOTH, delay: stagger },
+        y: { ...SMOOTH, delay: stagger },
+        layout: SNAPPY,
+      }}
       // 整行都能按住拖。按钮、输入框上按下不起拖（见 useRowDrag.start）
       onPointerDown={(e) => drag.start(row, e)}
       className="group relative cursor-grab rounded-lg px-2 py-1.5 transition-colors hover:bg-[var(--row-hover)] active:cursor-grabbing"
@@ -918,12 +1008,14 @@ function Row({
         // 其余一律不上色 —— 一张人人高亮的列表等于没有高亮
         background:
           row.blocker?.live && !row.closed ? withAlpha(BLOCKER_KIND.color, 0.05) : undefined,
-        opacity: drag.dragKey === row.key ? 0.4 : 1,
       }}
     >
       {/* 落点指示线：落下之后这一条会出现在线的位置 */}
       {dropAt && (
-        <span
+        <motion.span
+          initial={{ scaleX: 0.4, opacity: 0 }}
+          animate={{ scaleX: 1, opacity: 1 }}
+          transition={SNAPPY}
           className="pointer-events-none absolute inset-x-1 h-0.5 rounded-full"
           style={{ background: "var(--accent)", [dropAt === "before" ? "top" : "bottom"]: -1.5 }}
         />
@@ -944,10 +1036,12 @@ function Row({
       <div className="flex items-center gap-2.5">
 
         {/* 圆圈。点下去的后果按类型不同 —— 见 core/items.closePolicy */}
-        <button
+        <motion.button
           onClick={toggleClose}
           disabled={policy === "forbidden" && !row.closed}
           title={circleTitle}
+          whileTap={{ scale: 0.8 }}
+          transition={SNAPPY}
           className="grid size-[15px] shrink-0 place-items-center rounded-full border text-[9px] leading-none transition-colors hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:border-dashed disabled:opacity-40 disabled:hover:border-[var(--rule)]"
           style={{
             borderColor: row.closed ? "var(--text-dim)" : "var(--rule)",
@@ -955,8 +1049,17 @@ function Row({
             background: row.closed ? "var(--row-hover)" : "transparent",
           }}
         >
-          {row.closed ? "✓" : ""}
-        </button>
+          {/* 勾是弹出来的：关掉一件事是这张表上唯一值得庆祝一下的动作 */}
+          {row.closed && (
+            <motion.span
+              initial={{ scale: 0, rotate: -30 }}
+              animate={{ scale: 1, rotate: 0 }}
+              transition={{ type: "spring", stiffness: 520, damping: 18 }}
+            >
+              ✓
+            </motion.span>
+          )}
+        </motion.button>
 
         {/*
           日期在行首。
@@ -996,6 +1099,8 @@ function Row({
             ⤴
           </span>
         )}
+
+        <PluginBadges row={row} />
 
         {/* 右侧属性区：多急 · 什么时候记的 · 下一步点哪 */}
         <PriorityTag value={row.priority} onPick={setPriority} />
@@ -1146,7 +1251,7 @@ function Row({
         kinds={kinds}
         onPromote={onPromote}
       />
-    </div>
+    </motion.div>
   );
 }
 
@@ -1473,6 +1578,8 @@ function SortMenu({
         )}
       </div>
 
+      <PluginSortItems row={row} onClose={onClose} />
+
       {/*
         自定义类型在「设置 → 事项类型」，而用户是在**这里**发现「没有我要的
         类型」的。那一刻给一条直达那一页的路，比让他自己去齿轮图标下面翻
@@ -1508,6 +1615,87 @@ function SortMenu({
       )}
     </Popover>
   );
+}
+
+/**
+ * 插件挂进分拣菜单的那些项（插件 API 1.2 的 itemActions）。
+ *
+ * **只对已分拣的行出现。** 分拣到插件（比如加入飞书同步）是在「它是什么」
+ * 已经定了之后的下一步；一条还不知道是问题还是代办的东西，同步出去也
+ * 填不出像样的字段。没装/没启用插件时这一段整个不存在。
+ */
+function PluginSortItems({ row, onClose }: { row: ItemRow; onClose: () => void }) {
+  const { itemActions } = useRegistry();
+  if (row.kind == null || row.dangling || itemActions.length === 0) return null;
+  const item = itemViewer()(row);
+  const shown = itemActions
+    .map(({ action }) => ({ action, label: safeCall(() => action.label(item)) }))
+    .filter((a): a is { action: typeof a.action; label: string } => !!a.label);
+  if (shown.length === 0) return null;
+
+  return (
+    <>
+      <MenuDivider />
+      <div className="px-2.5 pb-1 text-[9px] leading-snug text-[var(--text-dim)]">
+        插件 —— 不改变它的类型
+      </div>
+      {shown.map(({ action, label }) => (
+        <MenuItem
+          key={action.id}
+          onClick={() => {
+            onClose();
+            // 插件代码抛错不能冒到事件处理器外面（React 19 会卸掉整个根）
+            void Promise.resolve()
+              .then(() => action.run(item))
+              .catch((e) => console.error(`[plugin] ${action.id} 执行失败`, e));
+          }}
+        >
+          <span className="flex items-center gap-2" title={action.hint}>
+            <span className="size-1.5 shrink-0 rounded-sm bg-[var(--text-dim)]" />
+            <span className="min-w-0 flex-1 truncate">{label}</span>
+          </span>
+        </MenuItem>
+      ))}
+    </>
+  );
+}
+
+/** 插件挂在标题旁边的小标签。和 ⤴ 一样修饰的是「这一条」，不是右侧的动作区 */
+function PluginBadges({ row }: { row: ItemRow }) {
+  // badgeVersion 进了快照：插件调 refresh() 之后这里会重渲染
+  const { itemBadges } = useRegistry();
+  if (itemBadges.length === 0) return null;
+  const item = itemViewer()(row);
+  const out = itemBadges
+    .map(({ badge }) => ({ id: badge.id, b: safeCall(() => badge.render(item)) }))
+    .filter((x) => x.b);
+  return (
+    <>
+      {out.map(({ id, b }) => (
+        <span
+          key={id}
+          title={b!.title}
+          className="shrink-0 rounded px-1 text-[9px] leading-[14px]"
+          style={{
+            color: b!.color ?? "var(--text-dim)",
+            background: withAlpha(b!.color ?? "#94a3b8", 0.12),
+          }}
+        >
+          {b!.text}
+        </span>
+      ))}
+    </>
+  );
+}
+
+/** 插件回调出错只影响它自己那一项 */
+function safeCall<T>(fn: () => T): T | null {
+  try {
+    return fn();
+  } catch (e) {
+    console.error("[plugin] 事项扩展点抛错", e);
+    return null;
+  }
 }
 
 /** 分拣菜单里的一个类型。常用组和完整清单共用，免得两处各写一遍样式 */

@@ -1,11 +1,13 @@
 use std::sync::Mutex;
 use tauri::Manager;
 
+mod ai_review;
 mod backup;
 mod db;
 mod dbfile;
 mod export;
 mod plugin;
+mod plugin_host;
 mod transfer;
 
 pub(crate) const DB_FILE: &str = "gantt.db";
@@ -30,6 +32,7 @@ pub fn run() {
             }
 
             app.manage(db::Db(Mutex::new(conn)));
+            app.manage(plugin_host::Procs::default());
 
             // 留一个 PID 文件，告诉离线 CLI「应用正开着，别写」。见 gantt-core/src/locate.rs。
             //
@@ -93,9 +96,25 @@ pub fn run() {
             db::list_item_kinds,
             db::save_item_kind,
             db::delete_item_kind,
+            db::list_ai_reviews,
+            db::create_ai_review,
+            db::save_ai_review,
+            db::delete_ai_review,
+            ai_review::ai_review_available,
+            ai_review::ai_review_run,
             plugin::list_plugins,
             plugin::plugins_dir,
             plugin::reveal_plugins_dir,
+            plugin_host::list_bundled_plugins,
+            plugin_host::install_bundled_plugin,
+            plugin_host::uninstall_plugin,
+            plugin_host::plugin_storage_read,
+            plugin_host::plugin_storage_write,
+            plugin_host::plugin_which,
+            plugin_host::plugin_spawn,
+            plugin_host::plugin_kill,
+            plugin_host::plugin_link_skill,
+            plugin_host::plugin_unlink_skill,
             backup::data_dir,
             backup::reveal_data_dir,
             backup::backup_now,

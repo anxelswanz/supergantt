@@ -17,8 +17,11 @@ import { APP_VIEWS } from "../core/views";
  *   - 删字段、改语义 → major + 1，旧插件拒绝加载
  *   - 只加新方法 → minor + 1，旧插件照常跑
  */
-export const HOST_API_VERSION: Version = { major: 1, minor: 1 };
-/* 1.1：data.items（事项清单，只读） */
+export const HOST_API_VERSION: Version = { major: 1, minor: 2 };
+/* 1.1：data.items（事项清单，只读）
+   1.2：itemActions / itemBadges（事项页扩展点）、proc（受限子进程）、
+        storage（插件私有文件）、data.project / data.people、
+        ItemView.closedDay / noteId、manifest 的 permissions 与 skills */
 
 /**
  * 内置视图的 key。插件视图不能用这些，否则会把甘特图顶掉。
@@ -47,6 +50,20 @@ export function parseVersion(raw: string): Version | null {
   const m = /^(\d+)\.(\d+)(?:\.\d+)?$/.exec(raw.trim());
   if (!m) return null;
   return { major: Number(m[1]), minor: Number(m[2]) };
+}
+
+/**
+ * 比较两个 "1.2.3" 形式的版本号。看不懂的段按 0 算 ——
+ * 只用来决定设置页上写「更新」还是「已安装」，不值得为它较真。
+ */
+export function compareVersions(a: string, b: string): number {
+  const pa = a.split(".").map((x) => parseInt(x, 10) || 0);
+  const pb = b.split(".").map((x) => parseInt(x, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
 }
 
 const str = (v: unknown): v is string => typeof v === "string" && v.trim().length > 0;
@@ -161,6 +178,37 @@ export function validateManifest(
     }
   }
 
+  /* ---------------- 权限 / Skill（1.2） ---------------- */
+
+  /** 程序名、Skill 名、目录名共用的形状：单段，不带路径 */
+  const SEGMENT = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/;
+
+  let permissions: PluginManifest["permissions"];
+  if (m.permissions !== undefined) {
+    if (typeof m.permissions !== "object" || m.permissions === null || Array.isArray(m.permissions)) {
+      return { ok: false, error: `"permissions" 必须是对象` };
+    }
+    const p = m.permissions as Record<string, unknown>;
+    if (p.exec !== undefined) {
+      if (!Array.isArray(p.exec) || !p.exec.every((x) => typeof x === "string" && SEGMENT.test(x))) {
+        return { ok: false, error: `"permissions.exec" 必须是程序名数组，如 ["lark-cli"]，不能带路径` };
+      }
+      permissions = { exec: p.exec as string[] };
+    }
+  }
+
+  const skills: { dir: string; name: string }[] = [];
+  if (m.skills !== undefined) {
+    if (!Array.isArray(m.skills)) return { ok: false, error: `"skills" 必须是数组` };
+    for (const [i, v] of m.skills.entries()) {
+      const vv = (typeof v === "object" && v !== null ? v : {}) as Record<string, unknown>;
+      if (typeof vv.dir !== "string" || !SEGMENT.test(vv.dir) || typeof vv.name !== "string" || !SEGMENT.test(vv.name)) {
+        return { ok: false, error: `skills[${i}] 要写成 { "dir": "skill", "name": "my-skill" }，都不能带路径` };
+      }
+      skills.push({ dir: vv.dir, name: vv.name });
+    }
+  }
+
   return {
     ok: true,
     warnings,
@@ -173,6 +221,8 @@ export function validateManifest(
       description: str(m.description) ? m.description : undefined,
       main: str(m.main) ? m.main : undefined,
       views,
+      permissions,
+      skills: skills.length ? skills : undefined,
     },
   };
 }

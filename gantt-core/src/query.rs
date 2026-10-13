@@ -1301,3 +1301,118 @@ pub fn set_risk_priority(conn: &Connection, id: i64, priority: Option<i64>) -> R
     }
     Ok(())
 }
+
+/* ------------------------------------------------------------------ */
+/* AI 复盘                                                             */
+/* ------------------------------------------------------------------ */
+
+const AI_REVIEW_COLS: &str = "id, project_id, title, stage, background, snapshot, questions, \
+                              document, created_at, updated_at";
+
+const AI_REVIEW_STAGES: &[&str] = &["ask1", "answer1", "ask2", "answer2", "write", "done"];
+
+fn map_ai_review(r: &rusqlite::Row) -> rusqlite::Result<AiReview> {
+    Ok(AiReview {
+        id: r.get(0)?,
+        project_id: r.get(1)?,
+        title: r.get(2)?,
+        stage: r.get(3)?,
+        background: r.get(4)?,
+        snapshot: r.get(5)?,
+        questions: r.get(6)?,
+        document: r.get(7)?,
+        created_at: r.get(8)?,
+        updated_at: r.get(9)?,
+    })
+}
+
+/// 一个项目的全部复盘，最近动过的在前。
+///
+/// 连快照和文档一起取：一个项目的复盘是个位数，而界面点开任何一份都要立刻
+/// 看到内容 —— 拆成「列表 + 详情」两次往返，省下的那点字节不值得多一种加载态。
+pub fn list_ai_reviews(conn: &Connection, project_id: i64) -> Result<Vec<AiReview>> {
+    let sql = format!(
+        "SELECT {AI_REVIEW_COLS} FROM ai_reviews WHERE project_id = ?1 ORDER BY updated_at DESC, id DESC"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![project_id], map_ai_review)
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+/// 开始一次复盘：背景表单和数据快照在这一刻定下来，之后不再变。
+pub fn create_ai_review(
+    conn: &Connection,
+    project_id: i64,
+    title: String,
+    background: String,
+    snapshot: String,
+) -> Result<AiReview> {
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        return Err("复盘标题不能为空".into());
+    }
+    let ts = unix_now();
+    conn.execute(
+        "INSERT INTO ai_reviews (project_id, title, background, snapshot, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+        params![project_id, title, background, snapshot, ts],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(AiReview {
+        id: conn.last_insert_rowid(),
+        project_id,
+        title,
+        stage: "ask1".into(),
+        background,
+        snapshot,
+        questions: "[]".into(),
+        document: String::new(),
+        created_at: ts,
+        updated_at: ts,
+    })
+}
+
+/// 存进度：走到哪一步、题目与回答、文档。返回新的 updated_at。
+///
+/// **不碰背景和快照** —— 那两项是这次复盘的前提，中途能改的话，前面答过的题
+/// 就对不上它们了。想换前提就另开一份。
+pub fn save_ai_review(
+    conn: &Connection,
+    id: i64,
+    title: String,
+    stage: String,
+    questions: String,
+    document: String,
+) -> Result<i64> {
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        return Err("复盘标题不能为空".into());
+    }
+    if !AI_REVIEW_STAGES.contains(&stage.as_str()) {
+        return Err(format!("不认识的复盘阶段「{stage}」"));
+    }
+    let ts = unix_now();
+    let n = conn
+        .execute(
+            "UPDATE ai_reviews
+                SET title = ?2, stage = ?3, questions = ?4, document = ?5, updated_at = ?6
+              WHERE id = ?1",
+            params![id, title, stage, questions, document, ts],
+        )
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Err("这份复盘已经不存在了".into());
+    }
+    Ok(ts)
+}
+
+pub fn delete_ai_review(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM ai_reviews WHERE id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}

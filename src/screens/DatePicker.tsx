@@ -234,7 +234,7 @@ function NavButton({ children, onClick }: { children: React.ReactNode; onClick: 
 }
 
 /** 覆盖整个月的 6×7 网格，周一起始，前后补齐相邻月份。 */
-function monthGrid(year: number, month: number): number[] {
+export function monthGrid(year: number, month: number): number[] {
   const first = isoToDay(`${year}-${pad(month + 1)}-01`);
   // getUTCDay 里 0 是周日；这里周一为一周之首，所以要把周日折算成 6
   const offset = (dayToDate(first).getUTCDay() + 6) % 7;

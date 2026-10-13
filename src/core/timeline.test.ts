@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { buildTimeline } from "./timeline";
+import {
+  buildCareers,
+  buildTimeline,
+  carriedBlocks,
+  clipTimeline,
+  normalizeRange,
+} from "./timeline";
 import { resolve, type Task } from "../gantt/model";
 import { dayToIso, isoToDay } from "../gantt/time";
 import type { DailyNote, Risk } from "../db/api";
@@ -166,5 +172,108 @@ describe("时间线聚合", () => {
 
   it("什么都没有就是空的，不造出一堆空日子", () => {
     expect(buildTimeline(resolve([task(1)]), [], [])).toEqual([]);
+  });
+});
+
+describe("按日期筛选", () => {
+  const days = buildTimeline(
+    resolve([task(1)]),
+    [
+      note({ id: 1, day: dayToIso(D0) }),
+      note({ id: 2, day: dayToIso(D0 + 3) }),
+      note({ id: 3, day: dayToIso(D0 + 7) }),
+    ],
+    [],
+  );
+
+  it("不传区间就是原样", () => {
+    expect(clipTimeline(days, null)).toBe(days);
+  });
+
+  it("单日：只剩那一天", () => {
+    const got = clipTimeline(days, { from: D0 + 3, to: D0 + 3 });
+    expect(got.map((d) => d.day)).toEqual([D0 + 3]);
+  });
+
+  it("区间首尾都含，顺序不变（仍是最近在前）", () => {
+    const got = clipTimeline(days, { from: D0, to: D0 + 3 });
+    expect(got.map((d) => d.day)).toEqual([D0 + 3, D0]);
+  });
+
+  it("先点晚的再点早的，区间也是正的", () => {
+    expect(normalizeRange(D0 + 5, D0)).toEqual({ from: D0, to: D0 + 5 });
+  });
+});
+
+describe("区间之前就卡住的受阻", () => {
+  const tasks = resolve([
+    task(1, {
+      blocked: [
+        { id: "early", from: D0, to: D0 + 6, reason: "material" },
+        { id: "gone", from: D0, to: D0 + 2, reason: "rework" },
+        { id: "inside", from: D0 + 5, to: D0 + 6, reason: "equipment", open: true },
+      ],
+    }),
+  ]);
+
+  it("起始日在区间前、覆盖到区间内的才算", () => {
+    const got = carriedBlocks(tasks, { from: D0 + 4, to: D0 + 8 });
+    expect(got.map((e) => e.key)).toEqual(["c1-early"]);
+    expect(got[0].since).toBe(D0);
+    expect(got[0].days).toBe(7);
+  });
+
+  it("起始日落在区间里的不重复捞 —— 它已经在那天显示了", () => {
+    const got = carriedBlocks(tasks, { from: D0 + 5, to: D0 + 5 });
+    expect(got.map((e) => e.key)).toEqual(["c1-early"]);
+  });
+
+  it("没在筛选时什么都不捞", () => {
+    expect(carriedBlocks(tasks, null)).toEqual([]);
+  });
+});
+
+describe("任务履历", () => {
+  const NOW = D0 + 10;
+  const tasks = resolve([
+    task(1, { name: "做完的", actualStartDay: D0, actualEndDay: D0 + 4, progress: 1 }),
+    task(2, {
+      name: "在干的",
+      actualStartDay: D0 + 6,
+      actualEndDay: D0 + 20,
+      progress: 0.4,
+      blocked: [
+        { id: "a", from: D0 + 7, to: D0 + 8, reason: "material" },
+        { id: "b", from: D0 + 8, to: D0 + 30, reason: "rework" },
+      ],
+    }),
+    task(3, { name: "没开工的" }),
+  ]);
+
+  it("没开工的不进来；在干的排在做完的前面", () => {
+    expect(buildCareers(tasks, NOW).map((c) => c.task.name)).toEqual(["在干的", "做完的"]);
+  });
+
+  it("做完的：开工到完成，含首尾", () => {
+    const done = buildCareers(tasks, NOW)[1];
+    expect([done.start, done.end, done.days]).toEqual([D0, D0 + 4, 5]);
+  });
+
+  it("在干的：画到今天为止，实施结束日没到 100% 不算完成", () => {
+    const live = buildCareers(tasks, NOW)[0];
+    expect(live.end).toBeNull();
+    expect(live.until).toBe(NOW);
+    expect(live.days).toBe(5);
+  });
+
+  it("受阻段夹到今天，重叠的那天只算一次", () => {
+    const live = buildCareers(tasks, NOW)[0];
+    expect(live.blocked.at(-1)!.to).toBe(NOW);
+    expect(live.blockedDays).toBe(4); // D0+7 ～ D0+10
+  });
+
+  it("筛日期时只留和区间有交集的", () => {
+    const got = buildCareers(tasks, NOW, { from: D0 + 5, to: D0 + 7 });
+    expect(got.map((c) => c.task.name)).toEqual(["在干的"]);
   });
 });

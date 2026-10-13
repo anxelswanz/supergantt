@@ -184,6 +184,28 @@ export interface ItemKind {
   sortOrder: number;
 }
 
+/**
+ * 一次 AI 复盘在库里的样子，见 migrations/013_ai_reviews.sql。
+ *
+ * `background` / `snapshot` / `questions` 是 JSON 字符串，这里**不解析** ——
+ * 形状由 aiReview/types.ts 定义并负责读写（parseReview）。
+ */
+export interface AiReviewRow {
+  id: number;
+  projectId: number;
+  title: string;
+  /** 'ask1' | 'answer1' | 'ask2' | 'answer2' | 'write' | 'done' */
+  stage: string;
+  background: string;
+  snapshot: string;
+  questions: string;
+  /** 生成的 Markdown，用户可以直接改 */
+  document: string;
+  /** Unix 秒 */
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface DependencyRow {
   id: number;
   fromTaskId: number;
@@ -234,6 +256,14 @@ export interface RawPlugin {
   entry_raw: string | null;
   /** 与 manifest 同级的 styles.css，有就自动注入 */
   css_raw: string | null;
+}
+
+/** 随应用附带的插件。两份 manifest 都是原文，校验和版本比较在 TS 侧 */
+export interface BundledPlugin {
+  dir_name: string;
+  manifest_raw: string | null;
+  /** 已安装版本的 manifest；null = 还没装 */
+  installed_manifest_raw: string | null;
 }
 
 export const api = {
@@ -429,6 +459,33 @@ export const api = {
   listSettingsWithPrefix: (prefix: string) =>
     invoke<[string, string][]>("list_settings_with_prefix", { prefix }),
 
+  /* ---------------- AI 复盘 ---------------- */
+
+  /** 一个项目的全部复盘，最近动过的在前。连快照和文档一起取 */
+  listAiReviews: (projectId: number) =>
+    invoke<AiReviewRow[]>("list_ai_reviews", { projectId }),
+
+  /** 开始一次复盘。背景和快照在这一刻定下来，之后不再变 */
+  createAiReview: (projectId: number, title: string, background: string, snapshot: string) =>
+    invoke<AiReviewRow>("create_ai_review", { projectId, title, background, snapshot }),
+
+  /** 存进度。**不碰背景和快照。** 返回新的 updatedAt（Unix 秒） */
+  saveAiReview: (id: number, title: string, stage: string, questions: string, document: string) =>
+    invoke<number>("save_ai_review", { id, title, stage, questions, document }),
+
+  deleteAiReview: (id: number) => invoke<void>("delete_ai_review", { id }),
+
+  /** 本机有没有装 claude */
+  aiReviewAvailable: () => invoke<boolean>("ai_review_available"),
+
+  /**
+   * 问 Claude 一次，返回 run id。**程序和参数都由 Rust 写死**（零工具），
+   * 这里只给得了提示词和输出 schema —— 见 src-tauri/src/ai_review.rs。
+   * 输出走 db/proc.ts 的分发，取消用 pluginKill。
+   */
+  aiReviewRun: (prompt: string, schema: string | null) =>
+    invoke<number>("ai_review_run", { prompt, schema }),
+
   /* ---------------- 插件 ---------------- */
 
   /** 扫描插件目录。只读文件，不解析 —— 校验在 TS 侧（plugins/manifest.ts） */
@@ -439,6 +496,28 @@ export const api = {
 
   /** 在资源管理器 / 访达里打开插件目录 */
   revealPluginsDir: () => invoke<void>("reveal_plugins_dir"),
+
+  /** 随应用附带、可以在设置里一键安装的插件 */
+  listBundledPlugins: () => invoke<BundledPlugin[]>("list_bundled_plugins"),
+  /** 安装或更新一个附带插件。更新时保留插件的 data/ */
+  installBundledPlugin: (id: string) => invoke<void>("install_bundled_plugin", { id }),
+  /** 删掉插件目录（含 data/）。调用前先停用 */
+  uninstallPlugin: (id: string) => invoke<void>("uninstall_plugin", { id }),
+
+  /* 下面这些只给 plugins/registry.ts 用 —— 插件拿到的是包过一层、
+     自动带上插件 id 的版本，见那里的 makeApi */
+  pluginStorageRead: (id: string, name: string) =>
+    invoke<string | null>("plugin_storage_read", { id, name }),
+  pluginStorageWrite: (id: string, name: string, content: string) =>
+    invoke<void>("plugin_storage_write", { id, name, content }),
+  pluginWhich: (program: string) => invoke<string | null>("plugin_which", { program }),
+  pluginSpawn: (id: string, program: string, args: string[], stdin: string | null) =>
+    invoke<number>("plugin_spawn", { id, program, args, stdin }),
+  pluginKill: (runId: number) => invoke<void>("plugin_kill", { runId }),
+  pluginLinkSkill: (id: string, dir: string, name: string) =>
+    invoke<string>("plugin_link_skill", { id, dir, name }),
+  pluginUnlinkSkill: (id: string, name: string) =>
+    invoke<void>("plugin_unlink_skill", { id, name }),
 
   dataDir: () => invoke<string>("data_dir"),
 

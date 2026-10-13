@@ -19,7 +19,14 @@
  */
 
 import { blockedDays } from "../core/blocked";
-import { buildTimeline, type TimelineDay, type TimelineEvent } from "../core/timeline";
+import {
+  buildTimeline,
+  carriedBlocks,
+  clipTimeline,
+  type DayRange,
+  type TimelineDay,
+  type TimelineEvent,
+} from "../core/timeline";
 import type { DailyNote, Person, Risk } from "../db/api";
 import { dayToDate, dayToIso, today } from "../gantt/time";
 import { projectSpan, type ResolvedTask } from "../gantt/model";
@@ -34,6 +41,11 @@ export interface TimelineHtmlInput {
   risks: Risk[];
   people: Person[];
   exportedAt: Date;
+  /**
+   * 只导出这段日期（首尾都含）。屏幕上筛着什么就导出什么 ——
+   * 和事项页「先筛选就只导筛出来的」是同一条规矩
+   */
+  range?: DayRange | null;
 }
 
 const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
@@ -57,8 +69,10 @@ const RISK_LEVELS = ["高", "中", "低"];
 
 export function buildTimelineHtml(input: TimelineHtmlInput): string {
   const { projectName, projectColor, tasks, notes, risks, people, exportedAt } = input;
+  const range = input.range ?? null;
 
-  const days = buildTimeline(tasks, notes, risks);
+  const days = clipTimeline(buildTimeline(tasks, notes, risks), range);
+  const carried = carriedBlocks(tasks, range);
   const personOf = new Map(people.map((p) => [p.id, p]));
   const title = `${projectName || "项目"} · 时间线`;
 
@@ -73,12 +87,13 @@ export function buildTimelineHtml(input: TimelineHtmlInput): string {
     "</head>",
     "<body>",
     '<div class="page">',
-    header(projectName, exportedAt, days),
-    summary(tasks, days, risks),
+    header(projectName, exportedAt, days, range),
+    summary(tasks, days, risks, range),
     spanBar(tasks),
     heatmap(days),
     filters(days),
-    timeline(days, personOf),
+    carriedSection(carried, personOf),
+    timeline(days, personOf, range),
     footer(exportedAt),
     "</div>",
     `<script>${script()}</script>`,
@@ -99,9 +114,16 @@ export function timelineFileName(projectName: string, at: Date): string {
 /* 各段                                                                */
 /* ------------------------------------------------------------------ */
 
-function header(projectName: string, exportedAt: Date, days: TimelineDay[]): string {
-  const range =
-    days.length > 0
+function header(
+  projectName: string,
+  exportedAt: Date,
+  days: TimelineDay[],
+  filter: DayRange | null,
+): string {
+  // 筛过的导出件必须自己说清楚「我不是全部」：收件人看不到导出时屏幕上的筛选条
+  const range = filter
+    ? `仅 ${rangeText(filter)}`
+    : days.length > 0
       ? `${dayToIso(days[days.length - 1].day)} ～ ${dayToIso(days[0].day)}`
       : "还没有任何记录";
 
@@ -119,10 +141,29 @@ function header(projectName: string, exportedAt: Date, days: TimelineDay[]): str
  * 还有多少风险没关。「记录条数」单独列出来是给写记录的人看的 ——
  * 一段时间下来一条没写，时间线本身就不可信。
  */
-function summary(tasks: ResolvedTask[], days: TimelineDay[], risks: Risk[]): string {
+function summary(
+  tasks: ResolvedTask[],
+  days: TimelineDay[],
+  risks: Risk[],
+  filter: DayRange | null,
+): string {
   const counts = new Map<TimelineEvent["kind"], number>();
   for (const d of days) {
     for (const e of d.events) counts.set(e.kind, (counts.get(e.kind) ?? 0) + 1);
+  }
+
+  // 筛了日期就只摆这段日期里数得出来的数。把「全项目已完成 12 / 30」摆在
+  // 一份只讲三天的文件上，读的人会以为那是这三天干出来的
+  if (filter) {
+    const n = (k: TimelineEvent["kind"]) => String(counts.get(k) ?? 0);
+    return cardRow([
+      { value: String(days.length), label: "有记录的天数" },
+      { value: n("start"), label: "开工" },
+      { value: n("finish"), label: "完成" },
+      { value: n("blocked"), label: "新增受阻", tone: counts.get("blocked") ? "warn" : "" },
+      { value: n("risk"), label: "新增风险", tone: counts.get("risk") ? "warn" : "" },
+      { value: n("note"), label: "当日记录" },
+    ]);
   }
 
   const leaves = tasks.filter((t) => !t.hasChildren);
@@ -140,6 +181,10 @@ function summary(tasks: ResolvedTask[], days: TimelineDay[], risks: Risk[]): str
     { value: String(counts.get("note") ?? 0), label: "当日记录" },
   ];
 
+  return cardRow(cards);
+}
+
+function cardRow(cards: { value: string; label: string; tone?: string }[]): string {
   return `<section class="cards">${cards
     .map(
       (c) =>
@@ -256,7 +301,40 @@ function filters(days: TimelineDay[]): string {
 </nav>`;
 }
 
-function timeline(days: TimelineDay[], personOf: Map<number, Person>): string {
+/**
+ * 筛选区间开始之前就卡住、到区间里还没放开的受阻（见 core/timeline.carriedBlocks）。
+ * 放在逐日流水外面：正/倒序切换和按类型筛选都不该动它。
+ */
+function carriedSection(events: TimelineEvent[], personOf: Map<number, Person>): string {
+  if (events.length === 0) return "";
+  const rows = events
+    .map((e) => {
+      const person = e.task?.personId != null ? personOf.get(e.task.personId) : undefined;
+      const who = person
+        ? `<span class="who"><i style="background:${esc(person.color)}"></i>${esc(person.name)}</span>`
+        : "";
+      return `<div class="carry-row">
+    <div class="ev-head">
+      <span class="ev-task">${esc(e.task?.name || "未命名")}</span>
+      ${who}<span class="tag stuck">自 ${esc(dayToIso(e.since ?? 0))} 起 · 共 ${e.days} 天</span>${
+        e.unresolved ? `<span class="tag live">未关闭</span>` : ""
+      }
+    </div>
+    <div class="ev-body">${esc(e.text)}</div>
+  </div>`;
+    })
+    .join("");
+  return `<section class="carry"><div class="carry-title">此前开始 · 这段日期里仍在受阻</div>${rows}</section>`;
+}
+
+function timeline(
+  days: TimelineDay[],
+  personOf: Map<number, Person>,
+  filter: DayRange | null,
+): string {
+  if (days.length === 0 && filter) {
+    return `<main class="tl"><p class="empty">${esc(rangeText(filter))} 没有记录。</p></main>`;
+  }
   if (days.length === 0) {
     return `<main class="tl"><p class="empty">这个项目还没有任何记录。<br>在时间线里「记一笔」，或者在甘特图上右键某一天。</p></main>`;
   }
@@ -401,6 +479,9 @@ h1{margin:0;font-size:22px;font-weight:650;letter-spacing:-.01em}
 .tag.risk-l1{color:#f59e0b}
 .tag.risk-l2{color:var(--dim)}
 .ev-body{color:var(--dim);font-size:12.5px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
+.carry{border:1px solid color-mix(in srgb,#f43f5e 30%,var(--rule));background:color-mix(in srgb,#f43f5e 6%,var(--surface));border-radius:12px;padding:11px 14px;margin-bottom:16px}
+.carry-title{color:#f43f5e;font-size:11px;font-weight:650;margin-bottom:6px}
+.carry-row+.carry-row{margin-top:8px}
 .empty{border:1px dashed var(--rule);border-radius:12px;padding:36px;text-align:center;color:var(--dim);font-size:13px}
 
 .foot{margin-top:28px;padding-top:12px;border-top:1px solid var(--rule);color:var(--dim);font-size:10px;text-align:center}
@@ -486,6 +567,9 @@ export function esc(value: string): string {
 function cssColor(value: string): string {
   return /^#[0-9a-fA-F]{3,8}$/.test(value.trim()) ? value.trim() : "#6366f1";
 }
+
+const rangeText = (r: DayRange): string =>
+  r.from === r.to ? dayToIso(r.from) : `${dayToIso(r.from)} ～ ${dayToIso(r.to)}`;
 
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
 

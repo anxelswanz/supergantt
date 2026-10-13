@@ -25,6 +25,7 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/010_item_notes.sql"),
     include_str!("../migrations/011_item_kinds.sql"),
     include_str!("../migrations/012_risk_priority.sql"),
+    include_str!("../migrations/013_ai_reviews.sql"),
 ];
 
 /// 打开（必要时创建）数据库，跑完迁移再自愈一遍。
@@ -276,6 +277,66 @@ mod tests {
             .query_row("SELECT label FROM item_kinds WHERE key = 'issue'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(issue, "议题", "改过名的那一行不能被重置");
+    }
+
+    /// 013 要替「存过视图开关」的老用户把新视图打开，而且只打开一次：
+    /// 没存过的不动（走默认全开），已经有的不重复加，坏掉的 JSON 不碰。
+    #[test]
+    fn ai_review_view_is_enabled_for_existing_users_once() {
+        let before_013 = MIGRATIONS.len() - 1;
+        let run = |saved: Option<&str>| -> Option<String> {
+            let conn = Connection::open_in_memory().unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+            for sql in &MIGRATIONS[..before_013] {
+                conn.execute_batch(sql).unwrap();
+            }
+            if let Some(v) = saved {
+                conn.execute("INSERT INTO settings (key, value) VALUES ('enabled_views', ?1)", [v])
+                    .unwrap();
+            }
+            conn.execute_batch(MIGRATIONS[before_013]).unwrap();
+            conn.query_row("SELECT value FROM settings WHERE key = 'enabled_views'", [], |r| r.get(0))
+                .ok()
+        };
+
+        assert_eq!(run(None), None, "没存过这一项的用户不该被写一行");
+        assert_eq!(
+            run(Some(r#"["gantt","review"]"#)).as_deref(),
+            Some(r#"["gantt","review","ai-review"]"#)
+        );
+        assert_eq!(
+            run(Some(r#"["gantt","ai-review"]"#)).as_deref(),
+            Some(r#"["gantt","ai-review"]"#),
+            "已经有了就不重复加"
+        );
+        assert_eq!(run(Some("坏的")).as_deref(), Some("坏的"), "读不懂的值原样留着");
+    }
+
+    /// 复盘跟着项目走；阶段只认那六个值。
+    #[test]
+    fn ai_reviews_cascade_with_project_and_check_stage() {
+        let conn = mem();
+        conn.execute(
+            "INSERT INTO projects (id, name, created_at, updated_at) VALUES (1, 'A', '0', '0')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ai_reviews (project_id, title, background, snapshot, created_at, updated_at)
+             VALUES (1, '结项复盘', '{}', '{}', 0, 0)",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute("UPDATE ai_reviews SET stage = 'running'", []).is_err(),
+            "「在跑」不是一个能存进库的阶段"
+        );
+
+        conn.execute("DELETE FROM projects WHERE id = 1", []).unwrap();
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ai_reviews", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "项目没了，它的复盘也没了");
     }
 
     /// 未分拣（kind 为 NULL）必须存得进去 —— 它是一个真实状态，不是缺省值。

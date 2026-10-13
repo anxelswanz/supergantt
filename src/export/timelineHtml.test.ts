@@ -216,6 +216,50 @@ describe("buildTimelineHtml", () => {
   });
 });
 
+describe("按日期筛选导出", () => {
+  const D = (iso: string) => isoToDay(iso);
+  const filtered = () =>
+    buildTimelineHtml(
+      input({
+        tasks: resolve([
+          task({
+            id: 1,
+            name: "管道试压",
+            blocked: [{ id: "b1", from: D("2026-08-03"), to: D("2026-08-06"), reason: "material" }],
+          }),
+        ]),
+        notes: [
+          note({ id: 1, day: "2026-08-04", content: "区间之前" }),
+          note({ id: 2, day: "2026-08-05", content: "区间之内" }),
+          note({ id: 3, day: "2026-08-08", content: "区间之后" }),
+        ],
+        range: { from: D("2026-08-05"), to: D("2026-08-06") },
+      }),
+    );
+
+  it("只留区间里的那些天", () => {
+    const html = filtered();
+    expect(html).toContain("区间之内");
+    expect(html).not.toContain("区间之前");
+    expect(html).not.toContain("区间之后");
+  });
+
+  it("页眉写明这不是全部 —— 收件人看不到导出时的筛选条", () => {
+    expect(filtered()).toContain("仅 2026-08-05 ～ 2026-08-06");
+  });
+
+  it("区间之前就卡住的受阻单独列出来", () => {
+    const html = filtered();
+    expect(html).toContain("这段日期里仍在受阻");
+    expect(html).toContain("自 2026-08-03 起 · 共 4 天");
+  });
+
+  it("不筛时没有那一段", () => {
+    const html = buildTimelineHtml(input());
+    expect(html).not.toContain('<section class="carry">');
+  });
+});
+
 describe("timelineFileName", () => {
   it("带项目名、日期和 .html 后缀", () => {
     expect(timelineFileName("登月计划", AT)).toBe("登月计划-时间线-2026-08-09.html");

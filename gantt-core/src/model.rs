@@ -245,3 +245,27 @@ pub struct ItemKind {
     pub builtin: bool,
     pub sort_order: f64,
 }
+
+/**
+ * 一次 AI 复盘，见 migrations/013_ai_reviews.sql。
+ *
+ * `background` / `snapshot` / `questions` 三列是 JSON 字符串，**库层不解析** ——
+ * 它们的形状由前端（src/aiReview/types.ts）定义，只有前端读写。在这里再建一套
+ * 对应的结构体，等于同一份契约维护两遍，而 Rust 这边拿着它什么也不做。
+ */
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AiReview {
+    pub id: i64,
+    pub project_id: i64,
+    pub title: String,
+    /// 'ask1' | 'answer1' | 'ask2' | 'answer2' | 'write' | 'done'
+    pub stage: String,
+    pub background: String,
+    pub snapshot: String,
+    pub questions: String,
+    pub document: String,
+    /// Unix 秒
+    pub created_at: i64,
+    pub updated_at: i64,
+}

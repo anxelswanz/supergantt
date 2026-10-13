@@ -14,7 +14,7 @@
  * 发生了什么的那几天淹掉。持续时间写在事件里（"等料 · 5 天"），信息不丢。
  */
 
-import { describeBlocked, type BlockedPeriod } from "./blocked";
+import { blockedDays, describeBlocked, type BlockedPeriod } from "./blocked";
 import { dayToIso, isoToDay } from "../gantt/time";
 import type { ResolvedTask } from "../gantt/model";
 import type { DailyNote, Risk } from "../db/api";
@@ -30,6 +30,8 @@ export interface TimelineEvent {
   text: string;
   /** 受阻事件的持续天数 */
   days?: number;
+  /** 只有 carriedBlocks 捞出来的受阻才有：它是从哪天开始卡的 */
+  since?: number;
   /** 受阻事件：这条阻碍到现在还没关掉，天数每天还在长 */
   unresolved?: boolean;
   /** 风险等级 0 高 / 1 中 / 2 低 */
@@ -150,6 +152,108 @@ export function buildTimeline(
     // 倒序：最近的一天在最上面。时间线是用来回顾的，而"最近"永远是
     // 被问得最多的那一段
     .sort((a, b) => b.day - a.day);
+}
+
+/** 日期筛选的区间，首尾都含。单日就是 from === to */
+export interface DayRange {
+  from: number;
+  to: number;
+}
+
+/** 两次点选不保证先早后晚，这里统一摆正 */
+export const normalizeRange = (a: number, b: number): DayRange =>
+  a <= b ? { from: a, to: b } : { from: b, to: a };
+
+/** 只留下落在区间里的那些天。不传区间就是原样 */
+export const clipTimeline = (days: TimelineDay[], range: DayRange | null): TimelineDay[] =>
+  range ? days.filter((d) => d.day >= range.from && d.day <= range.to) : days;
+
+/**
+ * 区间开始之前就卡住、到区间里还没放开的那些受阻。
+ *
+ * 受阻只在起始日落一条（见文件头），于是按日期裁剪会把它们整条裁掉 ——
+ * 而筛「10 月 6 日那天怎么了」时，最要紧的答案恰恰可能是「那天正卡着」。
+ * 所以单独捞出来，由界面置顶显示，不混进任何一天里：它确实不是那天发生的事。
+ */
+export function carriedBlocks(tasks: ResolvedTask[], range: DayRange | null): TimelineEvent[] {
+  if (!range) return [];
+  const out: (TimelineEvent & { since: number })[] = [];
+  for (const task of tasks) {
+    if (task.hasChildren) continue;
+    for (const b of task.blocked as BlockedPeriod[]) {
+      if (b.from >= range.from || b.to < range.from) continue;
+      out.push({
+        kind: "blocked",
+        key: `c${task.id}-${b.id}`,
+        task,
+        text: describeBlocked(b),
+        days: b.to - b.from + 1,
+        since: b.from,
+        ...(b.open === true ? { unresolved: true } : {}),
+      });
+    }
+  }
+  // 卡得最久的排最前
+  return out.sort((a, b) => a.since - b.since || a.key.localeCompare(b.key));
+}
+
+/**
+ * 一件活的履历：把流水里隔着几十行的「开工」和「完成」配成一对。
+ *
+ * 流水按天排，答得了「那天怎么了」，答不了「这件活从哪天干到哪天」——
+ * 这两个事件之间可能隔着整整一个月的别的记录。
+ */
+export interface Career {
+  task: ResolvedTask;
+  start: number;
+  /** 完成日。还在干就是 null —— 判据和时间线上的「完成」事件是同一条 */
+  end: number | null;
+  /** 画到哪天为止：完成日，或者今天 */
+  until: number;
+  /** 从开工到 until 的自然日数，含首尾 */
+  days: number;
+  /** 落在 [start, until] 里的受阻段，已经夹到这个区间内 */
+  blocked: { from: number; to: number }[];
+  /** 去重后的受阻天数 */
+  blockedDays: number;
+}
+
+export function buildCareers(
+  tasks: ResolvedTask[],
+  now: number,
+  range: DayRange | null = null,
+): Career[] {
+  const out: Career[] = [];
+  for (const task of tasks) {
+    // 父任务的日期是汇总值，同 buildTimeline
+    if (task.hasChildren || task.actualStartDay == null) continue;
+
+    const start = task.actualStartDay;
+    const end = task.actualEndDay != null && task.progress >= 1 ? task.actualEndDay : null;
+    const until = Math.max(start, end ?? now);
+    if (range && (start > range.to || until < range.from)) continue;
+
+    const clipped = (task.blocked as BlockedPeriod[])
+      .filter((b) => b.to >= start && b.from <= until)
+      .map((b) => ({ ...b, from: Math.max(b.from, start), to: Math.min(b.to, until) }));
+
+    out.push({
+      task,
+      start,
+      end,
+      until,
+      days: until - start + 1,
+      blocked: clipped.map(({ from, to }) => ({ from, to })),
+      blockedDays: blockedDays(clipped),
+    });
+  }
+  // 还在干的排前面（最近开工的在最上），然后是做完的（最近完成的在最上）
+  return out.sort(
+    (a, b) =>
+      Number(a.end != null) - Number(b.end != null) ||
+      (a.end != null ? b.until - a.until : b.start - a.start) ||
+      a.task.id - b.task.id,
+  );
 }
 
 /** 某一天有没有内容 —— 甘特上要据此在日期轴上打点 */

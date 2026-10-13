@@ -390,3 +390,41 @@ pub fn list_settings_with_prefix(
 ) -> Result<Vec<(String, String)>> {
     with_conn!(db, conn => query::list_settings_with_prefix(&conn, prefix))
 }
+
+/* ------------------------------------------------------------------ */
+/* AI 复盘                                                             */
+/* ------------------------------------------------------------------ */
+
+#[tauri::command]
+pub fn list_ai_reviews(db: tauri::State<Db>, project_id: i64) -> Result<Vec<AiReview>> {
+    with_conn!(db, conn => query::list_ai_reviews(&conn, project_id))
+}
+
+#[tauri::command]
+pub fn create_ai_review(
+    db: tauri::State<Db>,
+    project_id: i64,
+    title: String,
+    background: String,
+    snapshot: String,
+) -> Result<AiReview> {
+    with_conn!(db, conn => query::create_ai_review(&conn, project_id, title, background, snapshot))
+}
+
+/// 存进度。返回新的 updated_at（Unix 秒）。
+#[tauri::command]
+pub fn save_ai_review(
+    db: tauri::State<Db>,
+    id: i64,
+    title: String,
+    stage: String,
+    questions: String,
+    document: String,
+) -> Result<i64> {
+    with_conn!(db, conn => query::save_ai_review(&conn, id, title, stage, questions, document))
+}
+
+#[tauri::command]
+pub fn delete_ai_review(db: tauri::State<Db>, id: i64) -> Result<()> {
+    with_conn!(db, conn => query::delete_ai_review(&conn, id))
+}
