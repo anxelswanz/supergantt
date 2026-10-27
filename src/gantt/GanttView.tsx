@@ -2,10 +2,10 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { motion } from "motion/react";
 import { AXIS_HEIGHT, getTheme, ROW_HEIGHTS } from "./theme";
-import { drawContent, drawInteraction, drawStatic } from "./render";
+import { drawContent, drawInteraction, drawStatic, type GanttMilestone } from "./render";
 import { resolve, type ResolvedTask } from "./model";
 import { Viewport, ZOOM_PRESETS, type ZoomPreset } from "./viewport";
-import { dayToIso, today } from "./time";
+import { dayToIso, isoToDay, today } from "./time";
 import { cursorFor, hitTest, snapProgress, tapAdoptsPlanDates, type DragMode } from "./hitTest";
 import { makeBarPainter } from "./coloring";
 import {
@@ -73,6 +73,25 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
     // revision 是就地修改的 Map 的变化信号，见 useAppStore 的说明
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [taskMap, revision],
+  );
+
+  /**
+   * 项目级里程碑 → 画布要的形状。
+   *
+   * 日期读不懂的条目直接丢掉：它本来就不该被写进库（库层校验过），
+   * 但导入的旧库或者手工改过的库可能带着坏值 —— 为一条坏日期让整个
+   * 画布抛异常，用户会看到一个空白的甘特图，且完全不知道原因。
+   */
+  const milestones = useAppStore((s) => s.milestones);
+  const ganttMilestones = useMemo<GanttMilestone[]>(
+    () =>
+      milestones.flatMap((m) => {
+        const day = isoToDay(m.date);
+        return Number.isFinite(day)
+          ? [{ id: m.id, name: m.name, day, color: m.color }]
+          : [];
+      }),
+    [milestones],
   );
 
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -154,6 +173,7 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
     blockedOf,
     viewMode,
     compareOn,
+    milestones: ganttMilestones,
     dragLabel: null as null | { index: number; label: string; snapped: boolean },
     cursorX: null as number | null,
     hoverId: null as number | null,
@@ -168,6 +188,7 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
   live.current.blockedOf = blockedOf;
   live.current.viewMode = viewMode;
   live.current.compareOn = compareOn;
+  live.current.milestones = ganttMilestones;
 
   const maxScroll = () =>
     Math.max(0, tasks.length * rowHeight - (size.h - AXIS_HEIGHT));
@@ -204,7 +225,7 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
   useEffect(() => {
     dirty.current.content = true;
     dirty.current.interact = true;
-  }, [tasks, selectedId, painter, colorBy, blockedOf, viewMode, compareOn]);
+  }, [tasks, selectedId, painter, colorBy, blockedOf, viewMode, compareOn, ganttMilestones]);
 
   // 改工作日历会影响底纹和星期行，切主题会改全部三层的颜色 —— 都要整幅重画
   useEffect(() => {
@@ -258,6 +279,7 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
               live.current.blockedOf,
               live.current.viewMode,
               live.current.compareOn,
+              live.current.milestones,
             );
           dirty.current.content = false;
         }

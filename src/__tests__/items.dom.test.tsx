@@ -429,7 +429,7 @@ describe("视图开关", () => {
 
     await waitFor(() => expect(screen.queryByRole("button", { name: "看板" })).toBe(null));
     // 编号跟着重新算 —— 不留一个按了没反应的死键
-    expect(store.getState().enabledViews).toEqual(["gantt", "timeline", "review", "ai-review", "items"]);
+    expect(store.getState().enabledViews).toEqual(["gantt", "timeline", "review", "ai-review", "items", "milestone"]);
 
     fireEvent.keyDown(window, { key: "2", metaKey: true, ctrlKey: true });
     await waitFor(() => expect(store.getState().activeView).toBe("timeline"));
@@ -467,10 +467,11 @@ describe("视图开关", () => {
       "timeline",
       "ai-review",
       "items",
+      "milestone",
     ]);
 
     await store.getState().loadSettings();
-    expect(store.getState().enabledViews).toEqual(["gantt", "board", "timeline", "ai-review", "items"]);
+    expect(store.getState().enabledViews).toEqual(["gantt", "board", "timeline", "ai-review", "items", "milestone"]);
   });
 });
 

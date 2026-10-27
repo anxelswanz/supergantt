@@ -428,3 +428,52 @@ pub fn save_ai_review(
 pub fn delete_ai_review(db: tauri::State<Db>, id: i64) -> Result<()> {
     with_conn!(db, conn => query::delete_ai_review(&conn, id))
 }
+
+/* ------------------------------------------------------------------ */
+/* 里程碑                                                              */
+/* ------------------------------------------------------------------ */
+
+#[tauri::command]
+pub fn load_milestones(db: tauri::State<Db>, project_id: i64) -> Result<Vec<gantt_core::model::Milestone>> {
+    with_conn!(db, conn => gantt_core::query::load_milestones(&conn, project_id))
+}
+
+#[tauri::command]
+pub fn add_milestone(
+    db: tauri::State<Db>,
+    project_id: i64,
+    name: String,
+    date: String,
+    color: String,
+    description: String,
+    task_ids: Vec<i64>,
+) -> Result<gantt_core::model::Milestone> {
+    with_conn!(db, conn => gantt_core::query::add_milestone(&conn, project_id, name, date, color, description, task_ids))
+}
+
+#[tauri::command]
+pub fn update_milestone(
+    db: tauri::State<Db>,
+    id: i64,
+    name: String,
+    date: String,
+    color: String,
+    description: String,
+    task_ids: Vec<i64>,
+) -> Result<()> {
+    with_conn!(db, conn => gantt_core::query::update_milestone(&conn, id, name, date, color, description, task_ids))
+}
+
+#[tauri::command]
+pub fn reorder_milestones(
+    db: tauri::State<Db>,
+    project_id: i64,
+    ids: Vec<i64>,
+) -> Result<()> {
+    with_conn!(db, conn => gantt_core::query::reorder_milestones(&conn, project_id, ids))
+}
+
+#[tauri::command]
+pub fn delete_milestone(db: tauri::State<Db>, id: i64) -> Result<()> {
+    with_conn!(db, conn => gantt_core::query::delete_milestone(&conn, id))
+}

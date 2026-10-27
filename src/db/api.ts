@@ -185,6 +185,28 @@ export interface ItemKind {
 }
 
 /**
+ * 一个用户自设的里程碑，见 migrations/014_milestones.sql。
+ *
+ * 和 `TaskRow.milestone` 不是一回事：那个是「这条任务本身是个节点」，
+ * 依附在任务上；这个能脱离任务存在、能挂多条任务、有自己的名称和说明。
+ */
+export interface Milestone {
+  id: number;
+  projectId: number;
+  name: string;
+  /** ISO 'YYYY-MM-DD' */
+  date: string;
+  color: string;
+  description: string;
+  sortOrder: number;
+  /** 关联的任务 id。空数组 = 没关联任何任务 */
+  taskIds: number[];
+  /** Unix 秒 */
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
  * 一次 AI 复盘在库里的样子，见 migrations/013_ai_reviews.sql。
  *
  * `background` / `snapshot` / `questions` 是 JSON 字符串，这里**不解析** ——
@@ -458,6 +480,37 @@ export const api = {
   /** 按前缀取一组设置。插件系统用它一次性读回全部 plugin.<id>.* */
   listSettingsWithPrefix: (prefix: string) =>
     invoke<[string, string][]>("list_settings_with_prefix", { prefix }),
+
+  /* ---------------- 里程碑 ---------------- */
+
+  /** 一个项目的全部里程碑，库层已按手动顺序排好 */
+  loadMilestones: (projectId: number) =>
+    invoke<Milestone[]>("load_milestones", { projectId }),
+
+  addMilestone: (
+    projectId: number,
+    name: string,
+    date: string,
+    color: string,
+    description: string,
+    taskIds: number[],
+  ) => invoke<Milestone>("add_milestone", { projectId, name, date, color, description, taskIds }),
+
+  /** 改字段（名称、日期、颜色、说明、关联任务）。不碰排序 */
+  updateMilestone: (
+    id: number,
+    name: string,
+    date: string,
+    color: string,
+    description: string,
+    taskIds: number[],
+  ) => invoke<void>("update_milestone", { id, name, date, color, description, taskIds }),
+
+  /** 只改排序。ids 是完整的目标顺序 */
+  reorderMilestones: (projectId: number, ids: number[]) =>
+    invoke<void>("reorder_milestones", { projectId, ids }),
+
+  deleteMilestone: (id: number) => invoke<void>("delete_milestone", { id }),
 
   /* ---------------- AI 复盘 ---------------- */
 

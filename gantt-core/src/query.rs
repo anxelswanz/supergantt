@@ -1416,3 +1416,265 @@ pub fn delete_ai_review(conn: &Connection, id: i64) -> Result<()> {
         .map_err(|e| e.to_string())?;
     Ok(())
 }
+
+/* ------------------------------------------------------------------ */
+/* 里程碑                                                              */
+/* ------------------------------------------------------------------ */
+
+const MILESTONE_COLS: &str =
+    "id, project_id, name, date, color, description, sort_order, created_at, updated_at";
+
+/// 日期必须能解析成天序号。存一个解析不了的字符串，甘特图上就没法定位它，
+/// 而且保存之后没有任何入口能发现它是坏的。
+fn check_iso_date(date: &str) -> Result<()> {
+    crate::calendar::iso_to_days(date)
+        .map(|_| ())
+        .ok_or_else(|| format!("日期「{date}」读不懂，需要 YYYY-MM-DD"))
+}
+
+/// 一条里程碑关联的任务 id，按 id 升序。
+fn milestone_task_ids(conn: &Connection, milestone_id: i64) -> Result<Vec<i64>> {
+    let mut stmt = conn
+        .prepare("SELECT task_id FROM milestone_tasks WHERE milestone_id = ?1 ORDER BY task_id")
+        .map_err(|e| e.to_string())?;
+    let ids = stmt
+        .query_map(params![milestone_id], |r| r.get::<_, i64>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    Ok(ids)
+}
+
+/// 行 → 结构体，不查关联表。
+///
+/// 关联为什么要分开查：`map_*` 拿到的 `Row` 在语句执行期间一直借用连接，
+/// 这时候再 prepare 一条新语句，轻则借不到第二个可变借用，重则读到一半的
+/// 游标状态。先把纯标量取完、行释放掉，再去补关联 —— 顺序不能反。
+fn map_milestone_row(r: &rusqlite::Row) -> rusqlite::Result<Milestone> {
+    Ok(Milestone {
+        id: r.get(0)?,
+        project_id: r.get(1)?,
+        name: r.get(2)?,
+        date: r.get(3)?,
+        color: r.get(4)?,
+        description: r.get(5)?,
+        sort_order: r.get(6)?,
+        task_ids: Vec::new(),
+        created_at: r.get(7)?,
+        updated_at: r.get(8)?,
+    })
+}
+
+pub fn load_milestones(conn: &Connection, project_id: i64) -> Result<Vec<Milestone>> {
+    let sql = format!(
+        "SELECT {MILESTONE_COLS} FROM milestones WHERE project_id = ?1 \
+         ORDER BY sort_order, id"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query_map(params![project_id], map_milestone_row)
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    drop(stmt);
+
+    let links = all_milestone_task_ids(conn, project_id)?;
+    for m in &mut rows {
+        m.task_ids = links.get(&m.id).cloned().unwrap_or_default();
+    }
+    Ok(rows)
+}
+
+/// 一个项目里全部里程碑的关联，一次查完 —— 列表页要显示每条的关联任务，
+/// 逐条查等于 N+1 次往返。
+fn all_milestone_task_ids(
+    conn: &Connection,
+    project_id: i64,
+) -> Result<std::collections::HashMap<i64, Vec<i64>>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT mt.milestone_id, mt.task_id
+               FROM milestone_tasks mt
+               JOIN milestones m ON m.id = mt.milestone_id
+              WHERE m.project_id = ?1
+              ORDER BY mt.milestone_id, mt.task_id",
+        )
+        .map_err(|e| e.to_string())?;
+    let pairs = stmt
+        .query_map(params![project_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+
+    let mut out: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
+    for (milestone_id, task_id) in pairs {
+        out.entry(milestone_id).or_default().push(task_id);
+    }
+    Ok(out)
+}
+
+fn read_milestone(conn: &Connection, id: i64) -> Result<Milestone> {
+    let sql = format!("SELECT {MILESTONE_COLS} FROM milestones WHERE id = ?1");
+    let mut m = conn
+        .query_row(&sql, params![id], map_milestone_row)
+        .map_err(|_| "里程碑不存在".to_string())?;
+    m.task_ids = milestone_task_ids(conn, id)?;
+    Ok(m)
+}
+
+/**
+ * 一条里程碑能关联哪些任务。
+ *
+ * 只认**本项目**的任务：关联表两端都有外键，跨项目的 id 写进去不会报错
+ * （tasks 表里确实有那一行），但那条任务在另一个项目的甘特图上 ——
+ * 里程碑在 A 项目，关联的活却在 B 项目，界面上永远对不上。
+ */
+fn check_task_ids(conn: &Connection, project_id: i64, task_ids: &[i64]) -> Result<()> {
+    if task_ids.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<String> = task_ids.iter().map(|i| i.to_string()).collect();
+    let found: i64 = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM tasks WHERE project_id = ?1 AND id IN ({})",
+                ids.join(",")
+            ),
+            params![project_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if found as usize != task_ids.len() {
+        return Err("关联的任务里有不属于本项目的，或者已经被删掉了".into());
+    }
+    Ok(())
+}
+
+/// 去重并保持传入顺序 —— 前端多选控件可能给出重复项，
+/// 而 `check_task_ids` 是拿「查到的行数」和「传入的个数」比的，不去重会误报。
+fn dedupe(ids: &[i64]) -> Vec<i64> {
+    let mut seen = std::collections::HashSet::new();
+    ids.iter().copied().filter(|id| seen.insert(*id)).collect()
+}
+
+fn write_task_links(conn: &Connection, milestone_id: i64, task_ids: &[i64]) -> Result<()> {
+    conn.execute(
+        "DELETE FROM milestone_tasks WHERE milestone_id = ?1",
+        params![milestone_id],
+    )
+    .map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare("INSERT OR IGNORE INTO milestone_tasks (milestone_id, task_id) VALUES (?1, ?2)")
+        .map_err(|e| e.to_string())?;
+    for task_id in task_ids {
+        stmt.execute(params![milestone_id, task_id])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+pub fn add_milestone(
+    conn: &Connection,
+    project_id: i64,
+    name: String,
+    date: String,
+    color: String,
+    description: String,
+    task_ids: Vec<i64>,
+) -> Result<Milestone> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("里程碑名称不能为空".into());
+    }
+    check_iso_date(&date)?;
+    let task_ids = dedupe(&task_ids);
+    check_task_ids(conn, project_id, &task_ids)?;
+
+    let sort_order: f64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM milestones WHERE project_id = ?1",
+            params![project_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    let ts = unix_now();
+    conn.execute(
+        "INSERT INTO milestones
+           (project_id, name, date, color, description, sort_order, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+        params![project_id, name, date, color, description, sort_order, ts],
+    )
+    .map_err(|e| e.to_string())?;
+    let id = conn.last_insert_rowid();
+    write_task_links(conn, id, &task_ids)?;
+
+    Ok(Milestone {
+        id,
+        project_id,
+        name,
+        date,
+        color,
+        description,
+        sort_order,
+        task_ids,
+        created_at: ts,
+        updated_at: ts,
+    })
+}
+
+pub fn update_milestone(
+    conn: &Connection,
+    id: i64,
+    name: String,
+    date: String,
+    color: String,
+    description: String,
+    task_ids: Vec<i64>,
+) -> Result<()> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("里程碑名称不能为空".into());
+    }
+    check_iso_date(&date)?;
+    let existing = read_milestone(conn, id)?;
+    let task_ids = dedupe(&task_ids);
+    check_task_ids(conn, existing.project_id, &task_ids)?;
+
+    let ts = unix_now();
+    let n = conn
+        .execute(
+            "UPDATE milestones
+                SET name = ?2, date = ?3, color = ?4, description = ?5, updated_at = ?6
+              WHERE id = ?1",
+            params![id, name, date, color, description, ts],
+        )
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Err("里程碑不存在".into());
+    }
+    write_task_links(conn, id, &task_ids)?;
+    Ok(())
+}
+
+/// 只改排序。拖拽时每帧不该把整条记录回传一遍。
+pub fn reorder_milestones(conn: &Connection, project_id: i64, ids: Vec<i64>) -> Result<()> {
+    let ts = unix_now();
+    let mut stmt = conn
+        .prepare(
+            "UPDATE milestones SET sort_order = ?3, updated_at = ?4
+              WHERE id = ?1 AND project_id = ?2",
+        )
+        .map_err(|e| e.to_string())?;
+    for (index, id) in ids.iter().enumerate() {
+        stmt.execute(params![id, project_id, index as f64, ts])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+pub fn delete_milestone(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM milestones WHERE id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}

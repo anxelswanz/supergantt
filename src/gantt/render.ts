@@ -23,6 +23,21 @@ const FONT_STACK =
   '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif';
 
 /**
+ * 甘特图上要叠画的项目级里程碑。
+ *
+ * 和 `TaskRow.milestone` 是两回事：那个是任务自己的标记，跟着行一起画在
+ * 那一行里；这个是用户自设的**独立节点**，没有行，画在内容层的顶部带
+ * 一条横线上 —— 它回答「项目走到哪一站」，不属于任何一行任务。
+ */
+export interface GanttMilestone {
+  id: number;
+  name: string;
+  /** 天序号 */
+  day: number;
+  color: string;
+}
+
+/**
  * 受阻时段的斜纹图案。
  *
  * 形状走「图案」这条通道：色相已经给了归属（阶段/负责人）、明度给了进度，
@@ -305,6 +320,8 @@ export function drawContent(
   blockedOf: (task: ResolvedTask) => BlockedPeriod[],
   mode: ViewMode,
   compareOn: boolean,
+  /** 项目级里程碑（用户自设的节点），画在最上层，见 drawMilestones */
+  milestones: GanttMilestone[] = [],
 ) {
   const { width, height } = vp;
   ctx.clearRect(0, 0, width, height);
@@ -348,6 +365,115 @@ export function drawContent(
   }
 
   ctx.restore();
+
+  // 项目级里程碑画在任务层之上：它是「整张图的路标」，不该被任何一条任务
+  // 的条子盖住。滚动时跟着内容层一起走，因为它钉在日期上而不是屏幕上
+  drawMilestones(ctx, vp, theme, milestones);
+}
+
+/**
+ * 项目级里程碑：贯穿内容区的竖虚线 + 顶部的菱形与名称。
+ *
+ * 为什么不画一条整宽的横带：
+ * 内容区的第一行任务从 `AXIS_HEIGHT` 就开始了，一条 26px 的不透明横带会把
+ * 第一行条子遮掉大半 —— 而第一行往往是这个项目最该先看到的活。所以这里
+ * **不铺底色**：只有一条很淡的竖虚线标出「这一天」，加一个 12px 的菱形和
+ * 一小块半透明药丸托住文字。遮挡被压到最小，条子本身的颜色一帧都不被压暗。
+ *
+ * 竖线画满整个内容区而不是只露一截：用户滚到第 40 行时，仍然知道
+ * 「这一列的右边就是那次验收」—— 里程碑是路标，不该只在顶部生效。
+ *
+ * 名称只画在菱形右侧；放不下就截断，完整内容在里程碑视图里。同一屏内
+ * 多个节点挨得太近时按 x 排序后跳过重叠的标签，只留菱形和竖线 ——
+ * 标签糊成一团等于什么都没写。
+ */
+function drawMilestones(
+  ctx: CanvasRenderingContext2D,
+  vp: Viewport,
+  theme: Theme,
+  milestones: GanttMilestone[],
+) {
+  if (milestones.length === 0) return;
+
+  const MARKER_Y = AXIS_HEIGHT + 11;
+  const bodyBottom = vp.height;
+
+  const sorted = [...milestones].sort((a, b) => a.day - b.day);
+  let lastLabelRight = -Infinity;
+
+  ctx.save();
+
+  for (const m of sorted) {
+    // 菱形对准这一天格子的中线 —— 和任务条一样，「这一天」是整格
+    const cx = vp.xOf(m.day) + vp.pxPerDay / 2;
+    if (cx < -40 || cx > vp.width + 40) continue;
+
+    // —— 贯穿内容区的竖虚线 ——
+    // 25% 透明度：压在任务条上也能看出「这是标记，不是数据」
+    ctx.strokeStyle = m.color;
+    ctx.globalAlpha = 0.25;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 4]);
+    ctx.beginPath();
+    ctx.moveTo(cx, MARKER_Y + 6);
+    ctx.lineTo(cx, bodyBottom);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+
+    // —— 菱形 ——
+    const r = 5;
+    ctx.save();
+    ctx.translate(cx, MARKER_Y);
+    ctx.rotate(Math.PI / 4);
+    ctx.fillStyle = m.color;
+    // 用 surface 描一圈：条子可能是任何颜色，没有这圈衬底菱形会消失在
+    // 同色系条子里（受阻斜纹那儿用的是同一条思路）
+    ctx.strokeStyle = theme.surface;
+    ctx.lineWidth = 2;
+    roundRect(ctx, -r, -r, r * 2, r * 2, 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+
+    // —— 名称 ——
+    const textX = cx + r + 6;
+    const maxW = vp.width - textX - 8;
+    // 和上一个标签叠了就不画（菱形和竖线还在，位置信息没丢）
+    if (textX < lastLabelRight + 8 || maxW < 28) continue;
+
+    ctx.font = `600 11px ${FONT_STACK}`;
+    const text = fitText(ctx, m.name, maxW - 12);
+    const tw = ctx.measureText(text).width;
+
+    // 药丸底：只托住这一小段文字，不是整条带子
+    ctx.fillStyle = theme.surface;
+    ctx.globalAlpha = 0.86;
+    roundRect(ctx, textX - 5, MARKER_Y - 8, tw + 10, 16, 8);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = m.color;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, textX, MARKER_Y);
+    lastLabelRight = textX + tw;
+  }
+
+  ctx.restore();
+}
+
+/** 截断到 maxW 以内，末位用省略号 */
+function fitText(ctx: CanvasRenderingContext2D, text: string, maxW: number): string {
+  if (ctx.measureText(text).width <= maxW) return text;
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (ctx.measureText(`${text.slice(0, mid)}…`).width <= maxW) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo > 0 ? `${text.slice(0, lo)}…` : "";
 }
 
 function drawBar(

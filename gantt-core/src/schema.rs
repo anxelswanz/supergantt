@@ -26,6 +26,7 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/011_item_kinds.sql"),
     include_str!("../migrations/012_risk_priority.sql"),
     include_str!("../migrations/013_ai_reviews.sql"),
+    include_str!("../migrations/014_milestones.sql"),
 ];
 
 /// 打开（必要时创建）数据库，跑完迁移再自愈一遍。
@@ -281,20 +282,23 @@ mod tests {
 
     /// 013 要替「存过视图开关」的老用户把新视图打开，而且只打开一次：
     /// 没存过的不动（走默认全开），已经有的不重复加，坏掉的 JSON 不碰。
+    ///
+    /// `target` 指向 013 那一条 —— 不是「最后一条」：后面还会继续加迁移，
+    /// 写成 `len() - 1` 的话下一次加迁移就把这条测试悄悄挪到了别的内容上。
     #[test]
     fn ai_review_view_is_enabled_for_existing_users_once() {
-        let before_013 = MIGRATIONS.len() - 1;
+        let target = MIGRATIONS.len() - 2;
         let run = |saved: Option<&str>| -> Option<String> {
             let conn = Connection::open_in_memory().unwrap();
             conn.pragma_update(None, "foreign_keys", "ON").unwrap();
-            for sql in &MIGRATIONS[..before_013] {
+            for sql in &MIGRATIONS[..target] {
                 conn.execute_batch(sql).unwrap();
             }
             if let Some(v) = saved {
                 conn.execute("INSERT INTO settings (key, value) VALUES ('enabled_views', ?1)", [v])
                     .unwrap();
             }
-            conn.execute_batch(MIGRATIONS[before_013]).unwrap();
+            conn.execute_batch(MIGRATIONS[target]).unwrap();
             conn.query_row("SELECT value FROM settings WHERE key = 'enabled_views'", [], |r| r.get(0))
                 .ok()
         };
@@ -310,6 +314,102 @@ mod tests {
             "已经有了就不重复加"
         );
         assert_eq!(run(Some("坏的")).as_deref(), Some("坏的"), "读不懂的值原样留着");
+    }
+
+    /// 014 同理替老用户打开 milestone 视图。和 013 共用同一条 UPDATE 模板，
+    /// 所以测一遍「没存过的不动 / 已有的补上 / 已有的不重复 / 坏 JSON 不碰」就够。
+    #[test]
+    fn milestone_view_is_enabled_for_existing_users_once() {
+        let target = MIGRATIONS.len() - 1;
+        let run = |saved: Option<&str>| -> Option<String> {
+            let conn = Connection::open_in_memory().unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+            for sql in &MIGRATIONS[..target] {
+                conn.execute_batch(sql).unwrap();
+            }
+            if let Some(v) = saved {
+                conn.execute("INSERT INTO settings (key, value) VALUES ('enabled_views', ?1)", [v])
+                    .unwrap();
+            }
+            conn.execute_batch(MIGRATIONS[target]).unwrap();
+            conn.query_row("SELECT value FROM settings WHERE key = 'enabled_views'", [], |r| r.get(0))
+                .ok()
+        };
+
+        assert_eq!(run(None), None, "没存过这一项的用户不该被写一行");
+        assert_eq!(
+            run(Some(r#"["gantt","review"]"#)).as_deref(),
+            Some(r#"["gantt","review","milestone"]"#)
+        );
+        assert_eq!(
+            run(Some(r#"["gantt","milestone"]"#)).as_deref(),
+            Some(r#"["gantt","milestone"]"#),
+            "已经有了就不重复加"
+        );
+        assert_eq!(run(Some("坏的")).as_deref(), Some("坏的"), "读不懂的值原样留着");
+    }
+
+    /// milestones / milestone_tasks 的结构和级联。
+    #[test]
+    fn milestones_cascade_with_project_and_links() {
+        let conn = mem();
+        conn.execute(
+            "INSERT INTO projects (id, name, created_at, updated_at) VALUES (1, 'A', '0', '0')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, project_id, name, start_date, end_date, progress, priority,
+                               sort_order, blocked, created_at, updated_at)
+             VALUES (10, 1, 't', '2024-01-01', '2024-01-02', 0, 2, 0, '[]', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO milestones (project_id, name, date, color, description, sort_order,
+                                     created_at, updated_at)
+             VALUES (1, 'M1', '2024-01-15', '#f59e0b', '', 0, 0, 0)",
+            [],
+        )
+        .unwrap();
+        let mid: i64 = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO milestone_tasks (milestone_id, task_id) VALUES (?1, 10)",
+            [mid],
+        )
+        .unwrap();
+
+        // 关联能读回来
+        let linked: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM milestone_tasks WHERE milestone_id = ?1",
+                [mid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(linked, 1);
+
+        // 删任务清关联，里程碑留着
+        conn.execute("DELETE FROM tasks WHERE id = 10", []).unwrap();
+        let left: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM milestone_tasks WHERE milestone_id = ?1",
+                [mid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0, "删任务应该级联清掉关联");
+        let ms: i64 = conn
+            .query_row("SELECT COUNT(*) FROM milestones WHERE id = ?1", [mid], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ms, 1, "里程碑本身不该被影响");
+
+        // 删项目连里程碑一起带走
+        conn.execute("DELETE FROM projects WHERE id = 1", []).unwrap();
+        let gone: i64 = conn
+            .query_row("SELECT COUNT(*) FROM milestones WHERE id = ?1", [mid], |r| r.get(0))
+            .unwrap();
+        assert_eq!(gone, 0, "删项目应该级联清掉里程碑");
     }
 
     /// 复盘跟着项目走；阶段只认那六个值。

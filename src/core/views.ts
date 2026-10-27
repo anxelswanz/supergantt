@@ -32,7 +32,14 @@ export type AppView = string;
  * 只有「确实只对内置视图有意义」的地方用它 —— 比如状态栏的 HintsFor，
  * 插件视图该显示什么提示是插件自己的事，宿主猜不出来。
  */
-export type BuiltinView = "gantt" | "board" | "timeline" | "review" | "ai-review" | "items";
+export type BuiltinView =
+  | "gantt"
+  | "board"
+  | "timeline"
+  | "review"
+  | "ai-review"
+  | "items"
+  | "milestone";
 
 export interface ViewMeta {
   key: BuiltinView;
@@ -55,6 +62,7 @@ export const APP_VIEWS: ViewMeta[] = [
   { key: "review", label: "复盘", hint: "计划与实际差在哪、为什么、丢了多少天" },
   { key: "ai-review", label: "AI 复盘", hint: "Claude 问十道题，写出根因分析和可沉淀的 SOP、避坑清单" },
   { key: "items", label: "事项", hint: "还没成为计划的那些：代办、问题、风险、阻碍" },
+  { key: "milestone", label: "里程碑", hint: "项目关键节点：设定、关联任务、在甘特图上标记" },
 ];
 
 /* ------------------------------------------------------------------ */
@@ -71,7 +79,14 @@ export const APP_VIEWS: ViewMeta[] = [
 export const PERMANENT_VIEW: BuiltinView = "gantt";
 
 /** 可以关掉的那几个。顺序和 APP_VIEWS 一致，设置界面照着排 */
-export const OPTIONAL_VIEWS: BuiltinView[] = ["board", "timeline", "review", "ai-review", "items"];
+export const OPTIONAL_VIEWS: BuiltinView[] = [
+  "board",
+  "timeline",
+  "review",
+  "ai-review",
+  "items",
+  "milestone",
+];
 
 /**
  * 默认全开。
@@ -141,3 +156,64 @@ const VIEW_KEY_PATTERN = /^[a-z][a-z0-9.-]{0,63}$/;
 
 export const isViewKey = (v: unknown): v is AppView =>
   typeof v === "string" && VIEW_KEY_PATTERN.test(v);
+
+/* ------------------------------------------------------------------ */
+/* 顺序                                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 读 `settings.view_order` —— 用户手动拖出来的标签顺序。
+ *
+ * 存的是**完整的 key 列表**（含插件视图），而不只是内置的那几个：
+ * 用户把一个插件视图拖到看板前面，下次打开它还该在那。
+ * 读不懂一律返回空数组 = 「没排过」，走默认顺序。
+ */
+export function parseViewOrder(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(isViewKey);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 按手动顺序重排一份视图清单。
+ *
+ * 规则：
+ *   · 排过的 key 按 `order` 里的次序在前
+ *   · 没出现在 `order` 里的（新装的插件、新加的内置视图）保持原有相对顺序，
+ *     接在后面 —— 新东西不该突然插到用户排好的队伍中间
+ *   · `order` 里有、清单里已经没有的（插件被删了）直接忽略
+ *
+ * 纯函数，泛型只要求有 `key` —— Workspace 传 ViewEntry，单测传字面量。
+ */
+export function applyViewOrder<T extends { key: string }>(views: T[], order: string[]): T[] {
+  if (order.length === 0) return views;
+  const rank = new Map(order.map((k, i) => [k, i]));
+  const ranked = views.filter((v) => rank.has(v.key));
+  const rest = views.filter((v) => !rank.has(v.key));
+  ranked.sort((a, b) => rank.get(a.key)! - rank.get(b.key)!);
+  return [...ranked, ...rest];
+}
+
+/**
+ * 把 `from` 挪到 `to` 的前面或后面，返回新的完整 key 列表。
+ * from === to 或任一不在清单里时原样返回。
+ */
+export function moveView(
+  keys: string[],
+  from: string,
+  to: string,
+  place: "before" | "after",
+): string[] {
+  if (from === to) return keys;
+  const fromIndex = keys.indexOf(from);
+  if (fromIndex < 0 || !keys.includes(to)) return keys;
+  const next = keys.filter((k) => k !== from);
+  const target = next.indexOf(to);
+  next.splice(place === "before" ? target : target + 1, 0, from);
+  return next;
+}

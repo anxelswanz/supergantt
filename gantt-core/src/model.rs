@@ -269,3 +269,27 @@ pub struct AiReview {
     pub created_at: i64,
     pub updated_at: i64,
 }
+
+/**
+ * 一个用户自设的里程碑，见 migrations/014_milestones.sql。
+ *
+ * 和 `TaskRow.milestone` 不是一回事：那个是「这条任务本身是个节点」，
+ * 依附在任务上；这个能脱离任务存在、能挂多条任务、有自己的名称和说明。
+ */
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Milestone {
+    pub id: i64,
+    pub project_id: i64,
+    pub name: String,
+    /// ISO 'YYYY-MM-DD'
+    pub date: String,
+    pub color: String,
+    pub description: String,
+    pub sort_order: f64,
+    /// 关联的任务 id。空数组 = 没关联任何任务
+    pub task_ids: Vec<i64>,
+    /// Unix 秒
+    pub created_at: i64,
+    pub updated_at: i64,
+}

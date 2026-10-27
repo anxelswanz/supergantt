@@ -1,0 +1,66 @@
+Gantt 打包命令
+========================================
+
+打包前准备
+----------------------------------------
+1. 确认 Node 依赖已装：
+   npm install
+
+2. 确认 Rust / Cargo 可用（Tauri 需要）：
+   cargo --version
+
+3. 干净打包前先拉最新代码：
+   git pull
+
+
+打包（生成 .exe 安装包）
+----------------------------------------
+在项目根目录执行：
+
+   npm run tauri build
+
+产物位置：
+   src-tauri\target\release\bundle\nsis\    Gantt_0.1.0_x64-setup.exe   （NSIS 安装包）
+   src-tauri\target\release\bundle\msi\     Gantt_0.1.0_x64_en-US.msi   （MSI 安装包）
+   src-tauri\target\release\gantt.exe                                    （裸 exe，可直接运行）
+
+说明：
+   · tauri.conf.json 里 "targets": "all"，所以 NSIS 和 MSI 两种都会出
+   · 首次 release 打包要完整编译 Rust，约 5～15 分钟
+   · 之后改前端（src/）只需重跑，Rust 部分会走缓存，快很多
+
+
+只想要一个能双击运行的 exe（不打安装包）
+----------------------------------------
+   npm run tauri build -- --no-bundle
+
+产物：
+   src-tauri\target\release\gantt.exe
+
+
+打包开发版（带调试信息，快）
+----------------------------------------
+   npm run tauri build -- --debug
+
+
+打包完成后拷到桌面
+----------------------------------------
+   copy "src-tauri\target\release\bundle\nsis\Gantt_0.1.0_x64-setup.exe" "%USERPROFILE%\Desktop\"
+
+
+常见问题
+----------------------------------------
+· 报 "beforeBuildCommand" 失败：前端类型检查没过。先单独跑
+     npm run build
+  看 tsc 的报错。
+
+· 报 linker 错误 / 找不到 WebView2：Windows 上需要 WebView2 Runtime
+  （Win11 自带）。装一下：
+     winget install Microsoft.EdgeWebView2Runtime
+
+· 报端口 1420 被占：关掉还在跑的 dev 窗口（npm run tauri dev）再打。
+
+
+数据目录（运行时，不是打包产物）
+----------------------------------------
+   %APPDATA%\com.ronghuizhong.gantt\gantt.db

@@ -16,13 +16,14 @@ import { today } from "../gantt/time";
 import { useAppStore } from "../store/useAppStore";
 import { isMod } from "../core/keys";
 import { canEdit, VIEW_LABELS, type ViewMode } from "../core/viewMode";
-import { APP_VIEWS, type BuiltinView } from "../core/views";
+import { APP_VIEWS, applyViewOrder, moveView, type BuiltinView } from "../core/views";
 import { useViews, ViewRenderer, type ViewEntry } from "../plugins/usePlugins";
 import { BoardView } from "./BoardView";
 import { TimelineView } from "./TimelineView";
 import { ReviewView } from "./ReviewView";
 import { AiReviewView } from "./AiReviewView";
 import { ItemsView } from "./ItemsView";
+import { MilestoneView } from "./MilestoneView";
 import { QuickNote } from "./QuickNote";
 import { api } from "../db/api";
 import { Settings } from "./Settings";
@@ -78,6 +79,7 @@ const BUILTIN_BODIES: Record<string, ComponentType> = {
   review: ReviewView,
   "ai-review": AiReviewView,
   items: ItemsView,
+  milestone: MilestoneView,
 };
 
 /**
@@ -118,7 +120,16 @@ export function Workspace() {
   // memo 是必须的，不是优化：useViews 把它写进了依赖（见那里的注释），
   // 传一个就地构造的字面量会让视图清单每帧重建
   const builtin = useMemo(() => builtinViews(enabledViews), [enabledViews]);
-  const views = useViews(builtin);
+  const merged = useViews(builtin);
+  const viewOrder = useAppStore((s) => s.viewOrder);
+
+  /**
+   * 用户拖出来的标签顺序。排序发生在合并之后 —— 它要能管到插件视图。
+   *
+   * ⌘1–⌘9 的编号跟着这份清单走：用户把「事项」拖到第一位，⌘1 就该是
+   * 事项。快捷键和标签的顺序不一致，是最容易让人按错的那类不一致。
+   */
+  const views = useMemo(() => applyViewOrder(merged, viewOrder), [merged, viewOrder]);
 
   /**
    * 真正要渲染的那个视图。
@@ -134,6 +145,22 @@ export function Workspace() {
   const active = views.find((v) => v.key === activeView) ?? views[0];
 
   const [scrollY, setScrollY] = useState(0);
+
+  /**
+   * 顶部标签的拖拽排序。
+   *
+   * 指针事件而不是 HTML5 draggable：Tauri 在 Windows 上接管了窗口的拖放，
+   * HTML5 的那套在那里整个失效（和事项页、看板卡片同一条理由）。
+   *
+   * 松手之后浏览器还会补发一次 click —— 不挡住的话，拖完顺序的同时视图
+   * 也被切走了，用户会以为自己误触了。`consumeJustDragged` 只吃掉紧跟着的
+   * 那一次。
+   */
+  const tabDrag = useTabDrag((from, to, place) => {
+    const keys = views.map((v) => v.key);
+    const next = moveView(keys, from, to, place);
+    if (next !== keys) useAppStore.getState().setViewOrder(next);
+  });
   const [preset, setPreset] = useState<ZoomPreset>("week");
   const [height, setHeight] = useState(0);
   const [gridWidth, setGridWidth] = useState(DEFAULT_GRID_WIDTH);
@@ -384,18 +411,32 @@ export function Workspace() {
         <div className="ml-1 flex items-center gap-1 rounded-full bg-[var(--surface-alt)] p-1">
           {views.map((v, i) => (
             <Fragment key={v.key}>
-              {i === enabledViews.length && views.length > enabledViews.length && (
-                <span className="mx-0.5 h-3 w-px bg-[var(--rule)]" />
-              )}
+              {/* 插件的分界点跟着清单走，不写死在内置视图的个数上 ——
+                  用户可以把插件视图拖到内置视图前面，那时这条分隔线也该跟着挪 */}
+              {i > 0 &&
+                v.pluginId !== "builtin" &&
+                views[i - 1]?.pluginId === "builtin" && (
+                  <span className="mx-0.5 h-3 w-px bg-[var(--rule)]" />
+                )}
               <button
-                onClick={() => setActiveView(v.key)}
+                ref={tabDrag.tabRef(v.key)}
+                onPointerDown={(e) => tabDrag.start(v.key, e)}
+                onClick={() => {
+                  // 拖完松手会再触发一次 click，别在松手时顺手切了视图
+                  if (tabDrag.consumeJustDragged()) return;
+                  setActiveView(v.key);
+                }}
                 title={
                   // 超出 ⌘9 的视图没有快捷键，别在提示里写一个按不出来的键
                   i < VIEW_HOTKEY_MAX
-                    ? `${v.hint}　⌘${i + 1}`
-                    : v.hint
+                    ? `${v.hint}　⌘${i + 1}　（拖动可调整顺序）`
+                    : `${v.hint}　（拖动可调整顺序）`
                 }
-                className="rounded-full px-3 py-1 text-xs font-medium transition-colors"
+                className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                  tabDrag.over?.key === v.key
+                    ? "outline outline-1 outline-offset-1 outline-[var(--accent)]"
+                    : ""
+                } ${tabDrag.dragKey === v.key ? "opacity-50" : ""}`}
                 style={
                   active.key === v.key
                     ? { background: accent, color: "#fff" }
@@ -657,6 +698,14 @@ function HintsFor({ view, viewMode }: { view: ViewEntry; viewMode: ViewMode }) {
           </span>
         </>
       );
+    case "milestone":
+      return (
+        <>
+          <span>点名称编辑</span>
+          <span>拖 ⋮⋮ 调整顺序</span>
+          <span className="ml-auto">设好日期的里程碑会画在甘特图顶部</span>
+        </>
+      );
     default:
       // 插件视图：宿主猜不出它的快捷键，就显示它自己写的那句提示，
       // 并标明它来自插件 —— 出了问题用户要知道该去找谁
@@ -773,3 +822,114 @@ function NewTaskButton({ selectedId }: { selectedId: number | null }) {
   );
 }
 
+
+/* ------------------------------------------------------------------ */
+/* 标签拖拽排序                                                        */
+/* ------------------------------------------------------------------ */
+
+/** 起手阈值，和事项页的行拖拽一致 —— 手抖不算拖 */
+const TAB_DRAG_THRESHOLD = 4;
+
+/**
+ * 顶部视图标签的拖拽排序。
+ *
+ * 为什么自己写而不是引一个库：这里要的只有「按住、横向挪、松手落在哪两个
+ * 标签之间」，而库会带进一套 DOM 结构和 CSS，还可能和现有 tabular 布局打架。
+ * 三个标签的状态、二十行指针事件，比一个新依赖便宜。
+ *
+ * 指针事件而不是 HTML5 draggable：Tauri 在 Windows 上接管了窗口拖放，
+ * HTML5 那套在那里失效（和事项页、看板卡片同一条理由）。
+ */
+function useTabDrag(onDrop: (from: string, to: string, place: "before" | "after") => void) {
+  const tabs = useRef(new Map<string, HTMLElement>());
+  const dropRef = useRef(onDrop);
+  dropRef.current = onDrop;
+  const stopRef = useRef<(() => void) | null>(null);
+  /** 刚拖完的时间戳；0 = 没有。用时间而不是 setTimeout 清零 ——
+   *  pointerup 和 click 谁先到在合成事件里没有保证 */
+  const justDragged = useRef(0);
+
+  const [dragKey, setDragKey] = useState<string | null>(null);
+  const [over, setOver] = useState<{ key: string; place: "before" | "after" } | null>(null);
+
+  // 拖到一半视图被切走：别把监听器留在 window 上
+  useEffect(() => () => stopRef.current?.(), []);
+
+  const tabRef = (key: string) => (el: HTMLElement | null) => {
+    if (el) tabs.current.set(key, el);
+    else tabs.current.delete(key);
+  };
+
+  /**
+   * 只按横轴判落点。
+   *
+   * 标签是一行排开的，纵轴没有意义 —— 用 y 判断会把「拖到稍高一点的按钮上」
+   * 算成没命中。用 x 的中点决定插在前面还是后面。
+   */
+  const targetAt = (x: number, self: string) => {
+    for (const [key, el] of tabs.current) {
+      if (key === self) continue;
+      const box = el.getBoundingClientRect();
+      if (x < box.left || x > box.right) continue;
+      return {
+        key,
+        place: (x < box.left + box.width / 2 ? "before" : "after") as "before" | "after",
+      };
+    }
+    return null;
+  };
+
+  const start = (key: string, e: React.PointerEvent<HTMLElement>) => {
+    if (e.button !== 0) return;
+    // **不能 preventDefault**：它会掐掉随后的 click，点标签就切不了视图了。
+    // 防选中文字交给 CSS（按钮上本来就不会选中一整片文本）
+    stopRef.current?.();
+    justDragged.current = 0;
+
+    const origin = { x: e.clientX, y: e.clientY };
+    let active = false;
+    let target: { key: string; place: "before" | "after" } | null = null;
+
+    const move = (ev: PointerEvent) => {
+      if (!active) {
+        if (Math.hypot(ev.clientX - origin.x, ev.clientY - origin.y) < TAB_DRAG_THRESHOLD) return;
+        active = true;
+        setDragKey(key);
+      }
+      target = targetAt(ev.clientX, key);
+      setOver(target);
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", stop);
+      stopRef.current = null;
+      setDragKey(null);
+      setOver(null);
+    };
+    const up = () => {
+      const t = active ? target : null;
+      if (active) {
+        // 松手后会补发 click，标一下让 onClick 跳过这一次
+        justDragged.current = Date.now();
+      }
+      stop();
+      if (t) dropRef.current(key, t.key, t.place);
+    };
+
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", stop);
+    stopRef.current = stop;
+  };
+
+  /** 300ms 内算「刚拖完」—— 足够覆盖一次 click 的补发，又不会误伤下一次真点击 */
+  const consumeJustDragged = () => {
+    if (!justDragged.current) return false;
+    const fresh = Date.now() - justDragged.current < 300;
+    justDragged.current = 0;
+    return fresh;
+  };
+
+  return { dragKey, over, tabRef, start, consumeJustDragged };
+}

@@ -37,13 +37,14 @@ import {
   DEFAULT_ENABLED,
   isViewKey,
   parseEnabledViews,
+  parseViewOrder,
   serializeEnabledViews,
   toggleView,
   type AppView,
   type BuiltinView,
 } from "../core/views";
 import { BUILTIN_KINDS, blockerRef, parseBlockerRef, parseItemOrder } from "../core/items";
-import type { DailyNote, ItemKind, ItemNote, Risk } from "../db/api";
+import type { DailyNote, ItemKind, ItemNote, Risk, Milestone } from "../db/api";
 
 /**
  * 一条待写入的逐日记录。
@@ -133,6 +134,15 @@ interface AppState {
   enabledViews: BuiltinView[];
 
   /**
+   * 顶部标签的手动顺序（完整 key 列表，含插件视图）。
+   *
+   * 空数组 = 没排过，走 core/views.ts 的默认顺序。和 enabled_views 一样是
+   * **全局视图偏好**，存 settings 表、不进撤销栈、不随项目走：用户是在
+   * 「这个软件怎么用」的层面上排它，不是在排某个项目的甘特。
+   */
+  viewOrder: string[];
+
+  /**
    * 计划 / 实施。切的是「读哪一组日期」，不是换一张表。
    * 只对甘特视图有意义 —— 另外三个视图各自有固定的数据归属。
    */
@@ -210,6 +220,14 @@ interface AppState {
    * 不是哪个实体的属性。按项目存在 settings 表里（ITEM_ORDER_KEY）。
    */
   itemOrder: string[];
+
+  /**
+   * 当前项目的全部里程碑，里程碑视图和甘特图的数据源。
+   *
+   * 和事项、风险一样**即写即存、不进命令栈** —— ⌘Z 该撤销的是刚才那次
+   * 拖拽改期，而不是把你刚建的一个项目节点悄悄抹掉。库层已按手动顺序排好。
+   */
+  milestones: Milestone[];
 
   /**
    * 事项类型清单。**全局**，不随项目走（migrations/011_item_kinds.sql）。
@@ -306,6 +324,8 @@ interface AppState {
   setActiveView: (view: AppView) => void;
   /** 开关一个内置视图。甘特关不掉（core/views.toggleView 拦住） */
   setViewEnabled: (view: BuiltinView, on: boolean) => void;
+  /** 手动排标签顺序；传空数组 = 恢复默认顺序 */
+  setViewOrder: (order: string[]) => void;
 
   /* ---------------- 事项 ---------------- */
 
@@ -370,6 +390,33 @@ interface AppState {
   removeItemKind: (key: string) => Promise<number>;
   /** 只改一条风险的优先级 —— 事项视图里点一下标签就生效 */
   setRiskPriority: (id: number, priority: 0 | 1 | 2 | 3 | null) => Promise<void>;
+
+  /* ---------------- 里程碑 ---------------- */
+
+  /** 重新拉一遍当前项目的里程碑 */
+  loadMilestones: () => Promise<void>;
+  /** 新建。返回新建的那条；失败返回 null */
+  addMilestone: (
+    name: string,
+    date: string,
+    color: string,
+    description: string,
+    taskIds: number[],
+  ) => Promise<Milestone | null>;
+  /** 改字段。不碰排序 */
+  patchMilestone: (
+    id: number,
+    changes: {
+      name?: string;
+      date?: string;
+      color?: string;
+      description?: string;
+      taskIds?: number[];
+    },
+  ) => Promise<void>;
+  /** 拖拽改顺序。ids 是完整的目标顺序 */
+  reorderMilestones: (ids: number[]) => Promise<void>;
+  removeMilestone: (id: number) => Promise<void>;
   setViewMode: (mode: ViewMode) => void;
   setCompareOn: (on: boolean) => void;
   setActualSpan: (taskId: number, span: Span | null, label?: string) => void;
@@ -414,6 +461,7 @@ const ROW_HEIGHT_KEY = "row_height";
 const VIEW_MODE_KEY = "view_mode";
 const ACTIVE_VIEW_KEY = "active_view";
 const ENABLED_VIEWS_KEY = "enabled_views";
+const VIEW_ORDER_KEY = "view_order";
 /** 事项视图的手动顺序，按项目分开存 */
 const itemOrderKey = (projectId: number) => `items_order.${projectId}`;
 
@@ -522,6 +570,7 @@ export const useAppStore = create<AppState>((set, get) => {
     systemDark: readSystemDark(),
     activeView: "gantt",
     enabledViews: [...DEFAULT_ENABLED],
+    viewOrder: [],
     viewMode: "plan",
     compareOn: false,
     people: [],
@@ -533,6 +582,7 @@ export const useAppStore = create<AppState>((set, get) => {
     dailyNotes: [],
     itemNotes: [],
     itemOrder: [],
+    milestones: [],
     itemKinds: BUILTIN_KINDS,
     quickNoteOpen: false,
     pendingSortNoteId: null,
@@ -543,12 +593,13 @@ export const useAppStore = create<AppState>((set, get) => {
     saveError: null,
 
     async loadSettings() {
-      const [color, row, view, active, enabled] = await Promise.all([
+      const [color, row, view, active, enabled, order] = await Promise.all([
         api.getSetting(COLOR_BY_KEY).catch(() => null),
         api.getSetting(ROW_HEIGHT_KEY).catch(() => null),
         api.getSetting(VIEW_MODE_KEY).catch(() => null),
         api.getSetting(ACTIVE_VIEW_KEY).catch(() => null),
         api.getSetting(ENABLED_VIEWS_KEY).catch(() => null),
+        api.getSetting(VIEW_ORDER_KEY).catch(() => null),
       ]);
       if (color && ["stage", "assignee", "priority", "none"].includes(color)) {
         set({ colorBy: color as ColorBy });
@@ -557,6 +608,7 @@ export const useAppStore = create<AppState>((set, get) => {
       if (view === "plan" || view === "actual") set({ viewMode: view });
       // 读不懂一律回退到「全开」，不是「全关」—— 见 views.parseEnabledViews
       set({ enabledViews: parseEnabledViews(enabled) });
+      set({ viewOrder: parseViewOrder(order) });
       // 只挡明显不合法的字符串。格式合法但插件已被删掉的那种 key 留给
       // Workspace 渲染时查注册表 —— 这里读设置的时候插件目录还没扫过。
       //
@@ -661,6 +713,16 @@ export const useAppStore = create<AppState>((set, get) => {
       if (!on && get().activeView === view) get().setActiveView("gantt");
     },
 
+    /**
+     * 手动排标签顺序。空数组 = 恢复默认，存进去的值也清掉 ——
+     * 这样以后新增内置视图时会自然接在用户排好的队伍末尾，
+     * 而不是被一份陈旧的完整清单挡在外面。
+     */
+    setViewOrder(order) {
+      set({ viewOrder: order });
+      void api.setSetting(VIEW_ORDER_KEY, order.length ? JSON.stringify(order) : "").catch(() => {});
+    },
+
     /* ---------------- 事项 ---------------- */
 
     setQuickNoteOpen(open) {
@@ -707,6 +769,85 @@ export const useAppStore = create<AppState>((set, get) => {
         if (Array.isArray(kinds) && kinds.length > 0) set({ itemKinds: kinds });
       } catch {
         set({ itemKinds: BUILTIN_KINDS });
+      }
+    },
+
+    /* ---------------- 里程碑 ---------------- */
+
+    async loadMilestones() {
+      const { project } = get();
+      if (!project) return set({ milestones: [] });
+      // 读不出来不该拦住整个应用 —— 视图和甘特图都显示成空。
+      // Array.isArray 是第二道防线：invoke 正常返回 null 时 catch 不会触发
+      // （测试桩、以及将来某条兼容路径都可能这样），而下游 GanttView 会
+      // 直接对结果 flatMap
+      const rows = await api.loadMilestones(project.id).catch(() => [] as Milestone[]);
+      set({ milestones: Array.isArray(rows) ? rows : [] });
+    },
+
+    async addMilestone(name, date, color, description, taskIds) {
+      const { project } = get();
+      if (!project) return null;
+      try {
+        const created = await api.addMilestone(
+          project.id,
+          name,
+          date,
+          color,
+          description,
+          taskIds,
+        );
+        set({ milestones: [...get().milestones, created] });
+        return created;
+      } catch {
+        // 库层拦下的原因（空名称、日期读不懂、跨项目任务）由视图弹出提示
+        return null;
+      }
+    },
+
+    async patchMilestone(id, changes) {
+      const current = get().milestones.find((m) => m.id === id);
+      if (!current) return;
+      const next = { ...current, ...changes };
+      try {
+        await api.updateMilestone(
+          id,
+          next.name,
+          next.date,
+          next.color,
+          next.description,
+          next.taskIds,
+        );
+        set({
+          milestones: get().milestones.map((m) => (m.id === id ? next : m)),
+        });
+      } catch {
+        // 改失败了以库为准重拉，避免界面停在一个没存下去的状态
+        await get().loadMilestones();
+      }
+    },
+
+    async reorderMilestones(ids) {
+      const { project } = get();
+      if (!project) return;
+      const byId = new Map(get().milestones.map((m) => [m.id, m]));
+      // 只认清单里确实有的 id，且按传入顺序重排
+      const ordered = ids.map((id) => byId.get(id)).filter((m): m is Milestone => !!m);
+      const rest = get().milestones.filter((m) => !ids.includes(m.id));
+      set({ milestones: [...ordered, ...rest] });
+      try {
+        await api.reorderMilestones(project.id, ids);
+      } catch {
+        await get().loadMilestones();
+      }
+    },
+
+    async removeMilestone(id) {
+      try {
+        await api.deleteMilestone(id);
+        set({ milestones: get().milestones.filter((m) => m.id !== id) });
+      } catch {
+        await get().loadMilestones();
       }
     },
 
@@ -1355,6 +1496,8 @@ export const useAppStore = create<AppState>((set, get) => {
       void get().refreshRisks();
       void get().loadDailyNotes();
       void get().loadItemNotes();
+      // 里程碑是项目数据，和任务一起打开；甘特图要拿它叠画节点
+      void get().loadMilestones();
       // 类型表是全局的，不随项目走 —— 但它要在事项视图第一次渲染之前到位，
       // 而「打开项目」是唯一能保证那之前发生的时机
       void get().loadItemKinds();
@@ -1398,6 +1541,7 @@ export const useAppStore = create<AppState>((set, get) => {
         dailyNotes: [],
         // 事项随项目走，类型清单不随 —— 后者是全局表，下次开项目不必再读一遍
         itemNotes: [],
+        milestones: [],
         quickNoteOpen: false,
         pendingSortNoteId: null,
         noteDraft: null,
