@@ -29,7 +29,8 @@
     "targets": "all",
     "resources": {
       "../plugins/daily-report/": "bundled-plugins/daily-report/",
-      "../plugins/feishu-sync/": "bundled-plugins/feishu-sync/"
+      "../plugins/feishu-sync/": "bundled-plugins/feishu-sync/",
+      "../plugins/fault-tree/": "bundled-plugins/fault-tree/"
     },
     "icon": [
       "icons/32x32.png",
