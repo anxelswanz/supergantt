@@ -13,15 +13,16 @@ import {
   attribution,
   byUrgency,
   deviations,
-  milestones,
+  milestoneMarks,
   summarize,
   type Deviation,
 } from "../core/review";
 import { resolve } from "../gantt/model";
-import { dayToIso } from "../gantt/time";
+import { dayToIso, today } from "../gantt/time";
 import { useAppStore } from "../store/useAppStore";
 import { api, type Person, type Risk } from "../db/api";
 import { Avatar } from "./Avatar";
+import { MilestoneTrack } from "./MilestoneTrack";
 
 const RISK_LABELS = ["高", "中", "低"];
 const RISK_COLORS = ["#f43f5e", "#f59e0b", "#64748b"];
@@ -63,7 +64,8 @@ export function ReviewView() {
   const summary = useMemo(() => summarize(tasks), [tasks]);
   const rows = useMemo(() => deviations(tasks).sort(byUrgency), [tasks]);
   const reasons = useMemo(() => attribution(tasks), [tasks]);
-  const marks = useMemo(() => milestones(tasks), [tasks]);
+  const todayDay = today();
+  const marks = useMemo(() => milestoneMarks(tasks, todayDay), [tasks, todayDay]);
 
   const openRisks = risks.filter((r) => !r.resolved);
   const maxReasonDays = Math.max(1, ...reasons.map((r) => r.days));
@@ -160,33 +162,13 @@ export function ReviewView() {
         </Section>
 
         {marks.length > 0 && (
-          <Section title="里程碑" hint="汇报现场真正被追问的就是这几个点">
-            <table className="w-full text-xs">
-              <thead className="text-[var(--text-dim)]">
-                <tr className="border-b border-[var(--rule)]">
-                  <Th className="text-left">节点</Th>
-                  <Th>计划</Th>
-                  <Th>实际</Th>
-                  <Th>偏差</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {marks.map((d) => (
-                  <tr
-                    key={d.task.id}
-                    onClick={() => openDetail(d.task.id)}
-                    className="cursor-pointer border-b border-[var(--rule)] last:border-0 hover:bg-[var(--row-hover)]"
-                  >
-                    <td className="py-2 text-[var(--text)]">{d.task.name || "未命名"}</td>
-                    <Td>{dayToIso(d.plan.startDay)}</Td>
-                    <Td>{d.actual ? dayToIso(d.actual.startDay) : "—"}</Td>
-                    <Td>
-                      <Delta days={d.startDelta} />
-                    </Td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <Section title="里程碑" hint="哪几个到了、到得准不准、哪个该到没到">
+            <MilestoneTrack
+              marks={marks}
+              today={todayDay}
+              people={people}
+              onOpen={openDetail}
+            />
           </Section>
         )}
 

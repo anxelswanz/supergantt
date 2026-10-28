@@ -189,3 +189,39 @@ export function milestones(tasks: ResolvedTask[]): Deviation[] {
     .filter((d) => d.task.milestone)
     .sort((a, b) => a.plan.startDay - b.plan.startDay);
 }
+
+/**
+ * 一个里程碑此刻的处境。
+ *
+ * 只看「计划 vs 实际」会漏掉最该被追问的那种：计划日已经过了、却还没达成 ——
+ * 它没有实施日期，偏差算出来是 0，在表里看起来和「准时」一样干净。
+ * 所以这里把今天拉进来，分成四种：
+ *
+ *   · `hit`      已达成，`delta` = 实际 − 计划（正数晚、负数早、0 准时）
+ *   · `undated`  进度已经 100%，但没填实施日期 —— 达成了，差多少说不清
+ *   · `overdue`  计划日已过、还没达成，`days` = 已经逾期几天
+ *   · `upcoming` 计划日还没到，`days` = 还有几天（0 = 就是今天）
+ */
+export type MilestoneState =
+  | { kind: "hit"; delta: number }
+  | { kind: "undated" }
+  | { kind: "overdue"; days: number }
+  | { kind: "upcoming"; days: number };
+
+export interface MilestoneMark extends Deviation {
+  state: MilestoneState;
+}
+
+export function milestoneMarks(tasks: ResolvedTask[], today: number): MilestoneMark[] {
+  return milestones(tasks).map((d) => {
+    const due = d.plan.startDay;
+    const state: MilestoneState = d.actual
+      ? { kind: "hit", delta: d.startDelta }
+      : d.task.progress >= 1
+        ? { kind: "undated" }
+        : due < today
+          ? { kind: "overdue", days: today - due }
+          : { kind: "upcoming", days: due - today };
+    return { ...d, state };
+  });
+}

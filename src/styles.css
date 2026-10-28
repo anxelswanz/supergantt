@@ -15,6 +15,7 @@
   --row-hover: rgba(15, 23, 42, 0.035);
   --row-stripe: rgba(15, 23, 42, 0.018);
   --accent: #6366f1;
+  --milestone: #f59e0b;
 
   color-scheme: light dark;
 }
@@ -36,6 +37,7 @@
   --row-hover: rgba(255, 255, 255, 0.05);
   --row-stripe: rgba(255, 255, 255, 0.022);
   --accent: #818cf8;
+  --milestone: #fbbf24;
 }
 
 html,

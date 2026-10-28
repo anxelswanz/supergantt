@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { attribution, blockedDaysOf, byUrgency, deviations, milestones, summarize } from "./review";
+import {
+  attribution,
+  blockedDaysOf,
+  byUrgency,
+  deviations,
+  milestoneMarks,
+  milestones,
+  summarize,
+} from "./review";
 import { resolve, type Task } from "../gantt/model";
 import type { BlockReason } from "./blocked";
 
@@ -150,5 +158,27 @@ describe("里程碑", () => {
       task(3, { milestone: true, startDay: 100, endDay: 100 }),
     ]);
     expect(milestones(tasks).map((d) => d.task.id)).toEqual([3, 1]);
+  });
+});
+
+describe("milestoneMarks", () => {
+  const TODAY = 120;
+  const tasks = resolve([
+    task(1, { milestone: true, startDay: 100, endDay: 100, actualStartDay: 103, actualEndDay: 103 }),
+    task(2, { milestone: true, startDay: 105, endDay: 105, progress: 1 }),
+    task(3, { milestone: true, startDay: 110, endDay: 110 }),
+    task(4, { milestone: true, startDay: 120, endDay: 120 }),
+    task(5, { milestone: true, startDay: 130, endDay: 130 }),
+  ]);
+  const states = () => milestoneMarks(tasks, TODAY).map((m) => m.state);
+
+  it("计划日过了还没达成的是逾期 —— 不能因为没有实施日期就显示成没偏差", () => {
+    expect(states()).toEqual([
+      { kind: "hit", delta: 3 },
+      { kind: "undated" },
+      { kind: "overdue", days: 10 },
+      { kind: "upcoming", days: 0 },
+      { kind: "upcoming", days: 10 },
+    ]);
   });
 });
