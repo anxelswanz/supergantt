@@ -133,8 +133,8 @@ export function RiskRow({
           // 附注不进撤销栈，所以删除靠二次确认兜底，而不是靠 ⌘Z
           className={`shrink-0 rounded px-1 text-[9px] transition-opacity ${
             confirming
-              ? "bg-rose-500 text-white opacity-100"
-              : "text-[var(--text-dim)] opacity-0 hover:text-rose-500 group-hover:opacity-100"
+              ? "bg-[var(--danger)] text-white opacity-100"
+              : "text-[var(--text-dim)] opacity-0 hover:text-[var(--danger)] group-hover:opacity-100"
           }`}
         >
           {confirming ? "确认" : "删除"}
@@ -193,8 +193,8 @@ export function RiskRow({
 /** 已关闭的风险：什么时候关的、怎么关的 */
 function Resolution({ risk }: { risk: Risk }) {
   return (
-    <div className="mt-1 rounded-md border-l-2 border-emerald-500/50 bg-emerald-500/5 py-0.5 pl-2 text-[10px] leading-relaxed">
-      <span className="font-medium text-emerald-600">
+    <div className="mt-1 rounded-md border-l-2 border-[var(--ok)]/50 bg-[var(--ok)]/5 py-0.5 pl-2 text-[10px] leading-relaxed">
+      <span className="font-medium text-[var(--ok)]">
         {risk.resolvedAt != null ? `${formatTime(risk.resolvedAt)} 关闭` : "已关闭"}
       </span>
       {/* 这一列是后加的（migrations/008），之前关掉的风险确实没有说明 ——

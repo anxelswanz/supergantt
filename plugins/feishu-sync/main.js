@@ -1,30 +1,15 @@
 /**
- * 飞书同步插件。
- *
- * 事项页里分拣好的事项 →「加入飞书同步」→ 在这个页面选一张飞书多维表格、
- * 勾选、点同步 → 后台起一个 `claude -p`，用插件附带的 gantt-feishu 技能
- * 读字段、按字段含义填写润色、逐条写入。
- *
- * 同一份队列也对 Claude Code 开放：`gantt feishu queue / mark-synced`
- * 读写的就是这里的 data/queue.json（格式说明见 gantt-core/src/feishu.rs）。
- * 用户自己开 Claude Code 说「用 gantt-feishu 把队列同步到 <链接>」，
- * 走的是同一个技能、同一份状态。
- *
- * 单文件、无 import：宿主从 Blob URL 加载插件（见 registry.ts 的
- * assertSelfContained）。React 用宿主给的 api.react。
+ * 飞书同步插件：选多维表格，后台起 `claude -p` 用 gantt-feishu 技能逐条写入。
+ * data/queue.json 和 `gantt feishu queue / mark-synced` 共用（格式见 feishu.rs）。
+ * 单文件无 import（宿主按 Blob URL 加载）；React 用 api.react。
  */
 
-/* ------------------------------------------------------------------ */
-/* 队列 —— 纯函数，单测直接 import                                       */
-/* ------------------------------------------------------------------ */
+/* ---------------- 队列 ---------------- */
 
 export const QUEUE_FILE = "queue.json";
 export const CONFIG_FILE = "config.json";
 
-/**
- * 判断「同步之后有没有改过」时比较的字段。
- * ⚠️ 和 gantt-core/src/feishu.rs 的 SNAPSHOT_FIELDS 必须一字不差。
- */
+/** 判断同步后是否改过。⚠️ 和 gantt-core/src/feishu.rs 的 SNAPSHOT_FIELDS 必须一字不差 */
 export const SNAPSHOT_FIELDS = [
   "title", "kind", "kindLabel", "priority", "personId", "personName", "taskId", "taskName", "day",
   "closed", "closedDay", "resolution", "riskLevel",
@@ -33,11 +18,8 @@ export const SNAPSHOT_FIELDS = [
 export const targetKey = (t) => `${t.baseToken}:${t.tableId}`;
 
 /**
- * 队列里认一条事项用的 key。
- *
- * 有 noteId 就用 `note:<id>`：同一条事项从「问题」改分拣成「风险」时，
- * 事项页的行 key 会从 note:3 变成 risk:7，但它还是那一条 —— 飞书上那条
- * 记录应该被更新，而不是再建一条。
+ * 有 noteId 就用 `note:<id>`：改分拣（问题→风险）时行 key 会变，
+ * 但仍是同一条，飞书上应更新原记录而不是再建。
  */
 export function entryKey(item) {
   return item.noteId != null ? `note:${item.noteId}` : item.key;
@@ -53,12 +35,12 @@ export function parseQueue(text) {
     const q = JSON.parse(text);
     if (q && Array.isArray(q.entries)) return q;
   } catch {
-    /* 坏文件当空的，不让整个页面打不开 */
+    /* 坏文件当空的，别让页面打不开 */
   }
   return emptyQueue();
 }
 
-/** 存进队列的快照：比较字段 + 识别用的几个字段 */
+/** 快照：比较字段 + 识别字段 */
 export function pickSnapshot(item) {
   const out = { key: item.key, source: item.source, noteId: item.noteId ?? null };
   for (const f of SNAPSHOT_FIELDS) out[f] = item[f] ?? null;
@@ -102,17 +84,14 @@ export function addEntry(queue, item, project, now) {
   };
 }
 
-/** 移出队列只动本地，飞书上已经写进去的记录不碰 */
+/** 只动本地，飞书上的记录不碰 */
 export function removeEntry(queue, key) {
   return { ...queue, entries: queue.entries.filter((e) => e.key !== key) };
 }
 
 /**
- * 用当前项目的事项清单刷新队列里的快照。
- *
- * 只碰 projectId 对得上的那些 —— 别的项目的事项此刻不在内存里，找不到
- * 不等于被删了。找不到的标 missing，不删：用户可能是误删了又撤销，
- * 而且飞书上那条记录还在，得让人看见。
+ * 只碰当前项目的 —— 别项目的事项不在内存里，找不到不等于删了。
+ * 找不到的标 missing 而不删：可能会撤销，且飞书上记录还在。
  */
 export function refreshSnapshots(queue, items, projectId) {
   const byKey = new Map(items.map((it) => [entryKey(it), it]));
@@ -133,15 +112,9 @@ export function refreshSnapshots(queue, items, projectId) {
   return { queue: changed ? { ...queue, entries } : queue, changed };
 }
 
-/* ------------------------------------------------------------------ */
-/* 解析 lark-cli 的输出 —— 也是纯函数                                    */
-/* ------------------------------------------------------------------ */
+/* ---------------- 解析 lark-cli 的输出 ---------------- */
 
-/**
- * 从用户粘贴的链接里认出多维表格。
- *   /base/<token>?table=tblXXX  → base
- *   /wiki/<token>               → wiki 节点，要再问一次它背后是不是多维表格
- */
+/** /base/<token> 直接认；/wiki/<token> 是知识库节点，还要再解析背后是不是多维表格 */
 export function parseBaseLink(text) {
   const s = String(text ?? "").trim();
   const base = /\/base\/([A-Za-z0-9]+)/.exec(s);
@@ -157,7 +130,7 @@ export function parseBaseLink(text) {
   return null;
 }
 
-/** 按 lark-cli 的约定读输出：`{ ok: false, error: { message, hint } }` 是失败 */
+/** lark-cli 约定：`{ ok: false, error: { message, hint } }` 为失败 */
 export function parseLark(stdout) {
   let j;
   try {
@@ -172,10 +145,7 @@ export function parseLark(stdout) {
   return { ok: true, data: j };
 }
 
-/**
- * 在一段 JSON 里找第一个「元素都满足 pred 的对象数组」。
- * lark-cli 不同命令的外壳不一样（有的包 data，有的不包），按形状找比按路径找稳。
- */
+/** lark-cli 各命令外壳不同（有的包 data），按形状找数组比按路径稳 */
 export function findArray(root, pred) {
   const queue = [root];
   while (queue.length) {
@@ -205,8 +175,8 @@ export function findKey(root, key) {
 const stripTags = (s) => String(s ?? "").replace(/<\/?[a-z]+>/gi, "");
 
 /**
- * drive +search 的结果。标题在 title_highlighted（带 <h> 高亮标签），
- * 链接、token、类型都在 result_meta 里 —— 和接口文档的示例不一样，按实际输出来。
+ * drive +search：标题在 title_highlighted（带 <h> 标签），链接/token/类型在
+ * result_meta —— 与接口文档示例不同，按实际输出来。
  */
 export function parseSearchResults(data) {
   return findArray(data, (x) => "title_highlighted" in x || "result_meta" in x || "title" in x).map((r) => {
@@ -238,22 +208,11 @@ export function parseUsers(data) {
   }));
 }
 
-/* ------------------------------------------------------------------ */
-/* 浏览树 —— 我的知识库（My Document Library）                          */
-/* ------------------------------------------------------------------ */
+/* ---------------- 浏览树 ---------------- */
 
 /**
- * 只浏览用户自己的「我的知识库」（wiki 的 my_library 空间）。
- *
- * 不列全部知识空间、也不列云空间：那些是团队的地方，几十个空间几千个节点，
- * 一层层翻下去比直接搜索还慢。自己常用的表放在自己的知识库里，别处的表用「搜索」。
- *
- * 树的一个节点：
- *   kind      "wiki" | "bitable"
- *   base      能选的多维表格 → { baseToken, baseName, url }；不能选为 null
- *   load      展开时调的那一步：{ spaceId, parent }；没有子节点为 null
- *
- * 只有 base 不为 null 的能点选。别的文档也留在树里 —— 用户要知道自己在哪个目录。
+ * 只浏览「我的知识库」（my_library）；团队空间节点太多，用搜索。
+ * 节点：base 非 null 才能选；load = { spaceId, parent }，无子节点为 null。
  */
 
 /** 我的知识库在 wiki 接口里的空间 id */
@@ -268,22 +227,17 @@ export function parseWikiNodes(data) {
       kind: isBase ? "bitable" : "wiki",
       label: n.title || "（无标题）",
       base: isBase ? { baseToken: n.obj_token, baseName: n.title || "", url: "" } : null,
-      // 知识库里任何节点都可能挂子节点，多维表格也一样
+      // 多维表格也可能挂子节点
       load: n.has_child ? { spaceId: n.space_id || MY_LIBRARY, parent: n.node_token } : null,
     };
   });
 }
 
-/* ------------------------------------------------------------------ */
-/* 后台 Agent                                                          */
-/* ------------------------------------------------------------------ */
+/* ---------------- 后台 Agent ---------------- */
 
 /**
- * claude -p 的工具白名单。
- *
- * **写飞书只有一条路：`gantt feishu write`。** 它只会新建、或更新这条事项自己
- * 当初建的那条记录；不删除、不能指定别的 record id、空值不写（见 gantt.rs 的
- * cmd_feishu_write）。lark-cli 只放行读命令 —— 读字段、读选项、列表、解析知识库链接。
+ * 写飞书只有 `gantt feishu write`：只新建或更新该事项自己建的记录，不删、空值不写。
+ * lark-cli 只放行读命令。
  */
 export const AGENT_TOOLS = [
   "Bash(gantt feishu queue:*)",
@@ -297,11 +251,7 @@ export const AGENT_TOOLS = [
   "Skill",
 ];
 
-/**
- * 明确拒绝的命令。白名单之外的在 -p 模式下本来就会被拒，但用户自己的
- * ~/.claude/settings.json 里如果放行过 `Bash(lark-cli:*)`，白名单就挡不住了 ——
- * deny 规则优先于任何 allow，所以删除和直写在这里再钉一次。
- */
+/** 用户 settings 若放行过 `Bash(lark-cli:*)`，白名单挡不住；deny 优先于 allow，再钉一次 */
 export const AGENT_DENY = [
   "Bash(lark-cli base +record-delete:*)",
   "Bash(lark-cli base +record-upsert:*)",
@@ -331,7 +281,7 @@ export function agentArgs() {
   ];
 }
 
-/** 提示词走 stdin：--allowedTools 是变长参数，放在命令行上会把提示词也吞进去 */
+/** 提示词走 stdin：--allowedTools 是变长参数，放命令行上会吞掉提示词 */
 export function buildSyncPrompt({ target, keys }) {
   return [
     "使用 gantt-feishu 技能，把 gantt 飞书同步队列里的事项写入飞书多维表格。",
@@ -349,7 +299,6 @@ export function buildSyncPrompt({ target, keys }) {
     .join("\n");
 }
 
-/** stream-json 的一行 → 界面上的若干条日志 */
 export function describeStreamLine(line) {
   let ev;
   try {
@@ -393,12 +342,10 @@ export function isToolResult(line) {
   return line.includes('"tool_result"');
 }
 
-/* ------------------------------------------------------------------ */
-/* 配置                                                                */
-/* ------------------------------------------------------------------ */
+/* ---------------- 配置 ---------------- */
 
 export function defaultConfig() {
-  // tableRules：<base>:<table> → 规则文本；ruleDocs：同一个 key → 显示用的表名
+  // tableRules / ruleDocs 的 key 都是 <base>:<table>；ruleDocs 存显示用的表名
   return { globalRules: "", tableRules: {}, ruleDocs: {}, people: {}, target: null };
 }
 
@@ -417,16 +364,14 @@ const STATUS = {
   failed: { label: "失败", color: "#f43f5e" },
 };
 
-/* ------------------------------------------------------------------ */
-/* 插件入口                                                            */
-/* ------------------------------------------------------------------ */
+/* ---------------- 插件入口 ---------------- */
 
 export function onload(api) {
   const React = api.react;
   const h = React.createElement;
   const { useEffect, useMemo, useRef, useState, useSyncExternalStore } = React;
 
-  /* ---------------- 共享状态：事项页的菜单/徽标和本页面共用 ---------------- */
+  /* ---------------- 共享状态 ---------------- */
 
   const state = { queue: emptyQueue(), config: defaultConfig(), version: 0 };
   const subs = new Set();
@@ -442,10 +387,8 @@ export function onload(api) {
   const useShared = () => useSyncExternalStore(subscribe, () => state.version);
 
   /**
-   * 所有写操作串成一条链：读最新文件 → 改 → 写回。
-   *
-   * 每次都先读一遍，是因为 gantt CLI（Claude 在用）会同时回写这个文件；
-   * 拿内存里那份旧的直接覆盖，就把它刚记下的同步结果抹掉了。
+   * 写操作串成一条链：读最新文件 → 改 → 写回。
+   * 必须先读：gantt CLI 会同时回写，用内存旧值覆盖会抹掉同步结果。
    */
   let chain = Promise.resolve();
   const mutateQueue = (fn) => {
@@ -478,7 +421,7 @@ export function onload(api) {
     notify();
   };
 
-  /** 事项改了就刷新队列里的快照 —— 「有变更」就是这么来的 */
+  /** 事项改了刷新快照，「有变更」由此而来 */
   let refreshTimer = null;
   const scheduleRefresh = () => {
     clearTimeout(refreshTimer);
@@ -561,10 +504,7 @@ export function onload(api) {
 
   /* ---------------- 浏览树的加载与缓存 ---------------- */
 
-  /**
-   * 展开过的节点的子节点。放在插件闭包里而不是组件 state 里：关掉选择器再打开，
-   * 已经展开过的目录不用再等一遍。右上角「刷新」清掉它。
-   */
+  /** 放插件闭包而非组件 state：关掉弹窗再打开不用重新加载 */
   const treeCache = new Map(); // id → { status: "loading" | "done" | "error", children, error }
   const treeSubs = new Set();
   const treeNotify = () => treeSubs.forEach((fn) => fn());
@@ -596,14 +536,11 @@ export function onload(api) {
 
   const KIND_ICON = { wiki: "▤", bitable: "▦" };
 
-  /**
-   * 树的连线前缀，和目录树命令一样：├ └ │。
-   * lasts[i] = 第 i 层祖先是不是它那一层的最后一个 —— 是的话那一列不画竖线。
-   */
+  /** lasts[i]：第 i 层祖先是否为该层最后一个，是则那一列不画竖线 */
   const guide = (lasts, isLast) =>
     lasts.map((last) => (last ? "  " : "│ ")).join("") + (isLast ? "└ " : "├ ");
 
-  /** 一层子节点。递归渲染：展开哪个，哪个才去加载 */
+  /** 递归渲染，展开哪个才加载哪个 */
   function TreeLevel({ id, load, lasts, expanded, toggle, onPick }) {
     const entry = treeCache.get(id);
     const prefix = lasts.map((last) => (last ? "  " : "│ ")).join("") + "  ";
@@ -616,7 +553,6 @@ export function onload(api) {
         "div",
         { className: "fs-stack fs-tree-err" },
         h("pre", { className: "fs-error" }, entry.error),
-        // loadNode 对出错的节点会重新加载
         h(Btn, { small: true, onClick: () => loadNode(id, load) }, "重试"),
       );
     }
@@ -646,7 +582,7 @@ export function onload(api) {
           h("span", { className: "fs-tree-guide" }, guide(lasts, isLast)),
           h("span", { className: "fs-tree-icon" }, KIND_ICON[n.kind] ?? "▤"),
           h("span", { className: "fs-tree-text" }, n.label),
-          // 多维表格也可能挂着子节点：小三角单独可点，点名字是「选它」
+          // 小三角单独可点，点名字是选中
           n.load &&
             h(
               "button",
@@ -669,7 +605,7 @@ export function onload(api) {
     });
   }
 
-  /** 选中一个多维表格之后：列出里面的数据表。只有一张就直接选 */
+  /** 只有一张数据表就直接选 */
   function TablePick({ base, onBack, onChoose }) {
     const [tables, setTables] = useState(null);
     const [error, setError] = useState("");
@@ -690,7 +626,6 @@ export function onload(api) {
       listTables(base.baseToken).then(
         (list) => {
           if (!live) return;
-          // 只有一张表就不用再问了
           if (list.length === 1) choose(list[0]);
           else setTables(list);
         },
@@ -733,15 +668,7 @@ export function onload(api) {
     );
   }
 
-  /**
-   * 「浏览我的多维表格」弹窗：上面一个搜索框，下面我的知识库的目录树。
-   *
-   * 搜索框空着时看树；输入后在我的知识库范围里搜多维表格（飞书服务端搜索，
-   * 标题、内容都能命中）；粘贴链接也认。点多维表格 → 选数据表 → onSelect。
-   *
-   * 弹窗而不是在页面里展开：目录树要的是纵向空间，挤在队列上面时
-   * 展开两层就把队列推出屏幕了。同步目标和「为哪张表写规则」都用它选。
-   */
+  /** 选表弹窗：搜索框空时看目录树，输入则在我的知识库里搜，也认粘贴的链接 */
   function TreeModal({ title, onClose, onSelect }) {
     const [, bump] = useState(0);
     const [expanded, setExpanded] = useState(() => new Set());
@@ -769,10 +696,10 @@ export function onload(api) {
       };
     }, []);
 
-    /** 我的知识库真实的 space id —— 搜索要用它限定范围。从第一层节点上取 */
+    /** 搜索限定范围要真实 space id，从第一层节点上取 */
     const librarySpace = () => treeCache.get(ROOT.id)?.children?.find((n) => n.spaceId)?.spaceId ?? null;
 
-    // 边打字边搜，停 400ms 才发请求；旧请求晚回来的结果丢掉
+    // 停 400ms 才发；旧请求晚回来的结果丢掉
     useEffect(() => {
       const q = query.trim();
       setError("");
@@ -919,7 +846,6 @@ export function onload(api) {
     );
   }
 
-  /** 后台同步的一次运行 */
   function useRun() {
     const [run, setRun] = useState(null); // { log: [], proc, startedAt, done, code }
     const ref = useRef(null);
@@ -961,7 +887,6 @@ export function onload(api) {
     return { run, start, cancel, clear: () => setRun(null) };
   }
 
-  /** 环境自检：三个程序找不找得到 */
   function useEnv() {
     const [env, setEnv] = useState(null);
     useEffect(() => {
@@ -985,7 +910,7 @@ export function onload(api) {
     );
     const [selected, setSelected] = useState(() => new Set());
 
-    // 队列变了：去掉已经不在队列里的勾选
+    // 去掉已不在队列里的勾选
     useEffect(() => {
       setSelected((prev) => new Set([...prev].filter((k) => findEntry(state.queue, k))));
     }, [state.queue]);
@@ -1079,7 +1004,7 @@ export function onload(api) {
     );
   }
 
-  /** 一张表的填写规则。失焦时保存 */
+  /** 失焦时保存 */
   function RuleCard({ rkey, isTarget }) {
     const doc = state.config.ruleDocs?.[rkey] ?? {};
     const [text, setText] = useState(state.config.tableRules?.[rkey] ?? "");
@@ -1123,12 +1048,7 @@ export function onload(api) {
     );
   }
 
-  /**
-   * 填写规则：先选一张多维表格，再为它写规则。
-   *
-   * 不展示内置规则 —— 内置的只有一条原则（把事项的信息和表的字段按含义对上，
-   * 对不上的不写），写在技能里；界面上只放用户自己的要求。
-   */
+  /** 只放用户的要求；内置原则（按含义对字段、对不上不写）在技能里 */
   function RulesTab({ target }) {
     const [picking, setPicking] = useState(false);
     const keys = Object.keys(state.config.tableRules ?? {});
@@ -1233,7 +1153,6 @@ export function onload(api) {
     );
   }
 
-  /** 一段可复制的命令 / 提示词 */
   function Code({ text }) {
     const [copied, setCopied] = useState(false);
     const copy = async () => {
@@ -1253,7 +1172,7 @@ export function onload(api) {
     );
   }
 
-  /** 编号步骤。ok: true/false 显示检测结果；undefined 不显示 */
+  /** ok: true/false 显示检测结果；undefined 不显示 */
   function Step({ n, title, ok, children }) {
     return h(
       "div",
@@ -1274,7 +1193,7 @@ export function onload(api) {
     );
   }
 
-  /** lark-cli 的登录状态：user 身份 ready 才算登录了 */
+  /** user 身份 ready 才算登录 */
   function useLarkAuth(found) {
     const [auth, setAuth] = useState(null); // null 未检测 / { ok, name, msg }
     const check = async () => {
@@ -1294,12 +1213,7 @@ export function onload(api) {
     return [auth, check];
   }
 
-  /**
-   * 使用说明。两种方式共用一段「准备」，然后各走各的：
-   *   方式一：在这个页面里点「同步」，后台起 Claude
-   *   方式二：自己开 Claude Code，用一句话让它同步
-   * 每一步能检测的都检测一下（程序在不在、登录了没有），省得用户对着说明猜自己卡在哪。
-   */
+  /** 两种方式共用「准备」；能检测的步骤（程序、登录）直接显示检测结果 */
   function GuideTab({ target, env }) {
     const found = (p) => (env ? !!env[p] : undefined);
     const [auth, recheck] = useLarkAuth(found("lark-cli"));
@@ -1580,5 +1494,5 @@ export function onload(api) {
 }
 
 export function onunload() {
-  /* 宿主会回收注册项和子进程；这里没有别的全局资源 */
+  /* 宿主会回收注册项和子进程 */
 }

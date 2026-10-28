@@ -772,7 +772,7 @@ describe("事项视图：任务按钮、筛选、排序", () => {
     store.getState().setActiveView("items");
     await screen.findByText("下周一确认夹具方案");
 
-    fireEvent.click(screen.getByText("⤓ 导出 ▾"));
+    fireEvent.click(screen.getByText("导出 ▾"));
     expect(await screen.findByText("Excel 表格")).toBeTruthy();
     expect(screen.getByText("Word 文档")).toBeTruthy();
   });
@@ -780,9 +780,9 @@ describe("事项视图：任务按钮、筛选、排序", () => {
   /** 工具条上那颗导的是甘特图 —— 只在甘特视图出现，别处不和本页的导出并排 */
   it("甘特图的导出只在甘特视图里有", async () => {
     const store = await openWorkspace();
-    expect(screen.getByText("⤓ 导出")).toBeTruthy();
+    expect(screen.getAllByText("导出").length).toBeGreaterThan(0);
 
     store.getState().setActiveView("board");
-    await waitFor(() => expect(screen.queryByText("⤓ 导出")).toBe(null));
+    await waitFor(() => expect(screen.queryByText("导出")).toBe(null));
   });
 });

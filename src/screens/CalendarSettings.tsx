@@ -107,7 +107,7 @@ function CalendarBody() {
         </button>
       </div>
 
-      {error && <div className="mb-2 text-[10px] text-rose-500">{error}</div>}
+      {error && <div className="mb-2 text-[10px] text-[var(--danger)]">{error}</div>}
 
       {holidays.length > 0 && (
         <div className="max-h-[180px] overflow-y-auto rounded-md border border-[var(--rule)]">
@@ -124,7 +124,7 @@ function CalendarBody() {
               </span>
               <button
                 onClick={() => setCalendar(calendar.withHolidayToggled(day))}
-                className="ml-auto rounded px-1 text-[10px] text-[var(--text-dim)] opacity-0 transition-opacity hover:text-rose-500 group-hover:opacity-100"
+                className="ml-auto rounded px-1 text-[10px] text-[var(--text-dim)] opacity-0 transition-opacity hover:text-[var(--danger)] group-hover:opacity-100"
               >
                 移除
               </button>

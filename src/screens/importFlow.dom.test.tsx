@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { REVEAL_LABEL } from "../core/keys";
 
@@ -114,7 +114,7 @@ beforeEach(() => {
 async function startImport() {
   const { ProjectList } = await import("./ProjectList");
   render(<ProjectList />);
-  await screen.findByText("厂房建设");
+  await screen.findAllByText("厂房建设");
   fireEvent.click(screen.getByText("↧ 导入项目"));
 }
 
@@ -143,8 +143,9 @@ describe("导入项目文件", () => {
 
     await screen.findByText("本机已有这个项目");
     expect(screen.getByText(/项目标识和本机这个项目一致/)).toBeTruthy();
-    expect(screen.getByText("42")).toBeTruthy();
-    expect(screen.getByText("47")).toBeTruthy();
+    const dialog = screen.getByText("本机已有这个项目").closest("[role=dialog], .fixed") as HTMLElement;
+    expect(within(dialog).getByText("42")).toBeTruthy();
+    expect(within(dialog).getByText("47")).toBeTruthy();
 
     // 名字变了，按钮文案要说清楚这一步会改名
     fireEvent.click(screen.getByText("覆盖并改名"));
@@ -212,7 +213,7 @@ describe("导入项目文件", () => {
 
     await screen.findByText("导入项目");
     expect(screen.queryByText("本机")).toBeNull();
-    expect(screen.getByText(/12 个任务 · 2 位负责人/)).toBeTruthy();
+    expect(screen.getByText(/12 个任务，2 位负责人/)).toBeTruthy();
 
     fireEvent.click(screen.getByText("导入"));
     await waitFor(() => expect(commits()).toHaveLength(1));
@@ -230,7 +231,7 @@ describe("导出项目文件", () => {
 
     const { ProjectList } = await import("./ProjectList");
     render(<ProjectList />);
-    await screen.findByText("厂房建设");
+    await screen.findAllByText("厂房建设");
 
     fireEvent.click(screen.getByText("⤴ 导出"));
 
@@ -251,7 +252,7 @@ describe("导出项目文件", () => {
 
     const { ProjectList } = await import("./ProjectList");
     render(<ProjectList />);
-    await screen.findByText("厂房建设");
+    await screen.findAllByText("厂房建设");
     fireEvent.click(screen.getByText("⤴ 导出"));
 
     await waitFor(() => expect(pick).toHaveBeenCalled());
@@ -273,7 +274,7 @@ describe("项目名唯一", () => {
   it("新建时边敲边比，重名当场提示且不提交", async () => {
     const { ProjectList } = await import("./ProjectList");
     render(<ProjectList />);
-    await screen.findByText("厂房建设");
+    await screen.findAllByText("厂房建设");
 
     fireEvent.click(screen.getByText("+ 新建项目"));
     const input = screen.getByPlaceholderText("项目名称");

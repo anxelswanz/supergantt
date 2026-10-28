@@ -1,13 +1,4 @@
-/**
- * 导出件的结构测试。
- *
- * 断言的是**收件人打开文件后能看到什么**，而不是内部函数怎么调的：
- * 每个任务一行、日期没有差一天、进度是百分比、风险表在甘特图下面、
- * 已解决的风险褪色。这几条错一条，导出件就是错的，而错法都很安静。
- *
- * 走一遍 writeBuffer → 再读回来，顺带证明生成的确实是一个 Excel 打得开的 zip，
- * 而不只是一棵在内存里长得对的对象树。
- */
+/** 导出件的结构测试：走一遍 writeBuffer → 读回来，断言收件人打开后看到的内容。 */
 
 import ExcelJS from "exceljs";
 import { describe, expect, it } from "vitest";
@@ -71,7 +62,7 @@ function input(over: Partial<ExportInput> = {}): ExportInput {
   };
 }
 
-/** 生成 → 落成 buffer → 读回来。返回收件人真正会看到的那张表。 */
+/** 生成 → 落成 buffer → 读回来。 */
 async function roundTrip(i: ExportInput): Promise<ExcelJS.Worksheet> {
   const buffer = await buildWorkbook(i).xlsx.writeBuffer();
   const reopened = new ExcelJS.Workbook();
@@ -115,14 +106,10 @@ describe("buildWorkbook", () => {
     expect(sheet.getCell(6, 1).alignment?.indent).toBeFalsy();
     expect(sheet.getCell(7, 1).alignment?.indent).toBe(1);
     expect(sheet.getRow(7).outlineLevel).toBe(1);
-    // 父任务加粗，一眼能和叶子任务分开
     expect(sheet.getCell(6, 1).font?.bold).toBe(true);
   });
 
-  /**
-   * 折叠只是浏览状态。发出去的文件静默少掉一整棵子树是最难被发现的错误 ——
-   * 收件人没有任何线索能察觉「这里本来还有五个任务」。
-   */
+  /** 折叠只是浏览状态，导出件不能静默少掉子树。 */
   it("折叠的子树照样导出", async () => {
     const rows = [
       task({ id: 1, name: "需求阶段", collapsed: true }),
@@ -221,7 +208,7 @@ describe("buildWorkbook", () => {
 
     expect(lineAt("2026-08-02"), "条子之前不该有线").toBeFalsy();
 
-    // 已完成那半段是粗线，未完成那半段是细线 —— 但整根条子的长度仍是完整工期
+    // 已完成半段粗线、未完成半段细线，条长仍是完整工期
     expect(lineAt("2026-08-03")?.style).toBe("thick");
     expect(lineAt("2026-08-04")?.style).toBe("thick");
     expect(lineAt("2026-08-05")?.style).toBe("thin");
@@ -230,7 +217,7 @@ describe("buildWorkbook", () => {
     expect(lineAt("2026-08-07"), "条子之后不该有线").toBeFalsy();
   });
 
-  /** 用色块画条子会把整张表糊成一片，所以正文里除了极淡的休息日底纹不该有填充 */
+  /** 正文里除了极淡的休息日底纹不该有填充 */
   it("甘特区不再用填充色块画条子", async () => {
     const rows = [
       task({
@@ -253,7 +240,6 @@ describe("buildWorkbook", () => {
     }
   });
 
-  /** 甘特区一旦画满横向分隔线，细条子就淹没在网格里了 */
   it("甘特区的空白格不画行分隔线", async () => {
     const rows = [task({ id: 1, startDay: isoToDay("2026-08-03"), endDay: isoToDay("2026-08-04") })];
     const sheet = await roundTrip(input({ tasks: resolve(rows) }));
@@ -297,7 +283,7 @@ describe("计划 vs 实施", () => {
     const sheet = await roundTrip(input({ tasks: resolve(rows) }));
     const col = 12 + (isoToDay("2026-08-04") - isoToDay("2026-08-01"));
     expect(sheet.getCell(6, col).border?.bottom?.style).toBe("dashed");
-    // 实际起止写「—」而不是留空 —— 否则收件人分不清「没开工」和「忘了填」
+    // 实际起止写「—」而不是留空
     expect(sheet.getCell(6, 6).value).toBe("—");
     expect(sheet.getCell(6, 8).value).toBe("—");
   });
@@ -404,10 +390,7 @@ describe("风险表", () => {
     expect(String(sheet.getCell(r, 7).value)).toBe("2026-08-01 09:05");
   });
 
-  /**
-   * 表格顶上冻结了窗格（xSplit = 8）。跨越冻结线的合并单元格在 Excel 里是坏的：
-   * 左半边钉在固定窗格、右半边跟着滚动，内容看上去从格子里支棱出去。
-   */
+  /** 冻结了 xSplit = 8，跨冻结线的合并单元格在 Excel 里会错位。 */
   it("整张风险表不越过冻结线，合并单元格全部落在 A–H 之内", async () => {
     const sheet = await roundTrip(
       input({ tasks: resolve(rows), risks: [risk({ id: 1, taskId: 1 })] }),
@@ -429,7 +412,7 @@ describe("风险表", () => {
     }
   });
 
-  /** 长风险是这份文件里唯一的长文本，不开自动换行就会被右边的单元格切掉 */
+  /** 长风险文本必须自动换行，否则被右边单元格切掉 */
   it("内容列开了自动换行", async () => {
     const long = "接口协议还没定，下周一前不确认就要阻塞前端联调，需要后端同学给个明确时间";
     const sheet = await roundTrip(
@@ -475,10 +458,7 @@ describe("空项目", () => {
 });
 
 describe("文件名与表名", () => {
-  /**
-   * Excel 对非法表名不报错，而是存出一个**打不开**的文件 ——
-   * 这是那种只有真实用户才会踩到、且完全无从排查的错误。
-   */
+  /** Excel 对非法表名不报错，而是存出一个打不开的文件。 */
   it("剔除 Excel 不接受的表名字符并截到 31 字", () => {
     expect(sanitizeSheetName("A/B:C?D*E[F]G")).toBe("A B C D E F G");
     expect(sanitizeSheetName("超".repeat(40))).toHaveLength(31);
@@ -521,9 +501,7 @@ describe("风险的关闭记录", () => {
     );
 
     const text = cellText(sheet);
-    // 处置说明是复盘里唯一值得抄的东西，导出件不能只留一个「已解决」
     expect(text).toContain("处置：改用二号供应商，交期提前 5 天");
-    // 记录时刻和关闭时刻是两个不同的事实，都要写出来
     expect(text).toContain("2026-08-08 16:20");
     expect(text).toContain("记录 2026-08-01 09:05");
   });

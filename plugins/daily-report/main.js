@@ -1,40 +1,19 @@
 /**
- * 日报插件。
- *
- * 把某一天在事项里记下的「问题」和「风险」整理成一段可以直接贴出去的文字：
- *
- *     问题
- *     1. ……
- *     2. ……
- *
- *     风险
- *     1. ……
- *
- * 数据来自宿主的 api.data.items（API 1.1）—— 和事项页同一个合并层，
- * 所以这里看到的就是事项页里那些。
- *
- * 单文件、无 import：宿主从 Blob URL 加载插件，没有模块解析（见 registry.ts
- * 的 assertSelfContained）。React 用宿主给的 api.react —— 和宿主是同一个实例，
- * hooks 才能用。
+ * 日报插件：把某天在事项里记的「问题」「风险」整理成可粘贴的文字。
+ * 单文件无 import（宿主按 Blob URL 加载）；React 必须用 api.react，hooks 才共享。
  */
-
-/* ------------------------------------------------------------------ */
-/* 生成日报 —— 纯函数，单测直接 import 它                               */
-/* ------------------------------------------------------------------ */
 
 const RISK_LEVELS = ["高", "中", "低"];
 
 /**
- * @param items  api.data.items.list() 的结果
- * @param date   "YYYY-MM-DD"
- * @param opts   withTask：每条后面带上关联任务和负责人
- *               carryOver：之前记的、到这天还没关的也算进来
+ * @param date  "YYYY-MM-DD"
+ * @param opts  carryOver：之前记的、到这天还没关的也算进来
  */
 export function buildReport(items, date, opts = {}) {
   const { withTask = true, carryOver = false, title = "日报" } = opts;
 
   const inScope = (it) => it.day === date || (carryOver && !it.closed && it.day < date);
-  // 未关闭在前，其余按优先级（没填的排最后）—— 读日报的人先看还悬着的、急的
+  // 未关闭在前，再按优先级（未填排最后）
   const order = (a, b) =>
     Number(a.closed) - Number(b.closed) || (a.priority ?? 9) - (b.priority ?? 9);
 
@@ -58,10 +37,6 @@ export function buildReport(items, date, opts = {}) {
 
   return [`${title} ${date}`, "", section("问题", issues), "", section("风险", risks)].join("\n");
 }
-
-/* ------------------------------------------------------------------ */
-/* 视图                                                                */
-/* ------------------------------------------------------------------ */
 
 function todayIso() {
   const d = new Date();
@@ -115,7 +90,7 @@ export function onload(api) {
     const [copied, setCopied] = useState(false);
     const box = useRef(null);
 
-    // 事项、风险变了就重新生成 —— 在事项页记完一条，切过来就在里面
+    // 事项变了就重新生成（会覆盖手改内容）
     useEffect(() => api.data.items.subscribe(() => setVersion((v) => v + 1)), []);
 
     const generate = () =>

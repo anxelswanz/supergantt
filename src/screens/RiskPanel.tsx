@@ -79,7 +79,7 @@ export function RiskPanel({ onClose }: { onClose: () => void }) {
         </div>
         <button
           onClick={() => setOnlyOpen((v) => !v)}
-          className="shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-medium transition-colors"
+          className="shrink-0 rounded-[var(--r-m)] border px-2.5 py-1 text-[10px] font-medium transition-colors"
           style={
             onlyOpen
               ? { borderColor: "var(--accent)", color: "var(--accent)" }

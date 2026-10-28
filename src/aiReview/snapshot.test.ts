@@ -93,8 +93,7 @@ const input = (tasks: Task[], over: Partial<SnapshotInput> = {}): SnapshotInput 
 
 describe("快照里的数字", () => {
   /**
-   * 这是整个功能的地基：AI 文档里的数据表读快照，「复盘」视图读 review.ts。
-   * 两边对不上的那一刻，这份文档就没人信了。
+   * 地基：AI 文档的数据表读快照，「复盘」视图读 review.ts，两边对不上文档就没人信了。
    */
   it("和 core/review.ts 是同一份计算", () => {
     const tasks = [

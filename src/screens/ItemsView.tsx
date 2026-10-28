@@ -221,9 +221,9 @@ export function ItemsView() {
             <Kbd>{shortcut("mod", "K")}</Kbd> 随处记一条
           </button>
 
-          {/* 导出的是**筛出来的这些**，按屏幕上的顺序 —— 见 export/items.ts */}
+          {/* 导出的是筛出来的这些，按屏幕上的顺序 */}
           <ExportButton
-            label="⤓ 导出"
+            label="导出"
             title={
               filtering
                 ? `把筛出来的 ${visible.length} 条事项导出成 Excel 或 Word`
@@ -462,7 +462,7 @@ function Filters({
 
   return (
     <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-      <label className="flex h-6 w-44 items-center gap-1.5 rounded-full border border-[var(--rule)] bg-[var(--surface)] px-2.5 transition-colors focus-within:border-[var(--accent)]">
+      <label className="flex h-6 w-44 items-center gap-1.5 rounded-[var(--r-m)] border border-[var(--rule)] bg-[var(--surface)] px-2.5 transition-colors focus-within:border-[var(--accent)]">
         <span className="text-[11px] leading-none text-[var(--text-dim)]" aria-hidden>
           ⌕
         </span>
@@ -665,7 +665,7 @@ function Chips<T>({
     <>
       <span
         ref={setAnchor}
-        className="inline-flex h-6 items-center rounded-full border text-[10px] font-medium transition-colors"
+        className="inline-flex h-6 items-center rounded-[var(--r-m)] border text-[10px] font-medium transition-colors"
         style={
           on
             ? {
@@ -1207,7 +1207,7 @@ function Row({
         <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 pl-[67px] text-[10px] leading-snug">
           {row.dangling && (
             <>
-              <span className="font-medium text-rose-500" title="它当初分拣成的那个阻碍/风险已经被删掉了">
+              <span className="font-medium text-[var(--danger)]" title="它当初分拣成的那个阻碍/风险已经被删掉了">
                 已被删除
               </span>
               {/* 悬挂引用的出路。不给出路的话，用户唯一能做的就是删掉重记一遍，
@@ -1244,7 +1244,7 @@ function Row({
 
           {/* 结论写了就一直显示 —— 复盘时值钱的正是这一句，不是那个勾 */}
           {row.resolution && (
-            <span className="min-w-0 basis-full truncate text-emerald-600" title={row.resolution}>
+            <span className="min-w-0 basis-full truncate text-[var(--ok)]" title={row.resolution}>
               结论：{row.resolution}
             </span>
           )}
@@ -1544,9 +1544,9 @@ function SortMenu({
         <div
           className="mx-1.5 mb-1 rounded border px-1.5 py-1 text-[9px] leading-snug"
           style={{
-            borderColor: "rgba(244,63,94,0.3)",
-            background: "rgba(244,63,94,0.06)",
-            color: "#f43f5e",
+            borderColor: "color-mix(in srgb, var(--danger) 30%, transparent)",
+            background: "color-mix(in srgb, var(--danger) 6%, transparent)",
+            color: "var(--danger)",
           }}
         >
           改类型会拆掉这条{kindLabel(row.kind, kinds)}：

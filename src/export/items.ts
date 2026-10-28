@@ -1,12 +1,6 @@
 /**
- * 事项清单 → Excel 工作表或 Word 文档。
- *
- * 导出的是**屏幕上那张清单**：筛选器筛剩下的、按屏幕上的顺序（包括手动排过的）。
- * 「导出我现在看到的」是这个按钮被点的唯一理由 —— 筛出「张三负责、关联电机安装的
- * 那几条」发给他，而不是发一份全项目的再让他自己筛。
- *
- * 所以表头必须写明**筛了什么**。一份只有 5 行的事项表，收到的人看不出那是
- * 「全部只有 5 条」还是「筛出来 5 条」，而这两个结论差得很远。
+ * 事项清单 → Excel 或 Word。导出屏幕上那张清单（筛过、按屏幕顺序），
+ * 所以表头必须写明筛了什么，否则看不出是「全部 5 条」还是「筛出 5 条」。
  */
 
 import ExcelJS from "exceljs";
@@ -67,12 +61,7 @@ export function itemDetail(row: ItemRow): string {
   return parts.join(" · ");
 }
 
-/**
- * Excel 和 Word 共用的那张表：表头、副标题、每行的单元格文字。
- *
- * 两种格式只在排版上不同。行内容在这里算一次 —— 分开算的话，迟早会出现
- * 「Excel 里写已卡 3 天、Word 里写共 3 天」这种两份文件对不上的情况。
- */
+/** Excel 和 Word 共用的表内容，只算一次，保证两种格式文字一致。 */
 export function itemsTable(input: ItemsExportInput) {
   const { projectName, rows, kinds, people, taskName, filterSummary, exportedAt } = input;
   const personName = new Map(people.map((p) => [p.id, p.name]));
@@ -162,12 +151,7 @@ export function buildItemsWorkbook(input: ItemsExportInput): ExcelJS.Workbook {
   return wb;
 }
 
-/**
- * Word 版。横向 A4 —— 11 列竖着放，标题那一列会被挤成一字一行。
- *
- * Word 的读者和 Excel 的不一样：多半是要贴进周报、打印出来过会，
- * 不会再筛再排。所以没有冻结表头之类的东西，但表头行设成跨页重复。
- */
+/** Word 版。横向 A4：11 列竖放会把标题列挤成一字一行；表头跨页重复。 */
 export function buildItemsDocx(input: ItemsExportInput): Document {
   const table = itemsTable(input);
   const total = table.head.reduce((n, h) => n + h.width, 0);

@@ -1,37 +1,9 @@
-/**
- * 顶层视图。
- *
- * 甘特图从「整个工作区」降级为「几个视图之一」。它们共用同一批任务、
- * 同一份数据，区别只在**问的问题不同**：
- *
- *   甘特   —— 这些活在时间上排在哪？（唯一的编辑面）
- *   看板   —— 此刻谁没开始、谁卡住了？
- *   时间线 —— 每一天到底发生了什么？
- *   复盘   —— 计划和实际差在哪，为什么？
- *   AI 复盘 —— 深层原因是什么，下次怎么办？（问出来、写出来的，不是算出来的）
- *
- * 这里只定义「有哪些视图」。视图各自需要什么数据由各自的组件决定 ——
- * 这个文件不该知道任何一个视图的实现细节，否则加第五个视图时它会被迫改。
- */
+/** 顶层视图清单。各视图的数据需求归各自组件，本文件不依赖插件系统。 */
 
-/**
- * 视图 key。
- *
- * **不是联合类型**。插件可以注册新视图，而插件是运行时扫描出来的 ——
- * 编译期根本写不出那个联合。所以这里退化成 string，把「这个 key 认不认得」
- * 的判断挪到渲染时：Workspace 拿它去注册表里查，查不到就回退到甘特。
- *
- * 仍然保留了内置视图的常量（APP_VIEWS）和 key 的字符集约束（isViewKey），
- * 因为「能把什么字符串存进 active_view」还是要有底线的。
- */
+/** 视图 key。插件运行时注册视图，故是 string；认不认得由 Workspace 查注册表，查不到回退甘特。 */
 export type AppView = string;
 
-/**
- * 内置视图的 key。
- *
- * 只有「确实只对内置视图有意义」的地方用它 —— 比如状态栏的 HintsFor，
- * 插件视图该显示什么提示是插件自己的事，宿主猜不出来。
- */
+/** 内置视图 key。 */
 export type BuiltinView =
   | "gantt"
   | "board"
@@ -44,17 +16,10 @@ export type BuiltinView =
 export interface ViewMeta {
   key: BuiltinView;
   label: string;
-  /** 悬停提示。写「它回答什么问题」而不是「它长什么样」 */
   hint: string;
 }
 
-/**
- * 内置视图。
- *
- * 插件的视图**不在这里** —— 它们在运行时由 plugins/registry.ts 注册，由
- * Workspace 合并成一份完整清单（见 usePlugins 里的 views）。本文件因此
- * 保持对插件系统零依赖，加第五个内置视图之外的东西不需要改它。
- */
+/** 内置视图。插件视图由 plugins/registry.ts 注册，在 Workspace 合并。 */
 export const APP_VIEWS: ViewMeta[] = [
   { key: "gantt", label: "甘特", hint: "这些活排在哪 —— 拖拽改期、改工期、记进度" },
   { key: "board", label: "看板", hint: "此刻谁没开始、谁在做、谁卡住了" },
@@ -69,16 +34,10 @@ export const APP_VIEWS: ViewMeta[] = [
 /* 开关                                                                */
 /* ------------------------------------------------------------------ */
 
-/**
- * **甘特不可关。**
- *
- * 它是唯一能拖日期、改工期的面 —— 关掉之后这个应用就没有生产排期的能力了，
- * 剩下的全是只读或半只读的投影。「至少保留一个视图」这条约束因此自动满足，
- * 不需要界面上再写一遍计数校验。
- */
+/** 甘特不可关：唯一的编辑面，也保证了「至少一个视图」。 */
 export const PERMANENT_VIEW: BuiltinView = "gantt";
 
-/** 可以关掉的那几个。顺序和 APP_VIEWS 一致，设置界面照着排 */
+/** 可关的视图，顺序同 APP_VIEWS */
 export const OPTIONAL_VIEWS: BuiltinView[] = [
   "board",
   "timeline",
@@ -88,25 +47,11 @@ export const OPTIONAL_VIEWS: BuiltinView[] = [
   "milestone",
 ];
 
-/**
- * 默认全开。
- *
- * 新装的用户应该先看到这个软件会什么，再决定关掉哪些 —— 反过来（默认只留
- * 甘特，让人自己去找）等于把其余的视图藏起来，而没人会去设置里找自己不知道
- * 存在的东西。
- */
 export const DEFAULT_ENABLED: BuiltinView[] = [PERMANENT_VIEW, ...OPTIONAL_VIEWS];
 
 /**
- * 读 `settings.enabled_views` 那个 JSON 数组。
- *
- * 任何读不懂的值都回退到「全开」，而不是「全关」：一个被手工改坏的设置项
- * 不该让用户打开应用发现只剩一个视图 —— 那看起来像功能丢了，而且他不会
- * 猜到是设置的问题。
- *
- * **插件视图不受这个开关管。** 它们的开关是「装不装这个插件」（设置 → 插件），
- * 在这里再加一道等于同一件事有两个开关，用户关了一个发现没反应。
- * 所以未知的 key 一律丢掉，只认内置的那几个。
+ * 读 `settings.enabled_views`；读不懂回退全开。
+ * 插件视图不受此开关管（开关是装不装插件），未知 key 一律丢掉。
  */
 export function parseEnabledViews(raw: string | null | undefined): BuiltinView[] {
   if (!raw) return [...DEFAULT_ENABLED];
@@ -121,7 +66,7 @@ export function parseEnabledViews(raw: string | null | undefined): BuiltinView[]
   const wanted = new Set(
     parsed.filter((v): v is BuiltinView => typeof v === "string" && isOptionalView(v)),
   );
-  // 甘特永远在，而且永远在第一个 —— ⌘1 不该因为一次设置变成别的东西
+  // 甘特永远第一个 —— ⌘1 依赖它
   return [PERMANENT_VIEW, ...OPTIONAL_VIEWS.filter((v) => wanted.has(v))];
 }
 
@@ -131,7 +76,7 @@ export const serializeEnabledViews = (views: BuiltinView[]): string =>
 const isOptionalView = (v: string): v is BuiltinView =>
   (OPTIONAL_VIEWS as string[]).includes(v);
 
-/** 开关一个视图。甘特关不掉，传它进来原样返回 */
+/** 开关一个视图；甘特关不掉，原样返回。 */
 export function toggleView(
   enabled: BuiltinView[],
   key: BuiltinView,
@@ -145,12 +90,8 @@ export function toggleView(
 }
 
 /**
- * key 的字符集约束，和 plugins/manifest.ts 的 ID_PATTERN 同源。
- *
- * 只在**读持久化值时**用得上：`active_view` 存的是上次关掉时那个 key，
- * 而那时启用的插件现在可能已经被删了。store 启动时用它挡掉明显不合法的
- * 字符串，至于「格式合法但已经没有这个视图了」只能等 Workspace 渲染时
- * 查注册表才知道 —— 那时候 store 还没读过插件目录。
+ * 与 plugins/manifest.ts 的 ID_PATTERN 同源。只挡格式；
+ * 「插件已删、key 已失效」要等 Workspace 查注册表才知道。
  */
 const VIEW_KEY_PATTERN = /^[a-z][a-z0-9.-]{0,63}$/;
 
@@ -161,13 +102,7 @@ export const isViewKey = (v: unknown): v is AppView =>
 /* 顺序                                                                */
 /* ------------------------------------------------------------------ */
 
-/**
- * 读 `settings.view_order` —— 用户手动拖出来的标签顺序。
- *
- * 存的是**完整的 key 列表**（含插件视图），而不只是内置的那几个：
- * 用户把一个插件视图拖到看板前面，下次打开它还该在那。
- * 读不懂一律返回空数组 = 「没排过」，走默认顺序。
- */
+/** 读 `settings.view_order`（含插件视图的完整 key 列表）；读不懂返回 []。 */
 export function parseViewOrder(raw: string | null | undefined): string[] {
   if (!raw) return [];
   try {
@@ -180,15 +115,8 @@ export function parseViewOrder(raw: string | null | undefined): string[] {
 }
 
 /**
- * 按手动顺序重排一份视图清单。
- *
- * 规则：
- *   · 排过的 key 按 `order` 里的次序在前
- *   · 没出现在 `order` 里的（新装的插件、新加的内置视图）保持原有相对顺序，
- *     接在后面 —— 新东西不该突然插到用户排好的队伍中间
- *   · `order` 里有、清单里已经没有的（插件被删了）直接忽略
- *
- * 纯函数，泛型只要求有 `key` —— Workspace 传 ViewEntry，单测传字面量。
+ * 按手动顺序重排：排过的在前；未排过的保持原相对顺序接在后面；
+ * order 里有而清单里没有的忽略。
  */
 export function applyViewOrder<T extends { key: string }>(views: T[], order: string[]): T[] {
   if (order.length === 0) return views;
@@ -199,10 +127,7 @@ export function applyViewOrder<T extends { key: string }>(views: T[], order: str
   return [...ranked, ...rest];
 }
 
-/**
- * 把 `from` 挪到 `to` 的前面或后面，返回新的完整 key 列表。
- * from === to 或任一不在清单里时原样返回。
- */
+/** 把 `from` 挪到 `to` 前/后；from === to 或任一不在清单里时原样返回。 */
 export function moveView(
   keys: string[],
   from: string,

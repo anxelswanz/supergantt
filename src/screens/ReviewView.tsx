@@ -1,11 +1,5 @@
 /**
- * 复盘视图 —— 这个产品的高光时刻。
- *
- * 甘特图回答"活排在哪"，看板回答"现在怎么样"，这里回答**月底真正被问的那句**：
- * 计划和实际差在哪、为什么差、丢掉的天数去了哪。
- *
- * 全部只读。算术在 core/review.ts，这里只负责把它摆出来 —— 屏幕上的数字
- * 和导出的 Excel 必须来自同一份计算，否则这份东西一文不值。
+ * 复盘视图，只读。算术全在 core/review.ts：屏幕和导出的 Excel 必须用同一份计算。
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -25,14 +19,14 @@ import { Avatar } from "./Avatar";
 import { MilestoneTrack } from "./MilestoneTrack";
 
 const RISK_LABELS = ["高", "中", "低"];
-const RISK_COLORS = ["#f43f5e", "#f59e0b", "#64748b"];
+const RISK_COLORS = ["var(--danger)", "#f59e0b", "#64748b"];
 
-/** 偏差天数的显示：正数标红、负数标绿、0 留白 —— 一屏零散的「0 天」是噪音 */
+/** 偏差天数：正数红、负数绿、0 显示为横线 */
 function Delta({ days, suffix = "天" }: { days: number; suffix?: string }) {
   if (days === 0) return <span className="text-[var(--text-dim)]">—</span>;
   const late = days > 0;
   return (
-    <span style={{ color: late ? "#f43f5e" : "#10b981" }} className="font-medium">
+    <span style={{ color: late ? "var(--danger)" : "#10b981" }} className="font-medium">
       {late ? "+" : ""}
       {days} {suffix}
     </span>
@@ -50,8 +44,7 @@ export function ReviewView() {
 
   useEffect(() => {
     if (!project) return;
-    // 风险不在内存模型里（它是另一张表），进这个视图时拉一次就够 ——
-    // 复盘是个静态的读，不需要跟着每次编辑刷新
+    // 风险在独立的表里，不在内存模型中，按需拉取
     void api.loadProjectRisks(project.id).then(setRisks).catch(() => setRisks([]));
   }, [project, revision]);
 
@@ -73,7 +66,7 @@ export function ReviewView() {
   if (summary.leafCount === 0) {
     return (
       <div className="grid flex-1 place-items-center text-sm text-[var(--text-dim)]">
-        还没有任务，复盘无从谈起
+        还没有任务，先去甘特图里添加任务
       </div>
     );
   }
@@ -81,8 +74,6 @@ export function ReviewView() {
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto max-w-[900px] space-y-6 p-6">
-        {/* —— 一句话结论 ——
-            摆在最上面的必须是"这个项目现在到底怎么样"，而不是一堆指标 */}
         <div>
           <div className="text-lg font-semibold text-[var(--text)]">
             {summary.endDelta > 0
@@ -101,7 +92,7 @@ export function ReviewView() {
             )}
             {summary.actual && (
               <>
-                　·　实际 {dayToIso(summary.actual.startDay)} →{" "}
+                ，实际 {dayToIso(summary.actual.startDay)} →{" "}
                 {dayToIso(summary.actual.endDay)}
               </>
             )}
@@ -123,18 +114,15 @@ export function ReviewView() {
             alert={summary.blockedDays > 0}
           />
           <Stat
-            label="还没动过"
+            label="未开始"
             value={`${summary.untouchedCount}`}
-            note={`在做 ${summary.runningCount} · 完成 ${summary.doneCount}`}
+            note={`进行中 ${summary.runningCount}，已完成 ${summary.doneCount}`}
           />
         </div>
 
-        {/* —— 受阻归因 ——
-            这是这个产品相对其他工具真正的差异点：别人只能说"晚了"，
-            这里能说"晚在什么上" */}
-        <Section title="时间丢在哪" hint="按原因合并区间统计；同一天既等料又返工时两边各算一次">
+        <Section title="时间丢在哪" hint="按原因统计，同一天有多个原因时各算一次">
           {reasons.length === 0 ? (
-            <Empty>没有受阻记录。⌥ 拖甘特条，或在看板里把卡片拖进「卡住」</Empty>
+            <Empty>没有受阻记录。⌥ 拖甘特条，或把看板卡片拖进「受阻」来记录</Empty>
           ) : (
             <div className="space-y-2">
               {reasons.map((r) => (
@@ -147,13 +135,13 @@ export function ReviewView() {
                       className="h-full rounded"
                       style={{
                         width: `${(r.days / maxReasonDays) * 100}%`,
-                        background: "#f43f5e",
+                        background: "var(--danger)",
                         opacity: 0.75,
                       }}
                     />
                   </div>
                   <span className="w-24 shrink-0 text-right text-xs text-[var(--text)]">
-                    {r.days} 天 · {r.taskCount} 条
+                    {r.days} 天（{r.taskCount} 条）
                   </span>
                 </div>
               ))}
@@ -162,7 +150,7 @@ export function ReviewView() {
         </Section>
 
         {marks.length > 0 && (
-          <Section title="里程碑" hint="哪几个到了、到得准不准、哪个该到没到">
+          <Section title="里程碑">
             <MilestoneTrack
               marks={marks}
               today={todayDay}
@@ -174,7 +162,7 @@ export function ReviewView() {
 
         <Section
           title="逐条偏差"
-          hint="没做完的排前面，延得越狠越靠上 —— 从上往下讲，讲到没时间为止"
+          hint="未完成的在前，延期越多越靠前"
         >
           <table className="w-full text-xs">
             <thead className="text-[var(--text-dim)]">
@@ -225,7 +213,7 @@ export function ReviewView() {
         )}
 
         <div className="pb-4 text-[10px] text-[var(--text-dim)]">
-          这一页的每个数字都来自计划与实施两组日期的差，导出的 Excel 用的是同一份计算。
+          本页数字与导出的 Excel 一致。
         </div>
       </div>
     </div>
@@ -257,7 +245,7 @@ function Row({
         {dayToIso(d.plan.startDay)} → {dayToIso(d.plan.endDay)}
       </Td>
       <Td>
-        {d.actual ? `${dayToIso(d.actual.startDay)} → ${dayToIso(d.actual.endDay)}` : "还没动过"}
+        {d.actual ? `${dayToIso(d.actual.startDay)} → ${dayToIso(d.actual.endDay)}` : "未开始"}
       </Td>
       <Td>
         <Delta days={d.startDelta} />
@@ -287,7 +275,7 @@ function Stat({
       <div className="text-[10px] text-[var(--text-dim)]">{label}</div>
       <div
         className="mt-0.5 text-xl font-semibold"
-        style={{ color: alert ? "#f43f5e" : "var(--text)" }}
+        style={{ color: alert ? "var(--danger)" : "var(--text)" }}
       >
         {value}
       </div>

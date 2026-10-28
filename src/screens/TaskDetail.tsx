@@ -382,7 +382,7 @@ function BlockedSection({
             <button
               onClick={onAdd}
               title="从今天开始记一条还没解决的阻碍"
-              className="rounded-full border border-[var(--rule)] px-2 py-0.5 text-[10px] font-medium text-[var(--text-dim)] transition-colors hover:border-[#f43f5e] hover:text-[#f43f5e]"
+              className="rounded-[var(--r-m)] border border-[var(--rule)] px-2 py-0.5 text-[10px] font-medium text-[var(--text-dim)] transition-colors hover:border-[var(--danger)] hover:text-[var(--danger)]"
             >
               ＋ 新建
             </button>
@@ -449,15 +449,15 @@ function BlockedRow({
       onDoubleClick={onOpenDetail}
       title="双击查看 / 调整这条阻碍"
       className="group rounded-md px-2 py-1.5 hover:bg-[var(--row-hover)]"
-      style={live ? { background: "rgba(244,63,94,0.06)" } : undefined}
+      style={live ? { background: "color-mix(in srgb, var(--danger) 6%, transparent)" } : undefined}
     >
       <div className="flex items-center gap-2">
         <button
           ref={setAnchor}
           onClick={() => setOpen((v) => !v)}
           title="改归类"
-          className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold leading-none text-amber-600"
-          style={{ background: "rgba(245,158,11,0.16)" }}
+          className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--warn)]"
+          style={{ background: "color-mix(in srgb, var(--warn) 16%, transparent)" }}
         >
           {reasonLabel(period.reason)}
         </button>
@@ -481,7 +481,7 @@ function BlockedRow({
         </span>
         <span
           className="shrink-0 font-mono text-[10px] tabular-nums"
-          style={{ color: live ? "#f43f5e" : "var(--text-dim)" }}
+          style={{ color: live ? "var(--danger)" : "var(--text-dim)" }}
         >
           {days} 天
         </span>
@@ -499,7 +499,7 @@ function BlockedRow({
         <button
           onClick={onRemove}
           title={`删除（${shortcut("mod", "Z")} 可撤销）`}
-          className="shrink-0 rounded px-1 text-[10px] text-[var(--text-dim)] opacity-0 transition-opacity hover:text-rose-500 group-hover:opacity-100"
+          className="shrink-0 rounded px-1 text-[10px] text-[var(--text-dim)] opacity-0 transition-opacity hover:text-[var(--danger)] group-hover:opacity-100"
         >
           ✕
         </button>
@@ -511,7 +511,7 @@ function BlockedRow({
         <div className="mt-1 flex items-center gap-2">
           <span
             className="rounded px-1.5 py-0.5 text-[9px] font-semibold leading-none text-white"
-            style={{ background: "#f43f5e" }}
+            style={{ background: "var(--danger)" }}
           >
             未关闭
           </span>
@@ -522,7 +522,7 @@ function BlockedRow({
           </span>
           <button
             onClick={onClose}
-            className="ml-auto shrink-0 rounded-full border border-[var(--rule)] px-2 py-0.5 text-[10px] font-medium text-[var(--text-dim)] transition-colors hover:border-emerald-500 hover:text-emerald-600"
+            className="ml-auto shrink-0 rounded-[var(--r-m)] border border-[var(--rule)] px-2 py-0.5 text-[10px] font-medium text-[var(--text-dim)] transition-colors hover:border-[var(--ok)] hover:text-[var(--ok)]"
           >
             ✓ 关闭
           </button>
@@ -720,8 +720,8 @@ function CommentRow({ comment, onChanged }: { comment: Comment; onChanged: () =>
           onBlur={() => setConfirming(false)}
           className={`ml-auto rounded px-1 text-[9px] transition-opacity ${
             confirming
-              ? "bg-rose-500 text-white opacity-100"
-              : "text-[var(--text-dim)] opacity-0 hover:text-rose-500 group-hover:opacity-100"
+              ? "bg-[var(--danger)] text-white opacity-100"
+              : "text-[var(--text-dim)] opacity-0 hover:text-[var(--danger)] group-hover:opacity-100"
           }`}
         >
           {confirming ? "确认" : "删除"}
@@ -787,7 +787,7 @@ function SectionTitle({
     <div className="mb-2 flex items-baseline gap-2">
       <h3 className="text-[11px] font-bold text-[var(--text)]">{title}</h3>
       {count && (
-        <span className={`text-[10px] ${danger ? "text-rose-500" : "text-[var(--text-dim)]"}`}>
+        <span className={`text-[10px] ${danger ? "text-[var(--danger)]" : "text-[var(--text-dim)]"}`}>
           {count}
         </span>
       )}

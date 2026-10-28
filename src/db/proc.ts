@@ -1,13 +1,6 @@
 /**
- * 子进程输出的分发。
- *
- * Rust 那边所有子进程的输出都走同一个 `plugin-proc` 事件，按 run id 区分
- * （src-tauri/src/plugin_host.rs 的 spawn_piped）。起进程的有两家：插件
- * （plugins/registry.ts）和内置的 AI 复盘（aiReview/claude.ts）。
- *
- * 分发表必须只有一份。两家各听各的话，每一家都会把对方的事件当成「run id
- * 还没登记的早到事件」攒起来等人认领 —— 而那个人永远不会来，一份复盘文档的
- * 几千行流式输出就这么一直留在内存里。
+ * 所有子进程输出共用 `plugin-proc` 事件（plugin_host.rs spawn_piped），插件和 AI 复盘都走这里。
+ * 分发表必须只有一份，否则各自会把对方的事件当早到事件攒着，永不释放。
  */
 
 import { listen } from "@tauri-apps/api/event";
@@ -26,10 +19,7 @@ export interface RunHandlers {
 }
 
 const runs = new Map<number, RunHandlers>();
-/**
- * 事件在 spawn 返回 run id **之前**就可能到达（短命令几毫秒就跑完）。
- * 那时还不知道该交给谁，先攒着，登记回调时一次放出来。
- */
+/** 事件可能在 spawn 返回 run id 之前到达，先攒着，attachRun 时补发。 */
 const early = new Map<number, ProcEvent[]>();
 let listening: Promise<void> | null = null;
 
@@ -58,10 +48,7 @@ function dispatch(ev: ProcEvent) {
   }
 }
 
-/**
- * 全局只监听一次。**必须在起进程之前 await** —— 监听还没挂上时到达的事件
- * 是真的丢了，不是早到。
- */
+/** 全局只监听一次；必须在起进程之前 await，否则监听挂上前的事件直接丢。 */
 export function ensureProcListener(): Promise<void> {
   listening ??= listen<ProcEvent>("plugin-proc", (e) => dispatch(e.payload)).then(() => {});
   return listening;

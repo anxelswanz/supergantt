@@ -4,12 +4,6 @@ import { resolve } from "../gantt/model";
 import type { TaskRow } from "../db/api";
 import { isoToDay } from "../gantt/time";
 
-/**
- * 层级与排序的行为测试。
- *
- * 这里覆盖的正是「加不了子任务」的根因：兄弟顺序原先靠 Map 的插入序，
- * 导致新任务只能落到末尾，「在选中行之后插入」根本无法表达。
- */
 
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
@@ -36,7 +30,6 @@ const row = (id: number, over: Partial<TaskRow> = {}): TaskRow => ({
   ...over,
 });
 
-/** 加载一个项目，返回 store —— 每个用例都拿到干净的状态 */
 async function loadStore(rows: TaskRow[]) {
   vi.resetModules();
   invoke.mockReset();
@@ -68,7 +61,7 @@ async function loadStore(rows: TaskRow[]) {
   return useAppStore;
 }
 
-/** 当前展平后的顺序（id + 深度），即用户在左侧网格看到的样子 */
+/** 展平后的 [id, 深度]，即左侧网格的顺序 */
 const outline = (store: { getState: () => { tasks: Map<number, unknown> } }) =>
   resolve([...(store.getState().tasks.values() as Iterable<never>)]).map((t) => [
     t.id,
@@ -92,7 +85,7 @@ describe("新建子任务", () => {
   });
 
   it("一个还没有任何兄弟的任务也能挂子任务", async () => {
-    // 这正是「新建同级 + ⌘] 缩进」做不到的场景：缩进需要前面有兄弟
+    // 「新建同级 + ⌘] 缩进」做不到：缩进需要前面有兄弟
     const store = await loadStore([row(1)]);
     store.getState().addSubtask(1);
     expect(outline(store)).toEqual([
@@ -345,7 +338,6 @@ describe("拖放重挂", () => {
   it("里程碑不接受子任务 —— 它是时间点不是容器", async () => {
     const store = await loadStore([row(1, { milestone: true }), row(2)]);
     expect(store.getState().canDrop(2, 1, "inside")).toBe(false);
-    // 但插到它前后是允许的
     expect(store.getState().canDrop(2, 1, "before")).toBe(true);
     expect(store.getState().canDrop(2, 1, "after")).toBe(true);
   });
@@ -421,13 +413,7 @@ describe("受阻时段", () => {
     expect(store.getState().tasks.get(1)!.blocked).toHaveLength(1);
   });
 
-  /**
-   * 这里原来断言的是「超出任务尾部就裁回去」。
-   *
-   * 改掉了：详情面板可以直接调受阻天数，调过头被安静裁回的表现是
-   * 「调了没反应」—— 最难查的那种 bug。现在反过来，**任务让位给事实**：
-   * 一段真发生过的受阻比一个计划日期更硬（core/blocked.fitBlocked）。
-   */
+  /** 超出尾部时拉长任务而不是裁回（core/blocked.fitBlocked）；裁回的表现是「调了没反应」 */
   it("把受阻调到任务尾部之外，会把任务的计划结束日一起拉长", async () => {
     const store = await loadStore([row(1, { startDate: "2026-08-13", endDate: "2026-08-17" })]);
     store.getState().addBlocked(1, period("b1", "2026-08-15", "2026-08-17"));
@@ -531,7 +517,7 @@ describe("保存失败时不能丢数据", () => {
     const store = await loadStore([row(1), row(2)]);
     store.getState().patchTask(1, { name: "改了个名" }, "重命名");
 
-    // 让保存失败（比如跨项目 id 撞车被后端挡下）
+    // 让保存失败（如跨项目 id 撞车）
     invoke.mockImplementation((cmd: string) => {
       if (cmd === "save_project") return Promise.reject("保存中止：ID 冲突");
       return Promise.resolve(cmd === "list_projects" ? [] : null);
@@ -539,7 +525,6 @@ describe("保存失败时不能丢数据", () => {
 
     await store.getState().closeProject();
 
-    // 之前这里是 .catch(() => {}) 然后照样清空 —— 一条静默丢数据的通道
     expect(store.getState().screen.name).toBe("workspace");
     expect(store.getState().tasks.size).toBe(2);
     expect(store.getState().tasks.get(1)!.name).toBe("改了个名");

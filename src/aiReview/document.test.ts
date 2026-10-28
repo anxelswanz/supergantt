@@ -271,8 +271,8 @@ describe("提示词", () => {
   });
 
   /**
-   * 每次调用都是一个全新的进程，没有任何会话记忆（见 ai_review.rs）。
-   * 少带一样，模型就是在瞎猜。
+   * 每次调用都是全新进程、没有会话记忆（见 ai_review.rs），
+   * 提示词少带一样，模型就是在瞎猜。
    */
   it("每一份都自带完整上下文：背景、快照、已有问答", () => {
     for (const prompt of [buildAskPrompt(answered, 2), buildWritePrompt(answered)]) {
@@ -320,7 +320,7 @@ describe("提示词", () => {
 });
 
 describe("读 claude 的输出", () => {
-  // 下面几行的形状取自实测的 `claude -p --output-format stream-json`
+  // 形状取自实测的 `claude -p --output-format stream-json`
   it("逐字流式的正文片段", () => {
     const line = JSON.stringify({
       type: "stream_event",

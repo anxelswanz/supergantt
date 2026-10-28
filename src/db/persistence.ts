@@ -1,14 +1,6 @@
 /**
- * 命令栈 → SQLite 的落库调度。
- *
- * 会话内的真相是内存里的 TaskMap；数据库是它的持久化投影。
- * 每条命令（含撤销/重做）都把整个项目防抖后整体写回，写入本身是一次事务，
- * 所以磁盘上永远只有「某个完整的历史状态」，不存在写了一半的中间态。
- *
- * 代价是崩溃时最多丢失 FLUSH_DELAY 这一段时间的编辑，所以：
- *   - 窗口失焦、关闭前强制冲刷
- *   - FLUSH_DELAY 取得足够短，短到用户感知不到，又足够长到能把一次
- *     连续拖拽合并成一次写入
+ * 命令栈 → SQLite：每条命令防抖后整项目单事务写回，磁盘上不存在半写状态。
+ * 崩溃最多丢 FLUSH_DELAY 的编辑，所以失焦/关闭前强制冲刷。
  */
 
 import type { CommandStack } from "../core/commandStack";
@@ -42,7 +34,7 @@ export class Persistence {
 
   attach(stack: CommandStack) {
     this.detach();
-    // 三种来源一视同仁：撤销和重做同样要落库，否则重启后会回到撤销前的状态
+    // 撤销/重做也要落库，否则重启后回到撤销前
     this.unsubscribe = stack.subscribe(() => this.schedule());
   }
 
@@ -57,7 +49,7 @@ export class Persistence {
     this.timer = setTimeout(() => void this.flush(), FLUSH_DELAY);
   }
 
-  /** 立即写入。窗口失焦、关闭、切换项目前必须 await 它。 */
+  /** 立即写入；切换项目前必须 await。 */
   async flush(): Promise<void> {
     if (this.timer) {
       clearTimeout(this.timer);
@@ -100,7 +92,6 @@ export class Persistence {
   }
 }
 
-/** 窗口关闭 / 失焦时兜底冲刷。 */
 export function installFlushGuards(persistence: Persistence) {
   const flush = () => void persistence.flush().catch(() => {});
   window.addEventListener("blur", flush);

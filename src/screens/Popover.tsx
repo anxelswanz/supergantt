@@ -142,7 +142,7 @@ export function MenuItem({
       }}
       className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[11px] transition-colors disabled:pointer-events-none disabled:opacity-35 ${
         danger
-          ? "text-[var(--text-dim)] hover:bg-rose-500/10 hover:text-rose-500"
+          ? "text-[var(--text-dim)] hover:bg-[var(--danger)]/10 hover:text-[var(--danger)]"
           : "text-[var(--text)] hover:bg-[var(--row-hover)]"
       } ${active ? "font-semibold" : ""}`}
     >

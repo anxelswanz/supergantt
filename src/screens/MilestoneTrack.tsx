@@ -1,15 +1,6 @@
 /**
- * 复盘里的里程碑。两层：
- *
- *   ① 一条按真实日期比例画的横向时间轴 —— 节点之间隔多远、今天站在哪、
- *      哪个晚了多少（计划位置到实际位置那一截），一眼看完。
- *   ② 下面三栏，正好是汇报现场被追问的三句话：
- *      已达成（到得准不准）/ 该到没到 / 接下来。
- *
- * 以前是一列竖排的表：900px 宽的页面里，名字挤在左边、结论飘在最右，
- * 中间一大片空，节点一多整块被拉得很长，而且看不出时间上的远近。
- *
- * 状态的判定在 core/review.ts 的 milestoneMarks，这里只负责画。
+ * 复盘里的里程碑：上面一条按真实日期比例画的时间轴，下面三栏（已达成 / 该到没到 / 接下来）。
+ * 状态判定在 core/review.ts 的 milestoneMarks，这里只负责画。
  */
 
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -18,8 +9,8 @@ import type { MilestoneMark, MilestoneState } from "../core/review";
 import { dateToDay, dayToDate, dayToIso } from "../gantt/time";
 import type { Person } from "../db/api";
 
-const LATE = "#f43f5e";
-const EARLY = "#10b981";
+const LATE = "var(--danger)";
+const EARLY = "var(--ok)";
 
 /** 今年的省掉年份 */
 const shortDay = (day: number, thisYear: number) =>
@@ -47,8 +38,7 @@ export function MilestoneTrack({ marks, today, people, onOpen }: Props) {
 
   return (
     <MotionConfig reducedMotion="user">
-      <div className="overflow-hidden rounded-xl border border-[var(--rule)] bg-[var(--surface)]">
-        {/* —— 一行读完全局 —— */}
+      <div className="overflow-hidden rounded-[var(--r-l)] border border-[var(--rule)] bg-[var(--surface)]">
         <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 px-4 pt-3.5">
           <span className="flex items-baseline gap-1.5">
             <span className="font-mono text-[26px] font-semibold leading-none tabular-nums text-[var(--text)]">
@@ -71,7 +61,6 @@ export function MilestoneTrack({ marks, today, people, onOpen }: Props) {
 
         <Axis marks={marks} today={today} thisYear={thisYear} onOpen={onOpen} />
 
-        {/* —— 三栏：已达成 / 该到没到 / 接下来 —— */}
         <div className="grid grid-cols-1 border-t border-[var(--rule)] sm:grid-cols-3 sm:divide-x sm:divide-[var(--rule)]">
           <Column title="已达成" count={done.length} color={EARLY} empty="还没有达成的节点">
             {done.map((m) => (
@@ -121,7 +110,7 @@ interface Placed {
 
 /**
  * 标签分行：从左到右，每个标签放进离轴最近、还放得下的那一行。
- * 三行都挤满了就不写字 —— 菱形还在，悬停有名字，下面三栏里也有。
+ * 三行都挤满了就只留菱形，悬停看名字。
  */
 function placeLabels(marks: MilestoneMark[], x: (day: number) => number, width: number): Placed[] {
   const lanes: [number, number][][] = Array.from({ length: LANES }, () => []);
@@ -241,8 +230,8 @@ function Mark({ p, index, thisYear, onOpen }: { p: Placed; index: number; thisYe
   const slip = s.kind === "hit" && s.delta !== 0;
   const slipColor = slip && s.delta > 0 ? LATE : EARLY;
   const labelTop = AXIS_Y - 14 - (p.lane ?? 0) * LANE_H - 12;
-  const title = `${m.task.name || "未命名"} · 计划 ${shortDay(m.plan.startDay, thisYear)}${
-    slip && m.actual ? ` · 实际 ${shortDay(m.actual.startDay, thisYear)}` : ""
+  const title = `${m.task.name || "未命名"}　计划 ${shortDay(m.plan.startDay, thisYear)}${
+    slip && m.actual ? `，实际 ${shortDay(m.actual.startDay, thisYear)}` : ""
   }`;
 
   return (
@@ -369,7 +358,7 @@ function verdictOf(s: MilestoneState): { text: string; color: string; strong?: b
       return { text: `逾期 ${s.days} 天`, color: LATE, strong: true };
     case "upcoming":
       return s.days === 0
-        ? { text: "就是今天", color: "var(--accent)", strong: true }
+        ? { text: "今天到期", color: "var(--accent)", strong: true }
         : { text: `还有 ${s.days} 天`, color: "var(--text-dim)" };
   }
 }
@@ -391,7 +380,7 @@ function Row({
     <li>
       <button
         onClick={() => onOpen(m.task.id)}
-        title="打开这个里程碑的详情"
+        title="打开详情"
         className="group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-[var(--row-hover)]"
       >
         <span className="min-w-0 flex-1">
@@ -405,7 +394,7 @@ function Row({
             ) : (
               <span>{shortDay(m.plan.startDay, thisYear)}</span>
             )}
-            {person && <span className="font-sans">· {person.name}</span>}
+            {person && <span className="font-sans">{person.name}</span>}
           </span>
         </span>
         <span

@@ -1,38 +1,6 @@
-//! 项目文件（`.ganttproj`）的导出与导入 —— 跨电脑传输的往返通道。
-//!
-//! 和 `export.rs` 是两件事，别混淆：
-//!   · `export.rs` 产出 Excel / 时间线 HTML，是**给人看的排版件**，导不回来
-//!   · 本模块产出 `.ganttproj`，是**给这个软件看的全保真数据**，能原样导回来
-//!
-//! ## 为什么整件事都在 Rust 侧
-//!
-//! 数据本来就在 SQLite 里。走 `export.rs` 那条「前端拼内容 → base64 → IPC →
-//! Rust 落盘」的路，等于把几 MB 头像先捞到前端、编码、再传回来。而且这里没有
-//! 任何依赖渲染层的东西（不像 Excel 要着色器和汇总结果），前端参与不了也不需要参与。
-//!
-//! ## 容器
-//!
-//! 对外是一个文件，内部是目录结构的 zip —— 和 .sketch / .docx / .xmind 同一个套路：
-//!
-//! ```text
-//! manifest.json     格式版本、导出时间、项目名与 uuid（不解开就能预览）
-//! project.json      项目 + 任务 + 依赖 + 风险 + 评论 + 逐日记录 + 基线
-//! people.json       只含本项目用到的负责人
-//! avatars/*.png     头像还原成真实图片文件，不再是 base64 字符串
-//! ```
-//!
-//! ## 两条硬规矩
-//!
-//! **一、文件里的任务 id 一律重编号成 1..n。** 库里的 id 是全局自增的，
-//! 带出去毫无意义，还会让「同一份数据导出两次」得到不同的字节。重编号之后
-//! 往返是幂等的 —— 导出→导入→再导出，两次的 project.json 逐字节相同。
-//! 这一条不只是洁癖，它是本模块唯一那个能同时抓住「某字段没导出」
-//! 「某字段导入时丢了」「排序不稳定」三类 bug 的测试的前提。
-//!
-//! **二、导入是全有或全无。** 校验在写库之前全部做完，一条不合格就整个拒绝，
-//! 不靠数据库的 CHECK 兜底。理由是可发现性：一个 47 个任务的项目，
-//! 「跳过坏行」导进来 45 个，用户不会去逐条核对，只会在三周后发现某个任务
-//! 凭空消失了 —— 而那时源文件早删了。
+//! 项目文件（`.ganttproj`）导入导出：全保真，能原样导回来（区别于 export.rs 给人看的排版件）。
+//! 全在 Rust 侧做，避免把几 MB 头像经前端往返。容器是 zip：manifest.json / project.json / people.json / avatars/*.png。
+//! 两条硬规矩：任务 id 一律重编号成 1..n（往返幂等）；导入全有或全无，校验在写库前做完。
 
 use crate::db::{name_taken, Db};
 use crate::export::{decode_base64, encode_base64};
@@ -44,19 +12,10 @@ use std::path::{Path, PathBuf};
 
 type Result<T> = std::result::Result<T, String>;
 
-/// 格式版本。
-///
-/// major 变 = 语义改了或字段删了，旧版应用**必须拒绝**；
-/// minor 变 = 只加了字段，旧版应用照常导入、忽略不认识的部分。
-///
-/// 这个两级划分不是形式主义 —— 跨电脑的主线场景就是「两台机器上的 Gantt
-/// 版本不一样」（你在家更新了，公司那台还没）。单个整数版本号会让
-/// 「加了一个无关紧要的字段」把旧机器彻底锁死。
+/// 格式版本。major 变 = 语义改了或删字段，旧版必须拒绝；minor 变 = 只加字段，旧版照常导入。
+/// 两台机器版本不同是主线场景，单整数版本号会让加个字段就锁死旧机器。
 pub const FORMAT_MAJOR: u32 = 1;
-/// 1.1 比 1.0 多出来的东西，全部是**新增字段**，所以只升 minor：
-/// `itemNotes` / `itemKinds` 两节，`risks` 的 `id`/`priority`/`resolvedAt`/`resolution`，
-/// 以及 `tasks.autoRollover`。旧版应用打开 1.1 的文件会忽略这些，照常导入
-/// 它认识的部分，并在预检里报告「较新的部分被忽略」。
+/// 1.1 相对 1.0 全是新增字段：itemNotes / itemKinds，risks 的 id/priority/resolvedAt/resolution，tasks.autoRollover。
 pub const FORMAT_MINOR: u32 = 1;
 
 pub const EXT: &str = "ganttproj";
@@ -72,7 +31,7 @@ pub struct Manifest {
     pub format_version: String,
     pub app: String,
     pub app_version: String,
-    /// Unix 秒，和库里的 created_at 同一个口径
+    /// Unix 秒，与库里 created_at 同口径
     pub exported_at: String,
     pub project_name: String,
     pub project_uuid: String,
@@ -102,9 +61,7 @@ pub struct FileTask {
     pub actual_end: Option<String>,
     pub progress: f64,
     pub priority: i64,
-    /// 按**名字**引用负责人，不是 id。
-    /// people 表是全局的，两台机器上同一个人的 id 必然不同；而合并规则本来
-    /// 就是「同名即同人」，那就让文件直接说名字，导入时一步到位。
+    /// 按名字引用负责人：people 是全局表，两台机器上同一人的 id 必然不同，合并规则就是「同名即同人」
     pub person: Option<String>,
     pub milestone: bool,
     pub weight: Option<f64>,
@@ -113,13 +70,7 @@ pub struct FileTask {
     pub note: String,
     pub sort_order: f64,
     pub blocked: String,
-    /**
-     * 实施逾期时自动顺延计划结束日（migrations/009_auto_rollover.sql）。
-     *
-     * 格式 1.1 才有。旧文件里没有这一节，`serde(default)` 让它落成 `false` ——
-     * 而 false 正是那次迁移给既有任务填的值，所以旧文件导入后的行为和
-     * 它在源机器上的行为一致。
-     */
+    /** 实施逾期时自动顺延计划结束日。1.1 才有；旧文件落成 false，与 009 迁移给既有任务填的值一致。 */
     #[serde(default)]
     pub auto_rollover: bool,
 }
@@ -136,16 +87,8 @@ pub struct FileDep {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct FileRisk {
-    /**
-     * 文件内的风险编号，1..n，和任务一样**重编号**。
-     *
-     * 加这一列的唯一理由是 `FileItemNote.promoted_ref`：一条分拣成风险的事项
-     * 要指回那条风险，而库里的自增 id 带出去毫无意义（导入时必然换号）。
-     * 没有这个编号，每个导入过的项目里所有「分拣成风险」的事项都会变成
-     * 悬挂引用 —— 而那是静默发生的。
-     *
-     * 格式 1.1 才有；旧文件里为 0（serde default），导入时按数组次序补号。
-     */
+    /** 文件内风险编号 1..n。唯一用途：`FileItemNote.promoted_ref` 要指回它，带库里的自增 id 过去会变成悬挂引用。
+     * 1.1 才有；旧文件为 0，导入时按数组次序补号。 */
     #[serde(default)]
     pub id: i64,
     pub task_id: i64,
@@ -153,42 +96,30 @@ pub struct FileRisk {
     pub level: i64,
     pub resolved: bool,
     pub created_at: i64,
-    /// 关闭时刻与处置说明（migrations/008）。1.1 才有 —— 在此之前这两项
-    /// **导出时被静默丢掉**，而「我们做了什么让它不用管」恰恰是复盘里
-    /// 唯一值得抄的东西
+    /// 关闭时刻与处置说明。1.1 才有（此前导出会静默丢掉）
     #[serde(default)]
     pub resolved_at: Option<i64>,
     #[serde(default)]
     pub resolution: Option<String>,
-    /// 「先做哪个」（migrations/012）。和 level「多严重」是两个轴
+    /// 「先做哪个」，与 level「多严重」是两个轴
     #[serde(default)]
     pub priority: Option<i64>,
 }
 
-/**
- * 一条事项。格式 1.1 新增。
- *
- * 和 FileTask 一样按**名字**引用负责人（people 是全局表，两台机器上同一个人的
- * id 必然不同），按**文件内编号**引用任务和风险。
- */
+/** 一条事项（1.1 新增）。和 FileTask 一样按名字引用负责人，按文件内编号引用任务和风险。 */
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct FileItemNote {
     pub name: String,
-    /// None = 未分拣。不是「其他」
+    /// None = 未分拣，不是「其他」
     pub kind: Option<String>,
     pub priority: i64,
     pub person: Option<String>,
-    /// 文件内的任务编号
+    /// 文件内任务编号
     pub task_id: Option<i64>,
     pub promoted_kind: Option<String>,
-    /**
-     * 晋升去向，**已经换成文件内的编号**：
-     *   阻碍 `"<文件内 taskId>/<periodId>"`、风险 `"<文件内 riskId>"`。
-     *
-     * 导出和导入各翻译一次。不翻译的话，带着源机器的自增 id 落到另一台机器上，
-     * 那个 id 要么不存在、要么指向别人的东西 —— 后者更糟。
-     */
+    /** 晋升去向，已换成文件内编号：阻碍 `"<文件内 taskId>/<periodId>"`、风险 `"<文件内 riskId>"`。
+     * 不翻译的话，源机器的自增 id 在另一台机器上要么不存在、要么指向别人的数据。 */
     pub promoted_ref: Option<String>,
     pub closed_at: Option<i64>,
     pub resolution: Option<String>,
@@ -196,13 +127,8 @@ pub struct FileItemNote {
     pub updated_at: i64,
 }
 
-/**
- * 一个事项类型。格式 1.1 新增。
- *
- * 只带**这个项目真正用到的**那几个，和 people 同一条规矩：item_kinds 是全局表，
- * 把整张表塞进去等于让「传一个项目」顺手改掉对方机器上的类型清单。
- * 导入时也同样只补缺的、不覆盖本地已有的（见 apply_in）。
- */
+/** 一个事项类型（1.1 新增）。只带本项目用到的：item_kinds 是全局表，整张塞进去会改掉对方机器的类型清单。
+ * 导入时也只补缺的，不覆盖本地已有。 */
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct FileItemKind {
@@ -225,7 +151,7 @@ pub struct FileComment {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct FileNote {
-    /// None = 项目级的当天记录，不挂在任何一条任务上
+    /// None = 项目级当天记录，不挂任何任务
     pub task_id: Option<i64>,
     pub day: String,
     pub content: String,
@@ -256,10 +182,9 @@ pub struct FileBaseline {
 pub struct FilePerson {
     pub name: String,
     pub color: String,
-    /// zip 内的相对路径，如 "avatars/1.png"。为 None 表示这个人没有头像
+    /// zip 内相对路径，如 "avatars/1.png"；None 表示没有头像
     pub avatar_file: Option<String>,
-    /// 头像不是标准 data URI 时的兜底：原样带走那个字符串。
-    /// 正常情况下永远是 None —— 但「导出时静默丢掉一个头像」不可接受
+    /// 头像不是标准 data URI 时的兜底：原样带走，不能静默丢
     pub avatar_inline: Option<String>,
     pub sort_order: f64,
 }
@@ -274,14 +199,14 @@ pub struct Bundle {
     pub comments: Vec<FileComment>,
     pub daily_notes: Vec<FileNote>,
     pub baselines: Vec<FileBaseline>,
-    /// 格式 1.1 新增。旧文件里没有这两节，落成空数组
+    /// 1.1 新增；旧文件没有这两节，落成空数组
     #[serde(default)]
     pub item_notes: Vec<FileItemNote>,
     #[serde(default)]
     pub item_kinds: Vec<FileItemKind>,
 }
 
-/// 一份读进内存的完整项目文件。
+/// 读进内存的一份完整项目文件。
 #[derive(Debug)]
 pub struct Archive {
     pub manifest: Manifest,
@@ -297,10 +222,7 @@ pub struct Archive {
 /* 从库里取一个项目                                                     */
 /* ------------------------------------------------------------------ */
 
-/// 层级展开成一个稳定序：父在子前，同层按 (sort_order, id)。
-///
-/// 顺序必须只由数据决定、不能由 SQL 的返回顺序决定 —— 否则同一份数据
-/// 导出两次会得到不同的字节，往返幂等测试就成了摆设。
+/// 层级展开成稳定序：父在子前，同层按 (sort_order, id)。顺序只能由数据决定，否则往返不幂等。
 fn stable_order(rows: &[(i64, Option<i64>, f64)]) -> Vec<i64> {
     let mut children: HashMap<Option<i64>, Vec<(f64, i64)>> = HashMap::new();
     for &(id, parent, sort) in rows {
@@ -315,8 +237,7 @@ fn stable_order(rows: &[(i64, Option<i64>, f64)]) -> Vec<i64> {
         .get(&None)
         .map(|v| v.iter().rev().map(|&(_, id)| id).collect())
         .unwrap_or_default();
-    // 深度优先，且用 seen 兜住万一存在的环 —— repair() 已经清过自引用，
-    // 但导出不该是「数据一旦有病就死循环」的那一环
+    // 深度优先，用 seen 兜住环，脏数据不能让导出死循环
     let mut seen = HashSet::new();
     while let Some(id) = stack.pop() {
         if !seen.insert(id) {
@@ -329,7 +250,7 @@ fn stable_order(rows: &[(i64, Option<i64>, f64)]) -> Vec<i64> {
             }
         }
     }
-    // 挂在已删父节点下的孤儿：不能丢，接在最后
+    // 挂在已删父节点下的孤儿不能丢，接在最后
     for &(id, _, _) in rows {
         if seen.insert(id) {
             out.push(id);
@@ -356,7 +277,7 @@ pub fn collect(conn: &Connection, project_id: i64) -> rusqlite::Result<(Bundle, 
         },
     )?;
 
-    // 任务：先原样捞出来，再按稳定序重编号成 1..n
+    // 任务：先原样取出，再按稳定序重编号成 1..n
     struct Raw {
         id: i64,
         parent_id: Option<i64>,
@@ -425,7 +346,7 @@ pub fn collect(conn: &Connection, project_id: i64) -> rusqlite::Result<(Bundle, 
         .filter_map(|id| by_id.get(id))
         .map(|t| FileTask {
             id: remap[&t.id],
-            // 父节点跨项目或已不存在时降级为顶层 —— 和 db::repair 同一个判断
+            // 父节点跨项目或已不存在时降级为顶层，与 db::repair 同一判断
             parent_id: t.parent_id.and_then(|p| remap.get(&p).copied()),
             name: t.name.clone(),
             start_date: t.start_date.clone(),
@@ -472,8 +393,7 @@ pub fn collect(conn: &Connection, project_id: i64) -> rusqlite::Result<(Bundle, 
         .collect();
     dependencies.sort_by_key(|d| (d.from_task_id, d.to_task_id));
 
-    // 风险：库里的 id 留着做 remap 的源（事项的 promoted_ref 指着它），
-    // 写进文件的是重编号后的 1..n
+    // 风险：库里 id 留着做 remap 源（事项 promoted_ref 指着它）
     let mut risk_rows: Vec<(i64, FileRisk)> = conn
         .prepare(
             "SELECT r.id, r.task_id, r.content, r.level, r.resolved, r.created_at,
@@ -508,7 +428,7 @@ pub fn collect(conn: &Connection, project_id: i64) -> rusqlite::Result<(Bundle, 
         (a.1.task_id, a.1.created_at, &a.1.content).cmp(&(b.1.task_id, b.1.created_at, &b.1.content))
     });
 
-    // 库里的风险 id → 文件内编号。往返幂等的前提是这个编号只由数据决定
+    // 库里风险 id → 文件内编号。往返幂等要求编号只由数据决定
     let mut risk_remap: HashMap<i64, i64> = HashMap::new();
     for (i, (db_id, row)) in risk_rows.iter_mut().enumerate() {
         row.id = i as i64 + 1;
@@ -561,9 +481,7 @@ pub fn collect(conn: &Connection, project_id: i64) -> rusqlite::Result<(Bundle, 
         .collect();
     daily_notes.sort_by(|a, b| (&a.day, a.task_id, a.created_at, &a.content).cmp(&(&b.day, b.task_id, b.created_at, &b.content)));
 
-    // 基线：baseline_tasks 故意不挂外键（任务删了那一行也要留着，
-    // 用来显示「原计划有这条，现已删除」）。所以这里会有对不上号的 task_id ——
-    // 给它们在 1..n 之后顺次发新号，既不与活任务撞车，也保住了那条记录
+    // 基线：baseline_tasks 故意不挂外键（任务删了也要留「原计划有这条」）；对不上号的 task_id 在 1..n 后发新号
     let mut orphan_next = tasks.len() as i64 + 1;
     let mut orphan: HashMap<i64, i64> = HashMap::new();
 
@@ -603,8 +521,7 @@ pub fn collect(conn: &Connection, project_id: i64) -> rusqlite::Result<(Bundle, 
         baselines.push(FileBaseline { name, created_at, tasks: bt });
     }
 
-    // 人员：只带这个项目真正用到的。people 表是全局的，把整张表塞进去
-    // 等于让「传一个项目」顺手改掉对方机器上所有项目的人员列表
+    // 人员：只带本项目用到的，people 是全局表
     let used: HashSet<&str> = tasks.iter().filter_map(|t| t.person.as_deref()).collect();
     let mut people: Vec<FilePerson> = Vec::new();
     let mut avatars: HashMap<String, Vec<u8>> = HashMap::new();
@@ -624,8 +541,7 @@ pub fn collect(conn: &Connection, project_id: i64) -> rusqlite::Result<(Bundle, 
             match split_data_uri(&uri) {
                 Some((mime, b64)) => match decode_base64(b64) {
                     Ok(bytes) => {
-                        // 文件名用序号而不是人名：人名可能含 / 或非 ASCII，
-                        // 而 zip 的文件名编码在各平台解压工具里表现不一
+                        // 文件名用序号不用人名：人名可能含 / 或非 ASCII，zip 文件名编码在各平台解压工具里不一致
                         let path = format!("avatars/{}.{}", people.len() + 1, ext_for(mime));
                         avatars.insert(path.clone(), bytes);
                         avatar_file = Some(path);
@@ -640,9 +556,7 @@ pub fn collect(conn: &Connection, project_id: i64) -> rusqlite::Result<(Bundle, 
 
     /* ---- 事项 ---- */
     //
-    // promoted_ref 必须在这里**翻译成文件内的编号**。不翻译的话，它带着源机器的
-    // 自增 id 落到另一台机器上：那个 id 要么不存在（整条分拣记录静默变成悬挂
-    // 引用），要么指向了别人的东西（更糟 —— 一条事项会显示成另一个项目的阻碍）。
+    // promoted_ref 必须在这里翻译成文件内编号，否则会指向别人的数据
     let mut item_notes: Vec<FileItemNote> = conn
         .prepare(
             "SELECT n.name, n.kind, n.priority, p.name AS person, n.task_id,
@@ -669,8 +583,7 @@ pub fn collect(conn: &Connection, project_id: i64) -> rusqlite::Result<(Bundle, 
         .collect::<rusqlite::Result<Vec<_>>>()?
         .into_iter()
         .map(|mut n| {
-            // 任务删了之后 task_id 已经是 NULL（ON DELETE SET NULL）；
-            // 这里再兜一道「指向别的项目」的脏数据
+            // 任务删了 task_id 已是 NULL（ON DELETE SET NULL）；这里再兜一道跨项目脏数据
             n.task_id = n.task_id.and_then(|t| remap.get(&t).copied());
             n.promoted_ref = translate_ref(
                 n.promoted_kind.as_deref(),
@@ -678,9 +591,7 @@ pub fn collect(conn: &Connection, project_id: i64) -> rusqlite::Result<(Bundle, 
                 &remap,
                 &risk_remap,
             );
-            // 引用翻译不出来 = 它本来就是悬挂的，或者指向别的项目。
-            // 两种都退回「未分拣」—— 带着一个翻译失败的引用出去，
-            // 对方机器上会显示成「已被删除」，而那是误报
+            // 翻译不出来 = 本来就悬挂，退回「未分拣」；带过去会误报「已被删除」
             if n.promoted_ref.is_none() {
                 n.promoted_kind = None;
             }
@@ -689,13 +600,7 @@ pub fn collect(conn: &Connection, project_id: i64) -> rusqlite::Result<(Bundle, 
         .collect();
     item_notes.sort_by(|a, b| (a.created_at, &a.name).cmp(&(b.created_at, &b.name)));
 
-    // 类型：只带这个项目用到的**自定义**类型。
-    //
-    // item_kinds 是全局表，整张塞进去等于让「传一个项目」顺手改掉对方机器上的
-    // 类型清单（和 people 同一条规矩）。内置的两个也不带，两个理由：
-    // 对方库里由 schema::ensure_builtin_kinds 保证存在；而且源机器上给
-    // 「问题」改过的名字和颜色不该跟着跑过去改掉对方所有项目里的那一类
-    // —— 和「人员的颜色一律不覆盖」是同一条。
+    // 类型：只带本项目用到的自定义类型。内置的由 schema::ensure_builtin_kinds 保证存在，且源机器改过的名字/颜色不该改掉对方所有项目
     let used_kinds: HashSet<&str> = item_notes.iter().filter_map(|n| n.kind.as_deref()).collect();
     let item_kinds: Vec<FileItemKind> = conn
         .prepare(
@@ -734,13 +639,7 @@ pub fn collect(conn: &Connection, project_id: i64) -> rusqlite::Result<(Bundle, 
     ))
 }
 
-/**
- * `promoted_ref` 在两套编号之间的翻译。导出和导入各用一次，方向相反但形状一样。
- *
- * 翻译不出来就返回 None，调用方据此把整条晋升关系退回「未分拣」——
- * 一个翻译失败的引用比没有引用更坏：它在对方机器上会显示成「已被删除」，
- * 而那是误报，用户会去找一条从来没存在过的阻碍。
- */
+/** `promoted_ref` 在两套编号间的翻译，导出导入各用一次。翻译不出来返回 None，调用方退回「未分拣」（失效引用会误报「已被删除」）。 */
 fn translate_ref(
     kind: Option<&str>,
     raw: Option<&str>,
@@ -750,7 +649,7 @@ fn translate_ref(
     let raw = raw?;
     match kind? {
         "blocker" => {
-            // '<taskId>/<periodId>'。只按第一个斜杠切 —— periodId 里可能有斜杠
+            // '<taskId>/<periodId>'，只按第一个斜杠切 —— periodId 里可能有斜杠
             let (task, period) = raw.split_once('/')?;
             let mapped = tasks.get(&task.parse::<i64>().ok()?)?;
             Some(format!("{mapped}/{period}"))
@@ -792,11 +691,7 @@ fn mime_for(path: &str) -> &'static str {
 /* zip 读写                                                            */
 /* ------------------------------------------------------------------ */
 
-/// JSON 一律 pretty-print。
-///
-/// 体积代价被 deflate 吃掉了（缩进是全世界最好压的东西），换来的是：
-/// 把 .ganttproj 改名成 .zip 解开，里面是人能读、能 diff、必要时能手改的文本。
-/// 一个自己都打不开的备份格式，出事时给不了任何安全感。
+/// JSON 一律 pretty-print：体积被 deflate 吃掉，换来能读、能 diff、能手改。
 fn to_json<T: Serialize>(v: &T) -> Result<Vec<u8>> {
     serde_json::to_vec_pretty(v).map_err(|e| format!("序列化失败：{e}"))
 }
@@ -822,9 +717,7 @@ pub fn write_archive(
         project_uuid: bundle.project.uuid.clone(),
     };
 
-    // 先在内存里拼完整个 zip，成功之后才落盘。
-    // 直接往目标路径写的话，中途失败会在用户的云盘目录里留下一个
-    // 大小合适、结构残缺的 .ganttproj —— 那种文件比没有文件危险得多
+    // 先拼完整个 zip 再落盘：中途失败会在用户云盘留下结构残缺的 .ganttproj
     let mut buf = std::io::Cursor::new(Vec::new());
     {
         let mut zw = zip::ZipWriter::new(&mut buf);
@@ -840,7 +733,7 @@ pub fn write_archive(
         put("project.json", &to_json(bundle)?)?;
         put("people.json", &to_json(&people)?)?;
 
-        // 顺序固定，否则同一份数据导出两次得到不同的 zip
+        // 顺序固定，否则同一份数据两次导出得到不同的 zip
         let mut names: Vec<&String> = avatars.keys().collect();
         names.sort();
         for name in names {
@@ -875,8 +768,7 @@ pub fn read_archive(path: &Path) -> Result<Archive> {
     let bundle: Bundle = serde_json::from_slice(&project_bytes)
         .map_err(|e| format!("project.json 解析失败：{e}"))?;
 
-    // 顶层多出来的段落 = 更新版本写进去的新东西。serde 默认静默忽略未知字段，
-    // 这里再单独看一眼，好让用户知道「你这次导入拿到的不是文件的全部」
+    // 顶层多出的段落 = 更新版本写入的新字段。serde 会静默忽略，单独看一眼好提示用户「拿到的不是文件全部」
     let known = [
         "project", "tasks", "dependencies", "risks", "comments", "dailyNotes", "baselines",
         "itemNotes", "itemKinds",
@@ -898,8 +790,7 @@ pub fn read_archive(path: &Path) -> Result<Archive> {
     let mut avatars = HashMap::new();
     for p in &people {
         if let Some(file) = &p.avatar_file {
-            // 头像读不出来不该让整次导入失败 —— 它是装饰，人和任务才是数据。
-            // 静默降级成首字母头像，并在预检里作为提示告诉用户
+            // 头像读不出来不该让整次导入失败：降级成首字母头像，并在预检里提示
             if let Ok(bytes) = read_entry(&mut zip, file) {
                 avatars.insert(file.clone(), bytes);
             }
@@ -931,7 +822,7 @@ fn is_iso_date(s: &str) -> bool {
     (1..=12).contains(&m) && (1..=31).contains(&d)
 }
 
-/// 任务名可能很长；报错里要能认出是哪一条，又不能把整行日志撑爆。
+/// 任务名可能很长；报错要能认出是哪一条，又不能撑爆日志。
 fn label(name: &str) -> String {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -945,11 +836,8 @@ fn label(name: &str) -> String {
     }
 }
 
-/// 写库之前把整份数据验一遍，返回**人话**的问题清单。
-///
-/// 这些条件和 schema 里的 CHECK / 触发器一一对应。之所以不直接靠数据库
-/// ABORT 兜底：那时用户看到的是 `SQLITE_CONSTRAINT: CHECK constraint failed`，
-/// 既不知道哪一条任务有问题，也不知道该怎么办。
+/// 写库前把整份数据验一遍，返回人话的问题清单。
+/// 条件与 schema 的 CHECK / 触发器一一对应，否则用户只会看到 `CHECK constraint failed`。
 pub fn validate(a: &Archive) -> Vec<String> {
     let mut problems = Vec::new();
     let b = &a.bundle;
@@ -1031,7 +919,7 @@ pub fn validate(a: &Archive) -> Vec<String> {
         }
     }
 
-    // 环：展平时会死循环，必须在写库前挡掉（库层没有这个约束）
+    // 环：展平时会死循环，库层没有这个约束，必须在这里挡
     let parent: HashMap<i64, Option<i64>> = b.tasks.iter().map(|t| (t.id, t.parent_id)).collect();
     for t in &b.tasks {
         let mut cur = t.parent_id;
@@ -1118,19 +1006,19 @@ pub struct SideSummary {
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportPreview {
-    /// 非空 = 不能导入。全有或全无，这里有一条就一条都不写
+    /// 非空 = 不能导入（全有或全无）
     pub problems: Vec<String>,
-    /// 能导入，但用户应该知道的事（版本更新、头像缺失等）
+    /// 能导入但要告知的事（版本更新、头像缺失等）
     pub warnings: Vec<String>,
     pub file: SideSummary,
     /// 本机匹配到的项目；None = 全新项目
     pub existing: Option<SideSummary>,
-    /// "uuid" | "name"，说明是怎么认出来的
+    /// "uuid" | "name"，是怎么认出来的
     pub matched_by: Option<String>,
     pub target_id: Option<i64>,
-    /// 覆盖会把本机项目改成这个名字（None = 名字没变）
+    /// 覆盖会把本机项目改成这个名字（None = 没变）
     pub rename_to: Option<String>,
-    /// rename_to 撞上了本机**另一个**项目，用户必须当场改名才能继续
+    /// rename_to 撞上了本机另一个项目，必须当场改名
     pub name_conflict: bool,
     /// 建议填进「新名称」输入框的值
     pub suggested_name: String,
@@ -1230,7 +1118,7 @@ pub fn preview(conn: &Connection, a: &Archive) -> rusqlite::Result<ImportPreview
     let (mut problems, warnings) = version_gate(a);
     problems.extend(validate(a));
 
-    // uuid 优先、名字兜底（见 migrations/007_project_identity.sql）
+    // uuid 优先、名字兜底
     let by_uuid: Option<i64> = conn
         .query_row(
             "SELECT id FROM projects WHERE uuid = ?1",
@@ -1294,10 +1182,10 @@ pub struct ImportOutcome {
     pub project_id: i64,
     pub name: String,
     pub overwritten: bool,
-    /// 覆盖前旧版被存到了哪里；用户点「撤销」时把它再导入一次即可
+    /// 覆盖前旧版存到了哪里；「撤销」就是把它再导入一次
     pub backup_path: Option<String>,
     pub task_count: i64,
-    /// 本机原本没有、这次新建出来的负责人
+    /// 本机原本没有、这次新建的负责人
     pub new_people: Vec<String>,
 }
 
@@ -1308,9 +1196,7 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// 深度，用来保证插入时父在子前 —— tasks.parent_id 上有外键，
-/// 先插子任务会直接违反约束。导出件本来就是父在子前的，但导入的文件
-/// 也可能是别人手改过的，不能假设。
+/// 按深度排序，保证插入时父在子前（tasks.parent_id 有外键）。文件可能被手改过，不能假设已有序。
 fn depth_of(id: i64, parent: &HashMap<i64, Option<i64>>) -> usize {
     let mut d = 0;
     let mut cur = parent.get(&id).copied().flatten();
@@ -1345,11 +1231,7 @@ pub fn apply(
     })
 }
 
-/// 把一份项目写进库，但**不开也不提交事务** —— 由调用方决定边界。
-///
-/// 单个 .ganttproj 导入时一个项目一个事务（见 `apply`）；整库导入时
-/// 几十个项目要放进同一个事务里（dbfile.rs），第 17 个失败就一个都不写。
-/// 返回（项目 id, 本次新建的负责人）。
+/// 把一份项目写进库，不开也不提交事务（调用方决定边界）。返回（项目 id, 新建的负责人）。
 pub(crate) fn apply_in(
     tx: &Connection,
     a: &Archive,
@@ -1380,9 +1262,7 @@ pub(crate) fn apply_in(
 
         match found {
             Some((id, existing_avatar)) => {
-                // 颜色一律不动：people 是全局表，改一下会连带改掉本机
-                // 所有其他项目里这个人的甘特条颜色。头像只在本机为空时补 ——
-                // 纯增量，不可能让现状变差
+                // 颜色一律不动：people 是全局表，改了会连带改掉本机其他项目。头像只在本机为空时补
                 if existing_avatar.is_none() {
                     if let Some(uri) = &avatar {
                         tx.execute(
@@ -1428,15 +1308,12 @@ pub(crate) fn apply_in(
             )
             .map_err(|e| name_taken(e, name))?;
 
-            // 旧内容清空。risks / comments 挂在 tasks 上，靠 ON DELETE CASCADE
-            // 跟着走；项目级的 daily_notes 没有任务可挂，单独删
+            // 旧内容清空。risks / comments 靠 tasks 的 ON DELETE CASCADE 跟着走
             for sql in [
                 "DELETE FROM dependencies WHERE project_id = ?1",
                 "DELETE FROM baselines WHERE project_id = ?1",
                 "DELETE FROM daily_notes WHERE project_id = ?1",
-                // 事项挂在项目上（不挂任务），所以 tasks 的 CASCADE 带不走它们。
-                // 漏掉这一行的后果是覆盖导入之后事项翻倍，而且旧的那一半
-                // 全部变成悬挂引用（它们指的任务已经被换掉了）
+                // 事项挂在项目上，tasks 的 CASCADE 带不走；漏了会让覆盖导入后事项翻倍
                 "DELETE FROM item_notes WHERE project_id = ?1",
                 "DELETE FROM tasks WHERE project_id = ?1",
             ] {
@@ -1467,8 +1344,7 @@ pub(crate) fn apply_in(
 
     // ---- 任务：文件内 id → 本机 id ----
     //
-    // tasks.id 是**全局**主键，不能沿用文件里的 1..n —— 那必然撞上其他项目
-    // 已有的行。这正是 db::repair 要收拾的那个历史 bug 的成因
+    // tasks.id 是全局主键，沿用文件里的 1..n 必然撞上其他项目的行
     let base: i64 = tx
         .query_row("SELECT COALESCE(MAX(id), 0) FROM tasks", [], |r| r.get(0))
         .map_err(|e| e.to_string())?;
@@ -1527,7 +1403,7 @@ pub(crate) fn apply_in(
         )
         .map_err(|e| e.to_string())?;
     }
-    // 文件内的风险编号 → 本机 id。事项的 promoted_ref 要靠它翻回来
+    // 文件内风险编号 → 本机 id，事项的 promoted_ref 要靠它翻回来
     let mut risk_remap: HashMap<i64, i64> = HashMap::new();
     for (i, r) in a.bundle.risks.iter().enumerate() {
         tx.execute(
@@ -1546,8 +1422,7 @@ pub(crate) fn apply_in(
             ],
         )
         .map_err(|e| e.to_string())?;
-        // 1.0 的文件没有 id 那一列（落成 0）—— 按数组次序补号，和导出时
-        // 的编号规则一致。那种文件里本来也没有事项，补的号不会被用到
+        // 1.0 文件没有 id 列（落成 0），按数组次序补号，与导出规则一致
         let file_id = if r.id > 0 { r.id } else { i as i64 + 1 };
         risk_remap.insert(file_id, tx.last_insert_rowid());
     }
@@ -1581,8 +1456,7 @@ pub(crate) fn apply_in(
         .map_err(|e| e.to_string())?;
         let bid = tx.last_insert_rowid();
         for t in &b.tasks {
-            // 对不上号的 task_id 是「原计划有这条、现已删除」，故意保留
-            // （baseline_tasks 没有外键，见 001_init.sql）
+            // 对不上号的 task_id 是「原计划有这条、现已删除」，故意保留（baseline_tasks 无外键）
             tx.execute(
                 "INSERT INTO baseline_tasks (baseline_id, task_id, name, start_date, end_date, duration)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -1601,9 +1475,7 @@ pub(crate) fn apply_in(
 
     /* ---- 事项类型：只补缺的，绝不覆盖本地已有的 ---- */
     //
-    // 和人员那边完全同一条规矩：item_kinds 是全局表，覆盖一个 key 的
-    // 名字或颜色会连带改掉本机**所有其他项目**里那个类型的样子。
-    // 导入一个项目不该有这种影响范围。
+    // 同人员：item_kinds 是全局表，覆盖一个 key 会改掉本机所有项目里那个类型的样子。
     for k in &a.bundle.item_kinds {
         tx.execute(
             "INSERT OR IGNORE INTO item_kinds
@@ -1617,9 +1489,7 @@ pub(crate) fn apply_in(
 
     /* ---- 事项 ---- */
     for n in &a.bundle.item_notes {
-        // 文件里的类型 key 在本机不存在（1.0 的文件、或者那一节被手改过）时
-        // 退回「未分拣」。写进一个认不出来的 key 会让那一行既不是未分拣、
-        // 也显示不出标签 —— 一个无法从界面上修好的状态
+        // 类型 key 在本机不存在时退回「未分拣」：认不出的 key 既不是未分拣也显示不出标签，界面上没法修
         let kind = match n.kind.as_deref() {
             None => None,
             Some(k) => {
@@ -1640,8 +1510,7 @@ pub(crate) fn apply_in(
             &remap,
             &risk_remap,
         );
-        // 翻译不出来就退回未分拣。两列同生同灭 —— 留下半截会让界面显示
-        // 「已被删除」，而那是误报
+        // 翻译不出来就退回未分拣。两列同生同灭，留半截会显示成「已被删除」
         let promoted_kind = promoted_ref.as_ref().and(n.promoted_kind.clone());
 
         tx.execute(
@@ -1674,11 +1543,7 @@ pub(crate) fn apply_in(
 /* Tauri 命令                                                          */
 /* ------------------------------------------------------------------ */
 
-/// 把一个项目导出成 `.ganttproj`。
-///
-/// 只在项目列表页调用，也就是说项目此刻一定是关闭状态 —— 内存里没有比库
-/// 更新的编辑（`closeProject` 已经 `await persistence.flush()` 过了），
-/// 直接读库就是当下唯一确定的口径。
+/// 把一个项目导出成 `.ganttproj`。只在项目列表页调用，此时项目一定是关闭状态（closeProject 已 flush），直接读库即当下口径。
 #[tauri::command]
 pub fn export_project(
     app: tauri::AppHandle,
@@ -1700,7 +1565,7 @@ pub fn export_project(
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// 读文件、校验、和本机现有项目对号 —— 但**一个字都不写库**。
+/// 读文件、校验、和本机项目对号，不写库。
 #[tauri::command]
 pub fn inspect_import(db: tauri::State<Db>, path: String) -> Result<ImportPreview> {
     let archive = read_archive(Path::new(&path))?;
@@ -1708,15 +1573,8 @@ pub fn inspect_import(db: tauri::State<Db>, path: String) -> Result<ImportPrevie
     preview(&conn, &archive).map_err(|e| e.to_string())
 }
 
-/// 真正落库。
-///
-/// 文件在这里**重新读一遍、重新校验一遍**，不复用预检的结果 ——
-/// 预检和确认之间隔着用户的思考时间，那期间文件可能被云盘同步换掉、
-/// 被拔掉的 U 盘带走、或者被另一个进程改写。
-///
-/// `backup_stamp` 由前端给：本机时区只有渲染层知道，Rust 这边的 std
-/// 拿不到时区，自己拼出来的会是 UTC —— 一个写着 06:02 的「覆盖前」备份
-/// 在下午两点的用户眼里就是个谜。
+/// 真正落库。文件重新读、重新校验，不复用预检结果（中间可能被云盘同步换掉）。
+/// `backup_stamp` 由前端给：Rust 的 std 拿不到时区。
 #[tauri::command]
 pub fn commit_import(
     app: tauri::AppHandle,
@@ -1737,9 +1595,7 @@ pub fn commit_import(
 
     let mut conn = db.0.lock().map_err(|e| e.to_string())?;
 
-    // 覆盖前先把本机版整份导成一个 .ganttproj。
-    // 用的是和正常导出完全相同的那条代码路径，所以「撤销」不需要第二套恢复
-    // 逻辑 —— 把这个文件再导入一次就是了
+    // 覆盖前把本机版整份导成 .ganttproj，走正常导出路径，「撤销」即再导入它
     let backup_path = match target_id {
         None => None,
         Some(id) => {
@@ -1768,8 +1624,7 @@ pub fn commit_import(
     apply(&mut conn, &archive, target_id, &name, backup_path)
 }
 
-/// 文件名里不能出现的字符换成下划线。
-/// 项目名是自由文本，`/` 在 macOS 上会被当成路径分隔符，直接写就落到别处去了。
+/// 文件名里的非法字符换成下划线：项目名是自由文本，`/` 在 macOS 上是路径分隔符。
 pub fn safe_stem(name: &str) -> String {
     let cleaned: String = name
         .chars()
@@ -1783,8 +1638,7 @@ pub fn safe_stem(name: &str) -> String {
     }
 }
 
-/// `backups/` 目录，没有就建出来。和滚动备份共用一个目录 ——
-/// 用户找「我的东西存哪了」时只需要记住一个地方。
+/// `backups/` 目录，没有就建。和滚动备份共用。
 trait BackupDir {
     fn path_resolver_backups(&self) -> Option<PathBuf>;
 }
@@ -1816,7 +1670,7 @@ mod tests {
         conn
     }
 
-    /// 一个尽量把所有表都用上的项目 —— 少一张表，往返测试就少覆盖一块。
+    /// 尽量把所有表都用上的项目 —— 少一张表，往返测试就少覆盖一块。
     fn seed(conn: &Connection, name: &str) -> i64 {
         conn.execute(
             "INSERT INTO projects (name, color, uuid, work_days, holidays, created_at, updated_at)
@@ -1897,11 +1751,11 @@ mod tests {
         )
         .unwrap();
 
-        // 一条开了自动顺延的任务 —— 1.0 的格式会静默丢掉这一列
+        // 一条开了自动顺延的任务
         conn.execute("UPDATE tasks SET auto_rollover = 1 WHERE id = ?1", params![other])
             .unwrap();
 
-        /* ---- 事项：四种状态各一条，往返测试才覆盖得全 ---- */
+        /* ---- 事项：四种状态各一条 ---- */
 
         // 一个自定义类型。内置的两个由迁移插入，不该被导出
         conn.execute(
@@ -1983,17 +1837,7 @@ mod tests {
         dir.join(name)
     }
 
-    /**
-     * 往返幂等 —— 本模块最重要的一条测试。
-     *
-     * 导出 → 导入到另一个库 → 再导出，两次的 project.json / people.json
-     * 必须逐字节相同。一条断言同时挡住三类 bug：
-     *   · 某个字段没被导出（第二次就缺了）
-     *   · 某个字段导入时丢了（第二次变成默认值）
-     *   · 排序不稳定（同样的数据两次导出字节不同）
-     *
-     * 写十个「assert 某字段还在」的零散断言，也覆盖不到第三类。
-     */
+    /** 往返幂等：导出 → 导入 → 再导出，两次 JSON 逐字节相同。一条断言挡住漏导出、丢字段、排序不稳三类 bug。 */
     #[test]
     fn round_trip_is_byte_identical() {
         let a = mem();
@@ -2007,8 +1851,7 @@ mod tests {
         assert!(validate(&archive).is_empty(), "{:?}", validate(&archive));
 
         let mut b = mem();
-        // 目标库里先放一个别的项目和一堆任务，好让 id 分配范围完全错开 ——
-        // 如果哪里还在沿用文件里的 id，这一步会立刻暴露
+        // 目标库先放一个干扰项目把 id 范围错开，沿用文件 id 的 bug 会立刻暴露
         seed(&b, "干扰项目");
         b.execute("UPDATE projects SET uuid = 'other' WHERE name = '干扰项目'", []).unwrap();
 
@@ -2023,16 +1866,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /**
-     * 事项的晋升引用必须在两套编号之间**真的被翻译过**。
-     *
-     * 往返幂等那条测试证明不了这一点：一个「原样抄过去」的错误实现，
-     * 两次导出的字节同样相同（文件里存的就是源机器的 id，导入时原样写回，
-     * 再导出又原样读出来）。但那样的数据在对方机器上全是悬挂引用 ——
-     * 而且是静默的：界面上显示「已被删除」，用户会去找一条从没存在过的阻碍。
-     *
-     * 所以这里直接查目标库里那两条引用，确认它们指向的是**目标库的** id。
-     */
+    /** 晋升引用必须真的翻译成目标库 id。往返幂等证明不了这点：「原样抄过去」的错误实现同样逐字节相同，却在对方机器上全是悬挂引用。 */
     #[test]
     fn promoted_refs_are_remapped_into_the_target_database() {
         let a = mem();
@@ -2044,8 +1878,7 @@ mod tests {
         let archive = read_archive(&path).unwrap();
 
         let mut b = mem();
-        // 目标库先放一个干扰项目，把 id 分配范围整个推开 ——
-        // 没有这一步，源库和目标库的 id 可能恰好相同，测试就变成了摆设
+        // 目标库先放一个干扰项目把 id 范围推开，否则两库 id 可能恰好相同
         seed(&b, "干扰项目");
         b.execute("UPDATE projects SET uuid = 'other' WHERE name = '干扰项目'", [])
             .unwrap();
@@ -2105,13 +1938,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /**
-     * 自定义类型只补缺的，不覆盖本地同 key 的那一行。
-     *
-     * item_kinds 是全局表：覆盖一个 key 的名字或颜色会连带改掉本机**所有
-     * 其他项目**里那个类型的样子。导入一个项目不该有这种影响范围 ——
-     * 和人员那边「同名即同人、本地优先」是同一条规矩。
-     */
+    /** 自定义类型只补缺的，不覆盖本地同 key 的行（全局表）。 */
     #[test]
     fn item_kinds_merge_locally_without_overwriting() {
         let a = mem();
@@ -2152,8 +1979,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// 覆盖导入要把旧的事项清掉。它们挂在项目上、不挂任务，
-    /// 所以 tasks 的 CASCADE 带不走 —— 漏掉就会翻倍，而且旧的那一半全成悬挂引用。
+    /// 覆盖导入要清掉旧事项：tasks 的 CASCADE 带不走，漏掉会翻倍。
     #[test]
     fn overwrite_clears_old_item_notes() {
         let a = mem();
@@ -2188,7 +2014,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// 头像必须真的还原成 PNG 文件，而不是留在 JSON 里的 base64 字符串。
+    /// 头像必须还原成 PNG 文件，而不是留在 JSON 里的 base64。
     #[test]
     fn avatars_become_real_files() {
         let a = mem();
@@ -2205,8 +2031,7 @@ mod tests {
         assert!(li.avatar_file.is_none());
     }
 
-    /// 只带这个项目用到的人。people 是全局表，整张塞进去等于让「传一个项目」
-    /// 顺手改掉对方机器上所有项目的人员列表。
+    /// 只带这个项目用到的人。
     #[test]
     fn only_exports_people_in_use() {
         let a = mem();
@@ -2224,7 +2049,7 @@ mod tests {
         );
     }
 
-    /// 同名即同人：颜色一律不动（会影响其他项目），头像只在本机为空时补。
+    /// 同名即同人：颜色一律不动（全局表，会影响其他项目），头像只在本机为空时补。
     #[test]
     fn merges_people_by_name_local_wins() {
         let a = mem();
@@ -2265,8 +2090,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// 覆盖：项目 id 不变（卡片位置、上次打开的项目等引用还指着它），
-    /// 旧内容清空，不残留。
+    /// 覆盖：项目 id 不变（卡片位置等引用还指着它），旧内容清空。
     #[test]
     fn overwrite_replaces_contents_and_keeps_id() {
         let a = mem();
@@ -2344,8 +2168,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// 改名会撞上本机**另一个**项目时必须提前发现 —— 否则用户点完「覆盖并改名」
-    /// 才在 UNIQUE 约束上炸掉，而那时备份都已经写完了。
+    /// 改名撞上本机另一个项目时必须预检就发现，否则要等备份写完才在 UNIQUE 上炸掉。
     #[test]
     fn detects_rename_collision() {
         let a = mem();
@@ -2404,7 +2227,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// 环会让展平逻辑死循环，库层没有这个约束，只能在这里挡。
+    /// 环会让展平死循环，库层没有这个约束，只能在这里挡。
     #[test]
     fn rejects_parent_cycles() {
         let a = mem();
@@ -2442,7 +2265,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// 不是 zip、或者缺关键条目时，报错要能让人看懂在说什么。
+    /// 不是 zip、或缺关键条目时，报错要让人看懂。
     #[test]
     fn rejects_garbage_files() {
         let path = tmp("garbage.ganttproj");

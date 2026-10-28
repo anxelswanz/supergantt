@@ -1,17 +1,7 @@
-//! 自动滚动备份（DESIGN.md §4.2）。
+//! 自动滚动备份：每次启动拷到 `backups/gantt-YYYY-MM-DD.db`，保留最近 KEEP 份。
 //!
-//! 单机本地存储没有云端兜底，唯一的保险就是多留几份副本。
-//! 每次启动把当前数据库复制到 `backups/gantt-YYYY-MM-DD.db`，只保留最近 KEEP 份。
-//!
-//! ⚠️ 这里**不能**用 `fs::copy` 复制 gantt.db。
-//!
-//! 数据库跑在 WAL 模式下：事务先落到 `gantt.db-wal`，要等 checkpoint 才合并回主文件。
-//! 只复制主文件，拿到的是一个缺失了最近全部提交的残缺库 —— 极端情况下（进程被强杀、
-//! 从未 checkpoint 过）复制出来的甚至是一张表都没有的空壳。
-//! 一个静默产出空备份的备份功能比没有备份更危险，因为它给的是虚假的安全感。
-//!
-//! 所以走 SQLite 的在线备份 API：它从活动连接读取，天然把 WAL 里的内容算进去，
-//! 且对并发写入是安全的。
+//! ⚠️ **不能**用 `fs::copy`：WAL 模式下提交先落在 `gantt.db-wal`，只拷主文件
+//! 会得到缺了最近提交的残库，甚至空壳。必须走在线备份 API 从活动连接读。
 
 use rusqlite::{backup::Backup, Connection};
 use std::fs;
@@ -46,7 +36,7 @@ impl From<rusqlite::Error> for BackupError {
     }
 }
 
-/// 备份一次并清理旧文件。同一天重复启动只覆盖当天那一份，不刷掉历史。
+/// 备份一次并清理旧文件。
 pub fn rotate(
     conn: &Connection,
     config_dir: &Path,
@@ -58,11 +48,7 @@ pub fn rotate(
 
     let dest = backup_dir.join(format!("{stem}-{}.db", today_stamp()));
 
-    // 当天已经有备份就不再覆盖。
-    //
-    // 备份的价值在于「出事之前的那一份」。按天命名 + 每次启动都覆盖，等于
-    // 一天里反复重启就会把当天最早那份干净数据冲掉 —— 真出问题时能回退的
-    // 只剩已经被污染的状态。保留当天第一次启动的快照，才是能救命的那份。
+    // 当天已有备份就不覆盖：一天里反复重启不能把当天最早那份干净快照冲掉
     if dest.exists() {
         prune(&backup_dir, stem, keep)?;
         return Ok(dest);
@@ -73,13 +59,9 @@ pub fn rotate(
     Ok(dest)
 }
 
-/// 把活动连接整份拷成 dest 这一个文件。
+/// 把活动连接整份拷成 dest 一个完整单文件（含 WAL 里的提交）。
 ///
-/// 滚动备份、「导出数据库」、整库导入前的保险都走这里 —— 三处要的是同一个
-/// 东西：一个包含 WAL 里全部提交、自己就是完整数据的单文件。
-///
-/// 先写到同目录的 `.part` 再改名：目标可能在云盘或 U 盘上，写到一半失败
-/// 留下一个大小像样、内容残缺的 .db，比没有文件危险得多。
+/// 先写同目录 `.part` 再改名：目标可能在云盘或 U 盘，写一半失败会留下残缺 .db。
 pub fn snapshot(conn: &Connection, dest: &Path) -> Result<(), BackupError> {
     let part = dest.with_file_name(format!(
         "{}.part",
@@ -93,13 +75,11 @@ pub fn snapshot(conn: &Connection, dest: &Path) -> Result<(), BackupError> {
         // step(-1) = 一次拷完所有页
         backup.step(-1)?;
     }
-    // 备份库本身也别留 WAL 副产物，让它就是一个干净的单文件 ——
-    // 拷到另一台电脑时只需要带这一个文件
+    // 备份库别留 WAL 副产物，拷走时只需带这一个文件
     target.pragma_update(None, "journal_mode", "DELETE")?;
     drop(target);
 
-    // Windows 上 rename 覆盖已有文件是可以的（MoveFileEx + REPLACE_EXISTING），
-    // 但目标被别的程序占着时会失败 —— 那就如实报错，不留 .part 垃圾
+    // Windows 上目标被别的程序占着时 rename 会失败：如实报错，不留 .part
     fs::rename(&part, dest).inspect_err(|_| {
         let _ = fs::remove_file(&part);
     })?;
@@ -139,10 +119,7 @@ fn today_stamp() -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-// 民用历换算搬去了 gantt-core：`db.rs`（项目列表算逾期）、`backup.rs`（按天命名备份）
-// 和 CLI（`+3d` 这类相对日期）三处都要它，各自留一份迟早会分叉出「差一天」的 bug。
-// 这里只做转发，`civil_from_days_matches_known_dates` 那条测试留在下面 ——
-// 它现在同时守住了 core 的那份实现。
+// 民用历换算只在 gantt-core 留一份（db.rs、backup.rs、CLI 共用），免得分叉出「差一天」
 pub(crate) use gantt_core::calendar::civil_from_days;
 
 /// 供设置页显示「数据文件在哪」。
@@ -187,8 +164,7 @@ mod tests {
         assert_eq!(civil_from_days(20_666), (2026, 8, 1));
     }
 
-    /// 这条测试就是为了挡住那个把备份写成空壳的 bug：
-    /// 数据在 WAL 里、主文件还没 checkpoint 时，备份必须依然完整。
+    /// 数据还在 WAL 里、未 checkpoint 时，备份必须依然完整。
     #[test]
     fn backup_captures_data_still_sitting_in_wal() {
         let dir = std::env::temp_dir().join("gantt-backup-wal-test");
@@ -216,8 +192,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// 备份按天命名。一天里反复重启不能把当天最早那份干净数据冲掉 ——
-    /// 备份的价值恰恰在于「出事之前的那一份」。
+    /// 一天里反复重启不能把当天最早那份干净数据冲掉。
     #[test]
     fn same_day_restart_must_not_overwrite_the_morning_snapshot() {
         let dir = std::env::temp_dir().join("gantt-backup-noclobber-test");

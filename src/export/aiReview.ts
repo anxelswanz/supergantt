@@ -1,11 +1,4 @@
-/**
- * AI 复盘文档 → Word。
- *
- * 读的是 aiReview/markdown.ts 解析出来的那棵块树 —— 和屏幕上渲染用的是同一棵，
- * 所以屏幕上是表格的地方 Word 里也是表格，不会一边一个样。
- *
- * Markdown 本身不用转：库里存的就是它，导出 .md 直接写原文（见 run.ts）。
- */
+/** AI 复盘文档 → Word。读 aiReview/markdown.ts 解析出的块树，和屏幕渲染同一棵。 */
 
 import {
   BorderStyle,
@@ -22,14 +15,14 @@ import {
 } from "docx";
 import { parseMarkdown, type Block, type Inline } from "../aiReview/markdown";
 
-/** 纵向 A4 宽 11906，左右各留 1080（0.75 英寸）—— 这是一份要读的文档，不是一张宽表 */
+/** 纵向 A4 宽 11906，左右各留 1080（0.75 英寸） */
 const PAGE_MARGIN = 1080;
 const USABLE = 11906 - PAGE_MARGIN * 2;
 
 /** 列表和引用每缩一级多少（twip） */
 const INDENT = 360;
 
-/** 半磅。正文 10.5pt 是中文公文最常见的字号（五号） */
+/** 半磅。正文 10.5pt（五号） */
 const BODY = 21;
 const HEADING_SIZE: Record<number, number> = { 1: 36, 2: 28, 3: 24, 4: 22 };
 const HEADING_LEVEL = [
@@ -98,8 +91,7 @@ function render(blocks: Block[], ctx: Ctx): (Paragraph | Table)[] {
 
       case "list":
         b.items.forEach((item, i) => {
-          // 记号直接写成文字，不走 Word 的编号定义：那套东西要预先声明每一级的
-          // 样式，而这里的嵌套深度是 Markdown 决定的，事先不知道
+          // 记号直接写成文字，不走 Word 编号定义：那要预先声明每一级样式，而嵌套深度事先不知道
           const mark =
             item.checked === true ? "☑ " : item.checked === false ? "☐ " : b.ordered ? `${b.start + i}. ` : "• ";
           const [first, ...rest] = item.blocks;
@@ -160,7 +152,7 @@ function table(b: Extract<Block, { type: "table" }>): Table {
       children: [new Paragraph({ children: runs(inlines, { size: 18, bold: head }) })],
     });
 
-  /** 行里的格数可能和表头对不上（手改 Markdown 时很容易少一格），补空格子 */
+  /** 行的格数可能少于表头（手改 Markdown 常见），补空格子 */
   const pad = (row: Inline[][]): Inline[][] =>
     Array.from({ length: cols }, (_, i) => row[i] ?? []);
 

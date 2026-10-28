@@ -1,23 +1,15 @@
-//! 把前端生成好的导出文件写到用户选定的路径。
-//!
-//! 分工：**内容全部在前端生成**（exceljs 拼 xlsx），Rust 这边只负责落盘。
-//! 理由是导出件的排版依赖着色器、日历、汇总结果这些只存在于渲染层的东西，
-//! 在 Rust 里重算一遍等于把整个模型实现两次，两份实现迟早会对不上。
-//!
-//! 路径由 dialog 插件的「另存为」返回，所以这里拿到的是用户亲自点过的位置 ——
-//! 不需要再自己拼目录，也不该擅自改写用户给的文件名。
+//! 把前端生成好的导出文件写到用户选定的路径。内容全在前端生成（exceljs），
+//! Rust 只负责落盘：排版依赖着色器、日历、汇总结果，在 Rust 重算等于实现两遍模型。
+//! 路径来自「另存为」对话框，不该擅自改写用户给的文件名。
 
 use std::fs;
 use std::path::Path;
 
-/// Base64 解码。
-///
-/// 前端传字节有三条路：JSON 数字数组（体积 4×、解析慢）、raw IPC body
-/// （拿不到同一次调用里的路径参数）、base64 字符串（1.33×）。选最后一条，
-/// 代价就是这二十行 —— 比为它引一个 crate 划算。
+/// Base64 解码。前端传字节只能走 base64：JSON 数字数组体积 4×，
+/// raw IPC body 拿不到同一次调用的路径。手写这二十行比引 crate 划算。
 pub(crate) fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
     const INVALID: u8 = 0xFF;
-    // 反查表：ASCII → 6 位值。填表比每次 match 分支快，也更难写错。
+    // 反查表：ASCII → 6 位值
     let mut table = [INVALID; 256];
     let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut i = 0;
@@ -28,7 +20,7 @@ pub(crate) fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
 
     let bytes: Vec<u8> = input
         .bytes()
-        // 换行和 '=' 填充都不携带信息，直接滤掉，长度校验放在下面统一做
+        // 换行和 '=' 填充不携带信息，滤掉后统一做长度校验
         .filter(|b| !b.is_ascii_whitespace() && *b != b'=')
         .collect();
 
@@ -57,11 +49,8 @@ pub(crate) fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// Base64 编码。
-///
-/// 反方向：头像在库里是 `data:image/png;base64,...` 的字符串，导出时要还原成
-/// 真实的 PNG 文件，导入时又要拼回 data URI。既然解码器已经手写了，
-/// 编码器这十行没有理由再去引一个 crate。
+/// Base64 编码。头像在库里是 `data:image/png;base64,...`，导出要还原成
+/// 真实 PNG 文件，导入又要拼回 data URI。
 pub(crate) fn encode_base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -82,8 +71,8 @@ pub(crate) fn encode_base64(bytes: &[u8]) -> String {
     out
 }
 
-/// 写文件。父目录不存在就建出来 —— 用户在保存对话框里新建目录后取消再确认，
-/// 偶尔会拿到一个尚未落地的路径。
+/// 写文件。父目录不存在就建出来：在保存对话框里新建目录后取消再确认，
+/// 偶尔会拿到尚未落地的路径。
 #[tauri::command]
 pub fn write_export(path: String, base64: String) -> Result<String, String> {
     let bytes = decode_base64(&base64)?;
@@ -95,7 +84,7 @@ pub fn write_export(path: String, base64: String) -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// 「在访达中显示」导出好的文件。导出完不给个去处，用户还得自己翻目录。
+/// 「在访达中显示」导出好的文件。
 #[tauri::command]
 pub fn reveal_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
@@ -140,8 +129,7 @@ mod tests {
         assert!(decode_base64("Zm9vY").is_err(), "余 1 个字符不是合法编码");
     }
 
-    /// 编码器和解码器必须互为逆运算 —— 三种填充长度各验一遍，
-    /// 再加一轮全字节值的往返，任何一处移位错误都会在这里露馅。
+    /// 编码器和解码器必须互为逆运算。
     #[test]
     fn base64_round_trips() {
         for vec in ["", "f", "fo", "foo", "foob", "fooba", "foobar"] {

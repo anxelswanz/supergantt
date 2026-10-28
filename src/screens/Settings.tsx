@@ -9,7 +9,7 @@ import {
 } from "../gantt/theme";
 import { PROJECT_COLORS, useAppStore } from "../store/useAppStore";
 import { REVEAL_LABEL, shortcut } from "../core/keys";
-import { APP_VIEWS, OPTIONAL_VIEWS, PERMANENT_VIEW } from "../core/views";
+import { APP_VIEWS, PERMANENT_VIEW } from "../core/views";
 import { BLOCKER_KIND, RISK_KIND, newKindKey } from "../core/items";
 import type { ItemKind } from "../db/api";
 import { plugins } from "../plugins/registry";
@@ -27,27 +27,14 @@ import { Avatar, fileToAvatarDataUrl } from "./Avatar";
 import { CalendarPane } from "./CalendarSettings";
 import { ExportButton } from "./ExportButton";
 
-/**
- * 设置面板。
- *
- * 三块内容按「改动频率」排序，不是按重要性：着色是随时会切的视图偏好，
- * 负责人偶尔维护，数据文件几乎不碰但出事时必须找得到。
- */
-
 type Tab = "appearance" | "views" | "kinds" | "people" | "calendar" | "plugins" | "data";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "appearance", label: "外观" },
-  // 视图紧跟外观：两者都是「这个软件长什么样」。事项类型也在这一页 ——
-  // 它属于「事项视图怎么用」，和负责人、工作日历那种项目数据不是一类
   { id: "views", label: "视图" },
-  // 事项类型独立一页，不挂在「视图」下面：类型清单会长 —— 一个团队用上
-  // 十几个类型是正常的 —— 而它需要搜索和分页，塞进别人的页脚底下放不开
   { id: "kinds", label: "事项类型" },
   { id: "people", label: "负责人" },
   { id: "calendar", label: "工作日历" },
-  // 插件排在数据前面：它是「扩展这个软件」的地方，属于日常会来的，
-  // 而数据页是出事才来的
   { id: "plugins", label: "插件" },
   { id: "data", label: "数据" },
 ];
@@ -57,11 +44,11 @@ export function Settings({
   initialTab = "appearance",
 }: {
   onClose: () => void;
-  /** 从哪一页打开。事项的分拣菜单会直接把人送到「视图」页 */
+  /** 打开哪一页；分拣菜单会直接送到「事项类型」 */
   initialTab?: string;
 }) {
   const [tab, setTab] = useState<Tab>(
-    // 认不出来的页签回退到外观，而不是白屏 —— 这个值是别处传进来的
+    // 认不出的页签回退到外观：这个值由调用方传入，不可信
     (TABS.some((t) => t.id === initialTab) ? initialTab : "appearance") as Tab,
   );
 
@@ -133,36 +120,19 @@ export function Settings({
 /* 插件                                                                */
 /* ------------------------------------------------------------------ */
 
-/** 三态在界面上的样子。「关掉的」和「坏的」要能一眼分开 */
+/** 「停用」和「出错」要是两种颜色，不能混成一种 */
 const PLUGIN_STATUS: Record<PluginRecord["status"], { label: string; cls: string }> = {
-  loaded: { label: "已启用", cls: "text-emerald-600" },
+  loaded: { label: "已启用", cls: "text-[var(--ok)]" },
   disabled: { label: "已停用", cls: "text-[var(--text-dim)]" },
-  error: { label: "出错", cls: "text-rose-500" },
+  error: { label: "出错", cls: "text-[var(--danger)]" },
 };
 
-/**
- * 插件页。
- *
- * 这一页要回答三个问题，顺序就是它们在界面上的顺序：
- *
- *   1. 我的插件放哪？ —— 顶上那行路径 + 「打开插件目录」按钮。没有这一步，
- *      用户看完这一页不知道接下来该干什么。
- *   2. 现在装了哪些、哪个是坏的？ —— 列表。坏插件必须把原因写在这儿，
- *      而不是只丢进控制台：作者不在调试器前面的时候，看不懂为什么没生效。
- *   3. 某个插件有什么开关？ —— 挂在各自那张卡片下面。插件注册的设置项
- *      不定长，所以不做成全局区块，跟插件走才不会张冠李戴。
- *
- * 安装只针对**随应用附带**的插件（「可安装」那一栏）：点一下拷进插件目录，
- * 再点启用。自己写的插件照旧是把目录拷进去 —— 那种情况用资源管理器比
- * 在这里画一个文件浏览器快得多。卸载对两种都一样：删掉那个目录。
- */
 function PluginsPane() {
   const { records, settingFields, booted, bootError } = useRegistry();
 
-  /** directory 的路径要和 bootError 分开放：一个常态，一个故障 */
   const [dir, setDir] = useState("");
   const [message, setMessage] = useState("");
-  /** 正在启用/停用/重载的插件 id。多个可以同时在飞，所以用集合 */
+  /** 多个插件的操作可以同时进行，所以用集合而不是单个 id */
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
 
   useEffect(() => {
@@ -179,12 +149,8 @@ function PluginsPane() {
   }, []);
 
   /**
-   * 包的层数不能省。
-   *
-   * 这里大部分调用链是「按钮 → async 函数 → 插件代码」，而插件代码是
-   * 唯一不由我们审查的代码。让它把异常抛到事件处理器外面，React 19 的
-   * 默认行为是整个根卸载 —— 用户看到的是白屏，且找不到任何原因。
-   * 命令那条路径已经在 registry.runCommand 里兜住了，这条得在这儿兜。
+   * 插件异常不能冒到事件处理器外：React 19 的默认行为是整个根卸载，
+   * 用户看到白屏且找不到原因。
    */
   const run = (pluginId: string, fn: () => Promise<void>): void => {
     setBusy((prev) => new Set(prev).add(pluginId));
@@ -202,7 +168,7 @@ function PluginsPane() {
   return (
     <Section
       title="插件"
-      desc="插件是放在插件目录里的文件夹，改完代码不用重新构建 —— 到这儿点一下「重新加载」就生效。它们能往工具条上加视图，也能改任务数据（走命令栈，所以照样能撤销）。"
+      desc="插件是插件目录里的一个文件夹，能往工具条上加视图，也能改任务数据（可撤销）。改完代码点插件卡片上的「重新加载」即可生效。"
     >
       <div className="mb-3 break-all rounded-lg border border-[var(--rule)] bg-[var(--surface-alt)] p-2.5 font-mono text-[10px] text-[var(--text-dim)]">
         {dir || "读取中…"}
@@ -216,19 +182,19 @@ function PluginsPane() {
           {REVEAL_LABEL}
         </button>
         <span className="text-[10px] text-[var(--text-dim)]">
-          装一个插件 = 把一个文件夹拷进去；卸掉 = 删掉它
+          装插件：把文件夹拷进这个目录
         </span>
       </div>
 
       {message && (
-        <div className="mb-3 break-all rounded-lg border border-rose-400/40 bg-rose-500/5 p-2 text-[10px] text-rose-500">
+        <div className="mb-3 break-all rounded-lg border border-[var(--danger)]/40 bg-[var(--danger)]/5 p-2 text-[10px] text-[var(--danger)]">
           {message}
         </div>
       )}
 
-      {/* 读不了插件目录是整页级别的问题，和单个插件坏掉不是一回事 */}
+      {/* 目录读不了是整页的问题，和单个插件出错分开显示 */}
       {bootError && (
-        <div className="mb-3 break-all rounded-lg border border-rose-400/40 bg-rose-500/5 p-2.5 text-[10px] leading-relaxed text-rose-500">
+        <div className="mb-3 break-all rounded-lg border border-[var(--danger)]/40 bg-[var(--danger)]/5 p-2.5 text-[10px] leading-relaxed text-[var(--danger)]">
           {bootError}
         </div>
       )}
@@ -245,9 +211,9 @@ function PluginsPane() {
             <br />
             quicknote/main.js
           </div>
-          manifest 里写 id / name / version / apiVersion，
-          main.js 导出一个 <code>onload(api)</code>，用 <code>api.views.register(...)</code>
-          把界面挂上去。回这儿点「重新加载」就会出现在工具条里。
+          manifest.json 里写 id、name、version、apiVersion；
+          main.js 导出 <code>onload(api)</code>，再用 <code>api.views.register(...)</code>
+          注册视图。重启应用后出现在这里。
         </div>
       )}
 
@@ -282,7 +248,7 @@ function PluginsPane() {
                   )}
                   <div className="mt-1 font-mono text-[10px] text-[var(--text-dim)]">
                     {r.manifest.id}
-                    {r.manifest.author ? ` · ${r.manifest.author}` : ""}
+                    {r.manifest.author ? `（${r.manifest.author}）` : ""}
                   </div>
                 </div>
 
@@ -291,7 +257,7 @@ function PluginsPane() {
                     <button
                       onClick={() => run(r.manifest.id, () => plugins.reload(r.manifest.id))}
                       disabled={isBusy}
-                      title="改完插件代码点这个，不用重启软件"
+                      title="重新加载插件代码，不用重启应用"
                       className="rounded-lg border border-[var(--rule)] px-2.5 py-1 text-[10px] text-[var(--text-dim)] hover:text-[var(--text)] disabled:opacity-50"
                     >
                       {isBusy ? "…" : "重新加载"}
@@ -302,7 +268,7 @@ function PluginsPane() {
                       onClick={() => {
                         if (
                           !window.confirm(
-                            `卸载「${r.manifest.name}」？\n\n插件保存的数据（比如故障树、同步记录）会留着，重新安装后还能看到。`,
+                            `卸载「${r.manifest.name}」？\n\n插件保存的数据会保留，重新安装后还在。`,
                           )
                         )
                           return;
@@ -312,8 +278,8 @@ function PluginsPane() {
                         });
                       }}
                       disabled={isBusy}
-                      title="删掉插件代码；保存的数据留着，重新安装后还在"
-                      className="rounded-lg border border-[var(--rule)] px-2.5 py-1 text-[10px] text-[var(--text-dim)] hover:text-rose-500 disabled:opacity-50"
+                      title="删除插件代码，插件保存的数据保留"
+                      className="rounded-lg border border-[var(--rule)] px-2.5 py-1 text-[10px] text-[var(--text-dim)] hover:text-[var(--danger)] disabled:opacity-50"
                     >
                       卸载
                     </button>
@@ -337,7 +303,7 @@ function PluginsPane() {
               </div>
 
               {r.error && (
-                <div className="mt-2 break-all rounded-lg bg-rose-500/5 p-2 text-[10px] leading-relaxed text-rose-500">
+                <div className="mt-2 break-all rounded-lg bg-[var(--danger)]/5 p-2 text-[10px] leading-relaxed text-[var(--danger)]">
                   {r.error}
                 </div>
               )}
@@ -345,7 +311,7 @@ function PluginsPane() {
               {r.warnings.length > 0 && (
                 <ul className="mt-2 space-y-0.5">
                   {r.warnings.map((w) => (
-                    <li key={w} className="text-[10px] leading-relaxed text-amber-600">
+                    <li key={w} className="text-[10px] leading-relaxed text-[var(--warn)]">
                       ● {w}
                     </li>
                   ))}
@@ -365,25 +331,19 @@ function PluginsPane() {
       </div>
 
       <p className="mt-4 text-[10px] leading-relaxed text-[var(--text-dim)]">
-        本软件提供的插件接口版本是{" "}
+        本软件的插件接口版本是{" "}
         <span className="font-mono">
           {plugins.hostVersion().major}.{plugins.hostVersion().minor}
         </span>
-        。插件的 manifest 里 apiVersion 主版本要和它一致 —— 主版本不同会被直接拒绝，
-        次版本不同只给一条警告，和项目文件的版本策略是同一套。
+        。插件的 manifest 里 apiVersion 主版本必须与之一致，否则无法加载；次版本不同只提示警告。
         <br />
-        插件跑在本程序里，看得到全部数据。装之前先确认来源。
+        插件能读到全部数据，只装可信来源的插件。
       </p>
     </Section>
   );
 }
 
-/**
- * 随应用附带、可以一键安装的插件。
- *
- * 一个都没有（比如开发者自己构建时没带资源）就整段不出现。已装且版本相同的
- * 也照样列着，按钮写「已安装」—— 用户要能确认「附带的那几个我都装了」。
- */
+/** 随应用附带、可一键安装的插件。一个都没有时整段不出现；已装的也列出，按钮写「已安装」。 */
 function BundledList({ records, onError }: { records: PluginRecord[]; onError: (m: string) => void }) {
   const [list, setList] = useState<
     { id: string; name: string; version: string; description?: string; installed: string | null }[]
@@ -420,7 +380,7 @@ function BundledList({ records, onError }: { records: PluginRecord[]; onError: (
       )
       .catch(() => setList([]));
 
-  // records 变了（装了、卸了）就重读一次已安装版本
+  // records 变了（装了、卸了）就重读一遍已安装版本
   useEffect(() => {
     void load();
   }, [records]);
@@ -433,7 +393,7 @@ function BundledList({ records, onError }: { records: PluginRecord[]; onError: (
       const wasEnabled = records.find((r) => r.manifest.id === id)?.enabled ?? false;
       await api.installBundledPlugin(id);
       await plugins.rescan();
-      // 更新一个正在用的插件：重载，让新代码立刻生效
+      // 更新正在使用的插件：重载让新代码立刻生效
       if (wasEnabled) await plugins.reload(id);
       await load();
     } catch (e) {
@@ -492,20 +452,15 @@ function BundledList({ records, onError }: { records: PluginRecord[]; onError: (
 /**
  * 插件注册的一个设置项。
  *
- * 值不经过任何本地 state —— 直接读写 settingCache。缓存在 registry 里，
- * 插件读的也是它，中间不隔一层 React 状态，就不会出现「界面显示 A、
- * 插件实际拿到 B」这种两份状态不同步的问题（那种 bug 只在点了别的按钮
- * 触发重渲染时才暴露，极其难查）。
- *
- * bump 只用来在写入后强制重渲染 —— 缓存不是 useSyncExternalStore 的源，
- * React 不会自己知道它变了。
+ * 值直接读写 registry 的 settingCache，不经过本地 state：两份状态会分叉成
+ * 「界面显示 A、插件拿到 B」。bump 只用来在写入后强制重渲染。
  */
 function PluginFieldRow({ pluginId, field }: { pluginId: string; field: PluginSettingField }) {
   const [, bump] = useState(0);
   const raw = plugins.settingValue(pluginId, field.key);
 
   const write = (value: string) => {
-    // 缓存和落库都在这一个调用里，key 的前缀也由它拼 —— 这里别自己再写一遍
+    // key 前缀由 setSettingValue 拼，这里不要重复拼
     plugins.setSettingValue(pluginId, field.key, value);
     bump((n) => n + 1);
   };
@@ -567,26 +522,22 @@ function PluginFieldRow({ pluginId, field }: { pluginId: string; field: PluginSe
 /**
  * 视图页：只管开关哪些视图。
  *
- * 事项类型本来也在这一页（它们都是「这个软件摆成什么样」的全局偏好），
- * 后来拆出去了 —— 类型清单会长，一个团队用上十几个类型是正常的，
- * 而它需要搜索框和分页。那些东西挂在别人的页脚底下放不开。
+ * 事项类型搬到了自己那一页 —— 清单会长，需要搜索框和分页。
  */
 function ViewsPane() {
   const openSettings = useAppStore((s) => s.openSettings);
   return (
     <Section
       title="启用哪些视图"
-      desc="关掉的视图连快捷键一起消失，⌘1–⌘5 的编号跟着重新算，不留死键。这是全局偏好，不随项目走。"
+      desc="关掉的视图从工具条移除，快捷键编号依次前移。这是全局设置，不随项目走。"
     >
       <ViewToggles />
 
-      {/* 事项类型搬到了自己那一页，这里留一条路 —— 原来它在本页底下，
-          习惯了的人到这儿找不到会以为功能没了 */}
       <button
         onClick={() => openSettings("kinds")}
         className="mt-4 text-[10px] text-[var(--text-dim)] underline hover:text-[var(--text)]"
       >
-        事项的类型清单搬到「事项类型」那一页了 →
+        管理事项类型 →
       </button>
     </Section>
   );
@@ -601,7 +552,7 @@ function ViewToggles() {
       {APP_VIEWS.map((v) => {
         const permanent = v.key === PERMANENT_VIEW;
         const on = permanent || enabled.includes(v.key);
-        // 编号按**启用后的次序**算，和工具条、快捷键完全一致
+        // 编号按启用后的次序算，和工具条、快捷键一致
         const index = enabled.indexOf(v.key);
         return (
           <button
@@ -610,7 +561,7 @@ function ViewToggles() {
             disabled={permanent}
             title={
               permanent
-                ? "甘特不能关：它是唯一能拖日期、改工期的面，关掉之后这个软件就没有排期能力了"
+                ? "甘特是唯一能拖日期、改工期的视图，不能关闭"
                 : v.hint
             }
             className={`flex items-center gap-2.5 rounded-xl border p-3 text-left transition-colors ${
@@ -646,9 +597,7 @@ function ViewToggles() {
       })}
 
       <p className="mt-2 text-[10px] leading-relaxed text-[var(--text-dim)]">
-        正在看的那个视图被关掉时会自动切回甘特。关掉的视图不会丢任何数据 ——
-        它只是不再占工具条上的一个位置，重新打开就回来了。
-        {OPTIONAL_VIEWS.length} 个可关，甘特始终在。
+        关闭正在看的视图会切回甘特。关闭不会删数据，重新打开就回来了。
       </p>
     </div>
   );
@@ -657,24 +606,11 @@ function ViewToggles() {
 /**
  * 事项类型页。
  *
- * **阻碍和风险不在这张清单里**，所以页面上要写明白为什么 —— 否则用户会
- * 在这找它们，找不到就以为是漏了。它们是实体不是分类：一条阻碍会推排期、
- * 进复盘的归因图、让卡片上看板的受阻列，而一个类型标签做不到其中任何一件
- * （设计稿 §6.3）。做成这张表的两行只会制造出「名字叫阻碍、底下没有实体」
- * 的悬空状态。
- *
- * ## 为什么要搜索和分页
- *
- * 类型是全局的，一个团队用上十几个是正常的（设计稿 §7 里把「类型总数超过
- * 十个」列成了触发条件）。一次性铺开的话，这张 520px 高的面板会变成一条
- * 长滚动条，而「新建类型」那个按钮被顶到最底下 —— 要加一个类型得先滚到底。
- *
- * 所以：**新建按钮钉在列表上方**（它的位置不随条数变），列表每页 6 条，
- * 搜索跨全部而不只是当前页。只有超过一页时才出现翻页控件 —— 三个类型的
- * 时候摆一个「1/1」是纯噪音。
+ * 阻碍和风险是实体不是类型，不在这张清单里。类型清单会长，所以带搜索和分页；
+ * 每页 6 条，搜索跨全部类型，超过一页才出现翻页控件。
  */
 
-/** 每页几条。按面板高度定的：6 行 + 头 + 新建 + 翻页刚好不出现滚动条 */
+/** 每页 6 条：6 行加头、新建和翻页刚好不出滚动条 */
 const KINDS_PER_PAGE = 6;
 
 function ItemKindsPane() {
@@ -687,7 +623,7 @@ function ItemKindsPane() {
   const [page, setPage] = useState(0);
 
   const q = query.trim().toLowerCase();
-  // 搜索跨**全部**类型，不只是当前页 —— 分页是显示手段，不该缩小搜索范围
+  // 搜索跨全部类型，不只是当前页
   const shown = q
     ? kinds.filter(
         (k) => k.label.toLowerCase().includes(q) || k.key.toLowerCase().includes(q),
@@ -695,7 +631,7 @@ function ItemKindsPane() {
     : kinds;
 
   const pages = Math.max(1, Math.ceil(shown.length / KINDS_PER_PAGE));
-  // 删掉几条之后当前页可能已经越界了，夹回最后一页
+  // 删掉几条后当前页可能越界，夹回最后一页
   const current = Math.min(page, pages - 1);
   const slice = shown.slice(current * KINDS_PER_PAGE, (current + 1) * KINDS_PER_PAGE);
 
@@ -704,40 +640,36 @@ function ItemKindsPane() {
   return (
     <Section
       title="事项类型"
-      desc="事项分拣时能选的类型。全局定义，所有项目共用 —— 类型是「这个团队怎么给事情分类」，不是某个项目的属性。"
+      desc="分拣事项时可选的类型，所有项目共用。"
     >
       <div className="mb-2.5 flex items-center gap-2">
         <span className="text-[10px] text-[var(--text-dim)]">
           共 {kinds.length} 个（{builtin} 个内置）
-          {q && shown.length !== kinds.length && ` · 筛出 ${shown.length} 个`}
+          {q && shown.length !== kinds.length && `，筛出 ${shown.length} 个`}
         </span>
 
-        {/* 搜索框只在真的多起来之后才出现 —— 三个类型的时候它是纯噪音 */}
+        {/* 类型多于一页才给搜索框 */}
         {kinds.length > KINDS_PER_PAGE && (
           <input
             value={query}
             onChange={(e) => {
               setQuery(e.target.value);
-              setPage(0); // 换了筛选条件还停在第 3 页，多半是空的
+              setPage(0); // 换了筛选条件，回到第一页
             }}
             placeholder="搜索类型…"
-            className="ml-auto w-28 rounded-full border border-[var(--rule)] bg-[var(--surface)] px-2.5 py-0.5 text-[10px] text-[var(--text)] outline-none focus:border-[var(--accent)]"
+            className="ml-auto w-28 rounded-[var(--r-m)] border border-[var(--rule)] bg-[var(--surface)] px-2.5 py-0.5 text-[10px] text-[var(--text)] outline-none focus:border-[var(--accent)]"
           />
         )}
 
         <ExportButton
           label="⤓ 导出"
-          title="把类型清单导出成 Excel：名称、颜色、关闭规则、本项目用了多少条"
+          title="导出类型清单为 Excel：名称、颜色、关闭规则、本项目用量"
           size="sm"
           run={async () => (await import("../export/run")).exportItemKindsToExcel()}
         />
       </div>
 
-      {/*
-        「新建类型」钉在列表**上方**。
-        放在下面的话它的位置会随条数变，而加一个类型得先滚到底 ——
-        这一页最高频的动作不该是最难点到的那个。
-      */}
+      {/* 「新建类型」钉在列表上方，位置不随条数变 */}
       {adding ? (
         <div className="mb-1.5">
           <KindRow
@@ -754,7 +686,7 @@ function ItemKindsPane() {
               void saveItemKind(newKindKey(), label, color, requiresNote);
               setAdding(false);
               setQuery("");
-              // 新建的排在最后，直接翻到它所在的那一页
+              // 新建的排在最后，翻到它所在的那一页
               setPage(Math.floor(kinds.length / KINDS_PER_PAGE));
             }}
             onDelete={() => setAdding(false)}
@@ -781,7 +713,7 @@ function ItemKindsPane() {
               const n = await removeItemKind(k.key);
               setNotice(
                 n > 0
-                  ? `已删除。${n} 条用着这个类型的事项退回了「未分拣」—— 内容都还在。`
+                  ? `已删除。${n} 条事项退回「未分拣」，内容不受影响。`
                   : "已删除。",
               );
             }}
@@ -795,7 +727,6 @@ function ItemKindsPane() {
         )}
       </div>
 
-      {/* 翻页控件只在超过一页时出现 */}
       {pages > 1 && (
         <div className="mt-2 flex items-center justify-center gap-2">
           <PageButton disabled={current === 0} onClick={() => setPage(current - 1)}>
@@ -811,7 +742,7 @@ function ItemKindsPane() {
       )}
 
       {notice && (
-        <p className="mt-2 text-[10px] leading-relaxed text-emerald-600">{notice}</p>
+        <p className="mt-2 text-[10px] leading-relaxed text-[var(--ok)]">{notice}</p>
       )}
 
       <div className="mt-4 rounded-lg border border-[var(--rule)] bg-[var(--surface-alt)] px-2.5 py-2">
@@ -819,20 +750,15 @@ function ItemKindsPane() {
           为什么这里没有「阻碍」和「风险」
         </div>
         <p className="text-[10px] leading-relaxed text-[var(--text-dim)]">
-          它们是<strong>实体</strong>，不是分类。事项分拣成
-          <span style={{ color: BLOCKER_KIND.color }}> 阻碍 </span>会真的在那条活上建一段受阻
-          —— 它每天跨天顺延计划结束日、进复盘的归因图、让卡片落进看板的受阻列；分拣成
-          <span style={{ color: RISK_KIND.color }}> 风险 </span>会真的写进风险表。
-          一个只打标签的「阻碍」做不到其中任何一件，于是同一个词在三个地方指不同的事，
-          而用户没法知道哪个算数。
+          它们会建立真实的记录，不只是标签。分拣成
+          <span style={{ color: BLOCKER_KIND.color }}> 阻碍 </span>会在任务上记一段受阻：每天顺延计划结束日，计入复盘，卡片进入看板的受阻列。分拣成
+          <span style={{ color: RISK_KIND.color }}> 风险 </span>会写进风险表。
         </p>
       </div>
 
       <p className="mt-3 text-[10px] leading-relaxed text-[var(--text-dim)]">
-        「关闭需写结论」这个开关值得认真选：一个只打勾的关闭，把「这条不用管了」和
-        「我们做了什么让它不用管」压成了同一个比特，而后者才是复盘时唯一值得抄的东西。
-        「代办」默认关着（关掉一个打电话确认交期的待办，没什么结论可写），
-        「问题」默认开着。
+        打开「关闭需写结论」后，关闭这类事项必须写一句怎么解决的，复盘时能看到。
+        「代办」默认关闭，「问题」默认打开。
       </p>
     </Section>
   );
@@ -865,7 +791,7 @@ function KindRow({
   onDelete,
 }: {
   kind: ItemKind;
-  /** 还没落库的新行：直接进编辑态，取消就消失 */
+  /** 还没保存的新类型：直接进编辑态，取消就消失 */
   draft?: boolean;
   onSave: (label: string, color: string, requiresNote: boolean) => void;
   onDelete: () => void | Promise<void>;
@@ -889,26 +815,21 @@ function KindRow({
         title="标签颜色"
         className="size-5 shrink-0 cursor-pointer rounded border-0 bg-transparent p-0"
       />
-      {/*
-        限 12 字。类型名是**行上那个小标签**里的字 —— 一个叫
-        「等客户确认图纸并回签」的类型在清单里会被截成「等客户确…」，
-        那时这个名字就不再起作用了。在入口处限住，比在五个显示它的地方
-        各截一次好。
-      */}
+      {/* 类型名会显示成事项行上的小标签，在入口处限长，避免到处截断 */}
       <input
         value={label}
         onChange={(e) => setLabel(e.target.value)}
         placeholder="类型名称"
         maxLength={12}
         autoFocus={draft}
-        title="类型名会显示成事项行上的小标签，所以限 12 字"
+        title="最多 12 字"
         className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 text-xs text-[var(--text)] outline-none hover:border-[var(--rule)] focus:border-[var(--accent)]"
       />
 
       <button
         onClick={() => setRequiresNote((v) => !v)}
-        title="关闭这一类事项时，是否必须写一句「怎么解决的」"
-        className="shrink-0 rounded-full border px-2 py-0.5 text-[9px] font-medium transition-colors"
+        title="关闭这类事项时是否必须写一句怎么解决的"
+        className="shrink-0 rounded-[var(--r-m)] border px-2 py-0.5 text-[9px] font-medium transition-colors"
         style={
           requiresNote
             ? { borderColor: "var(--accent)", color: "var(--accent)" }
@@ -938,15 +859,15 @@ function KindRow({
         (confirming ? (
           <button
             onClick={() => void onDelete()}
-            className="shrink-0 rounded-md bg-rose-500/12 px-2 py-0.5 text-[10px] font-medium text-rose-500"
-            title="用着这个类型的事项会退回「未分拣」，内容不会丢"
+            className="shrink-0 rounded-md bg-[var(--danger)]/12 px-2 py-0.5 text-[10px] font-medium text-[var(--danger)]"
+            title="用着这个类型的事项会改回「未分拣」，内容不丢"
           >
             {draft ? "取消" : "确认删除"}
           </button>
         ) : (
           <button
             onClick={() => (draft ? void onDelete() : setConfirming(true))}
-            className="grid size-5 shrink-0 place-items-center rounded text-[11px] text-[var(--text-dim)] hover:bg-rose-500/10 hover:text-rose-500"
+            className="grid size-5 shrink-0 place-items-center rounded text-[11px] text-[var(--text-dim)] hover:bg-[var(--danger)]/10 hover:text-[var(--danger)]"
             title={draft ? "取消" : "删除这个类型"}
           >
             {draft ? "✕" : "🗑"}
@@ -1082,7 +1003,7 @@ function ThemeSwatch({ dark }: { dark: boolean }) {
     >
       <span
         className="h-[3px] w-[70%] rounded-full"
-        style={{ background: dark ? "#818cf8" : "#6366f1" }}
+        style={{ background: dark ? "#4e9b86" : "#2f6d5e" }}
       />
       <span
         className="h-[3px] w-[45%] rounded-full"
@@ -1183,7 +1104,7 @@ function PeoplePane() {
         </button>
       </div>
 
-      {error && <div className="mb-2 text-[10px] text-rose-500">{error}</div>}
+      {error && <div className="mb-2 text-[10px] text-[var(--danger)]">{error}</div>}
 
       <div className="flex flex-col gap-1">
         <AnimatePresence initial={false}>
@@ -1252,7 +1173,7 @@ function PersonRow({ person }: { person: Person }) {
       <button
         onClick={() => fileRef.current?.click()}
         title="点击上传照片"
-        className="group/av relative shrink-0 overflow-hidden rounded-full"
+        className="group/av relative shrink-0 overflow-hidden rounded-[var(--r-m)]"
       >
         <Avatar person={person} size={32} />
         {/* 悬停蒙层：把「这里可以点」说清楚，否则没人知道头像能换 */}
@@ -1260,7 +1181,7 @@ function PersonRow({ person }: { person: Person }) {
           换
         </span>
         {busy && (
-          <span className="absolute inset-0 grid place-items-center rounded-full bg-black/50 text-[8px] text-white">
+          <span className="absolute inset-0 grid place-items-center rounded-[var(--r-m)] bg-black/50 text-[8px] text-white">
             …
           </span>
         )}
@@ -1305,7 +1226,7 @@ function PersonRow({ person }: { person: Person }) {
         <button
           onClick={() => void savePerson(person.id, person.name, person.color, "")}
           title="移除照片，回到首字母头像"
-          className="shrink-0 rounded px-1 text-[10px] text-[var(--text-dim)] hover:text-rose-500"
+          className="shrink-0 rounded px-1 text-[10px] text-[var(--text-dim)] hover:text-[var(--danger)]"
         >
           ✕
         </button>
@@ -1316,8 +1237,8 @@ function PersonRow({ person }: { person: Person }) {
         onBlur={() => setConfirming(false)}
         className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium transition-opacity ${
           confirming
-            ? "bg-rose-500 text-white opacity-100"
-            : "text-[var(--text-dim)] opacity-0 hover:text-rose-500 group-hover:opacity-100"
+            ? "bg-[var(--danger)] text-white opacity-100"
+            : "text-[var(--text-dim)] opacity-0 hover:text-[var(--danger)] group-hover:opacity-100"
         }`}
         title={
           confirming
@@ -1457,7 +1378,7 @@ function IntegrityCheck() {
           {state.status === "running" ? "检查中…" : "检查数据完整性"}
         </button>
         {state.status === "done" && state.issues.length === 0 && (
-          <span className="text-[10px] font-medium text-emerald-600">
+          <span className="text-[10px] font-medium text-[var(--ok)]">
             ✓ 没有查出结构性问题
           </span>
         )}
@@ -1466,7 +1387,7 @@ function IntegrityCheck() {
       {state.status === "done" && state.issues.length > 0 && (
         <ul className="mt-2 space-y-1">
           {state.issues.map((issue) => (
-            <li key={issue} className="text-[10px] text-rose-500">
+            <li key={issue} className="text-[10px] text-[var(--danger)]">
               ● {issue}
             </li>
           ))}

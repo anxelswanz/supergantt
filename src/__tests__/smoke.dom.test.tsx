@@ -81,7 +81,7 @@ describe("应用冒烟", () => {
     const { default: App } = await import("../App");
     render(<App />);
 
-    expect(await screen.findByText("官网改版")).toBeTruthy();
+    expect((await screen.findAllByText("官网改版")).length).toBeGreaterThan(0);
     expect(screen.getByText("68")).toBeTruthy();
     expect(screen.getByText(/2 逾期/)).toBeTruthy();
   });

@@ -1,40 +1,11 @@
 /**
- * 故障树分析（Fault Tree Analysis）插件。
- *
- * 事项页里一条问题 / 阻碍 →「建故障树分析」→ 它成为一棵树的**顶事件**，
- * 用户在画布上一层层往下拆：
- *
- *     顶事件（不希望发生的那件事）
- *       └ 门：或门 = 任一输入发生就导致上层；与门 = 所有输入同时发生才导致
- *           ├ 中间事件（还能继续拆）
- *           ├ 基本事件 ○（拆到底了，可以直接验证）
- *           └ 未展开事件 ◇（暂时不拆：信息不够，或不值得拆）
- *
- * 每个事件另有一个**角色**：现象 / 原因 / 对策。现象和原因都是事件，参与推导；
- * 对策不是事件，是处理措施 —— 它也挂在树上往下画（绿色虚线、不经过门），
- * 但推导、割集、结构都跳过它：「发图前复核」挂在「用了旧版图纸」下面，
- * 不是说复核导致了用旧版图纸。根因不用手选：已确认、拆到底、又在成立的
- * 那条因果链上的，自动打角标。
- *
- * 光画出来不够 —— 故障树的价值在于**推**：
- *
- *   · 基本事件逐个标「已确认 / 已排除」，按门的逻辑往上推，画布直接染出
- *     哪条因果链成立（红），哪些分支已经被排除（淡）。
- *   · 最小割集：能单独导致顶事件的最小基本事件组合。排查顺序就从这里来 ——
- *     先查一阶割集（单点原因），再查组合。
- *
- * 数据存在插件自己的 data/trees.json，按项目分开。卸载插件不会删它，
- * 重新安装后所有树都还在；停用 / 卸载前没落盘的改动在 onunload 里立刻写掉。一棵树引用事项用的是
- * noteId（和飞书同步插件同一个认法）：事项从「问题」改分拣成「阻碍」，
- * 行 key 会变，但还是同一条。
- *
- * 单文件、无 import：宿主从 Blob URL 加载插件（见 registry.ts 的
- * assertSelfContained）。React 用宿主给的 api.react。
+ * 故障树分析插件：事项作顶事件，用或门/与门往下拆到基本事件，
+ * 按门的逻辑推出因果链与最小割集。
+ * 数据在 data/trees.json（按项目分开，卸载不删）；停用前未落盘的改动在 onunload 写入。
+ * 树引用事项用 noteId，改分拣类型后仍认得。单文件无 import，React 用 api.react。
  */
 
-/* ------------------------------------------------------------------ */
-/* 数据 —— 纯函数，单测直接 import                                       */
-/* ------------------------------------------------------------------ */
+/* ---------------- 数据 ---------------- */
 
 export const STORE_FILE = "trees.json";
 
@@ -67,7 +38,7 @@ export function parseStore(text) {
     const s = JSON.parse(text);
     if (s && Array.isArray(s.trees)) return s;
   } catch {
-    /* 坏文件当空的，不让整个页面打不开 */
+    /* 坏文件当空的，别让页面打不开 */
   }
   return emptyStore();
 }
@@ -84,12 +55,12 @@ const node = (id, over = {}) => ({
   note: "",
   children: [],
   itemRef: null,
-  /** 这个事件的时间（YYYY-MM-DD）：从事项来的取事项记录日，手写的取加进来那天 */
+  /** 事件日期 YYYY-MM-DD：从事项来的取记录日，手写的取加入那天 */
   at: null,
   ...over,
 });
 
-/** 本地日期 YYYY-MM-DD。日期框、筛选都按用户所在时区的「那一天」算 */
+/** 本地时区的 YYYY-MM-DD（日期框、筛选都按它） */
 export function localDay(d = new Date()) {
   if (Number.isNaN(d.getTime())) return "";
   const p = (x) => String(x).padStart(2, "0");
@@ -120,10 +91,7 @@ export function parentOf(tree, id) {
 
 const withNodes = (tree, nodes, extra = {}) => ({ ...tree, ...extra, nodes });
 
-/**
- * 加一个子事件，返回 { tree, id }。
- * 往基本 / 未展开事件下面加，它就变成中间事件 —— 能往下拆就说明它不是「底」。
- */
+/** 加子事件，返回 { tree, id }。叶子被加子事件后变中间事件 */
 export function addChild(tree, parentId, init = {}, index = null) {
   const parent = tree.nodes[parentId];
   // 对策下面不再挂东西
@@ -198,7 +166,7 @@ export function subtreeIds(tree, id) {
   return out;
 }
 
-/** 删掉一个事件连同它下面的整枝。删空了的中间事件变回基本事件 */
+/** 删掉整枝；删空的中间事件变回基本事件 */
 export function removeNode(tree, id) {
   if (id === tree.root || !tree.nodes[id]) return tree;
   const parent = parentOf(tree, id);
@@ -229,12 +197,9 @@ export function moveNode(tree, id, delta) {
 }
 
 /**
- * 按门的逻辑把叶子的验证状态往上推。返回 { [id]: "confirmed" | "ruled" | "open" }。
- *
- *   或门：任一输入成立 → 成立；全部输入都排除 → 排除
- *   与门：全部输入成立 → 成立；任一输入排除   → 排除
- *
- * 还没往下拆的门（没有子事件）就是待验证 —— 没拆不等于没问题。
+ * 按门的逻辑把叶子状态往上推，返回 { [id]: "confirmed" | "ruled" | "open" }。
+ * 或门：任一成立即成立，全部排除才排除；与门：全部成立才成立，任一排除即排除。
+ * 没拆的门（无子事件）算待验证 —— 没拆不等于没问题。
  */
 export function evaluate(tree) {
   const out = {};
@@ -262,15 +227,9 @@ export function evaluate(tree) {
 }
 
 /**
- * 最小割集：能单独导致顶事件发生的、不可再少的叶子组合。
- *
- * 自上而下展开（MOCUS 的思路）：或门把输入的割集并起来，与门把输入的割集
- * 两两拼起来。这里的树里每个事件只出现一次，展开出来的割集本来就互不包含；
- * 最后那道「去掉被包含的」是防御 —— 以后要是支持同一事件挂在多处，
- * 结果仍然是最小的。与门多的树组合会爆炸，超过
- * limit 就截断并告诉调用方 —— 屏幕上列出几百个割集本来也没人看。
- *
- * 返回 { sets: string[][], truncated }，按阶数（割集大小）从小到大。
+ * 最小割集：能单独导致顶事件、不可再少的叶子组合（MOCUS：或门并、与门两两拼）。
+ * 树里每个事件只出现一次，互不包含；末尾去包含是防御（以后允许同一事件挂多处）。
+ * 与门多会组合爆炸，超 limit 截断并置 truncated。按阶数升序，返回 { sets, truncated }。
  */
 export function minimalCutSets(tree, limit = 200) {
   let truncated = false;
@@ -312,7 +271,7 @@ export function minimalCutSets(tree, limit = 200) {
   return { sets: minimal.slice(0, limit), truncated };
 }
 
-/** 一个割集现在的处境：含已排除的叶子就不成立了；全部已确认就是坐实了 */
+/** 含已排除的叶子即排除；全部已确认即成立 */
 export function cutSetStatus(tree, set) {
   const st = set.map((id) => tree.nodes[id]?.status ?? "open");
   if (st.includes("ruled")) return "ruled";
@@ -347,7 +306,7 @@ export function actionStats(tree, today) {
   };
 }
 
-/** 这棵树关联到的任务：顺着每个事件挂的事项找。byRef 是 itemRef → 事项行 */
+/** 顺着各事件挂的事项找任务；byRef 是 itemRef → 事项 */
 export function treeTasks(tree, byRef) {
   const out = new Set();
   for (const n of Object.values(tree.nodes)) {
@@ -357,10 +316,7 @@ export function treeTasks(tree, byRef) {
   return out;
 }
 
-/**
- * 故障树列表的筛选。from / to 是建树日期（含两端），task 是 "" 全部、
- * "none" 没挂任务的、或者某个 taskId。新建的排前面。
- */
+/** from/to 按建树日期（含两端）；task 为 "" 全部、"none" 没挂任务、或 taskId。新建在前 */
 export function filterTrees(trees, { from = "", to = "", task = "" }, byRef) {
   return trees
     .filter((t) => {
@@ -402,9 +358,7 @@ export function outline(tree) {
   return lines.join("\n");
 }
 
-/* ------------------------------------------------------------------ */
-/* 布局 —— 也是纯函数                                                   */
-/* ------------------------------------------------------------------ */
+/* ---------------- 布局 ---------------- */
 
 export const NODE_W = 176;
 export const BOX_H = 66;
@@ -415,10 +369,7 @@ export const LEVEL_H = 140;
 const H_GAP = 28;
 const PAD = 48;
 
-/**
- * 自上而下的树形布局：叶子从左到右排开，父节点居中在首尾两个子节点上方。
- * 返回每个节点框的**顶边中点**。
- */
+/** 叶子自左排开，父节点居中于首尾子节点上方。返回各框顶边中点 */
 export function layoutTree(tree) {
   const pos = {};
   let cursor = 0;
@@ -447,9 +398,7 @@ export function layoutTree(tree) {
   };
 }
 
-/* ------------------------------------------------------------------ */
-/* 视图                                                                */
-/* ------------------------------------------------------------------ */
+/* ---------------- 视图 ---------------- */
 
 /** 今年的省掉年份 —— 事件框很窄 */
 const shortDay = (iso) => (iso && iso.slice(0, 4) === String(new Date().getFullYear()) ? iso.slice(5) : iso);
@@ -475,7 +424,7 @@ export function onload(api) {
   const h = React.createElement;
   const { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } = React;
 
-  /* ---------------- 共享状态：事项页的菜单/徽标和本页面共用 ---------------- */
+  /* ---------------- 共享状态 ---------------- */
 
   const state = { store: emptyStore(), activeTree: null, loaded: false, version: 0 };
   const subs = new Set();
@@ -490,10 +439,7 @@ export function onload(api) {
   };
   const useShared = () => useSyncExternalStore(subscribe, () => state.version);
 
-  /**
-   * 内存里那份是准的，落盘防抖 —— 改一个字就写一次文件没有必要，
-   * 而等写完再刷新界面会让打字和拖动发涩。
-   */
+  /** 内存为准，落盘防抖：每字都写没必要，等写完再刷新又会让输入发涩 */
   let saveTimer = null;
   let saving = Promise.resolve();
   const writeNow = () => {
@@ -509,10 +455,10 @@ export function onload(api) {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(writeNow, 300);
   };
-  // 停用、卸载、热重载都会先调 onunload：还在防抖里的那次改动不能丢
+  // 停用、卸载、热重载都会先调 onunload：防抖中的改动不能丢
   flushPending = () => (saveTimer != null ? writeNow() : saving);
 
-  /** 撤销 / 重做：只管本次会话里对树的改动 */
+  /** 撤销 / 重做只管本次会话（最多 100 步） */
   const undo = [];
   const redo = [];
   const setStore = (next, { record = true } = {}) => {
@@ -654,12 +600,12 @@ export function onload(api) {
     );
   }
 
-  /** 失焦才提交的输入框 —— 打字过程中不写盘、不进撤销栈 */
+  /** 失焦才提交：打字过程中不写盘、不进撤销栈 */
   function DraftText({ value, onCommit, placeholder, rows = 2, className = "ft-input", autoFocus, grow }) {
     const [draft, setDraft] = useState(value);
     const ref = useRef(null);
     useEffect(() => setDraft(value), [value]);
-    // grow：高度跟着字走，标题一行就一行高
+    // grow：高度跟着字走
     useLayoutEffect(() => {
       const el = ref.current;
       if (!grow || !el) return;
@@ -707,10 +653,10 @@ export function onload(api) {
       const k = Math.min(1, Math.max(0.3, Math.min(w / layout.width, hgt / layout.height)));
       setView({ k, x: (w - layout.width * k) / 2, y: Math.max(0, (hgt - layout.height * k) / 2) * 0.4 });
     };
-    // 换一棵树就重新摆到中间；同一棵树里加减节点不动视角，免得一编辑就跳
+    // 换树才重新摆到中间；同树内加减节点不动视角，免得编辑就跳
     useLayoutEffect(fit, [tree.id]);
 
-    // 选中的节点跑出可视区了就把它拉回来（键盘导航、新建子事件时）
+    // 选中节点跑出可视区就拉回来（键盘导航、新建子事件时）
     useEffect(() => {
       const el = box.current;
       const p = selected && layout.pos[selected];
@@ -739,7 +685,7 @@ export function onload(api) {
     useEffect(() => {
       const el = box.current;
       if (!el) return;
-      // 要 preventDefault，React 的 onWheel 是 passive 的，只能自己挂
+      // React 的 onWheel 是 passive 的，要 preventDefault 只能自己挂
       const onWheel = (e) => {
         e.preventDefault();
         if (e.ctrlKey || e.metaKey) {
@@ -815,7 +761,7 @@ export function onload(api) {
     const color = (s) => (s === "confirmed" ? "var(--ft-hot)" : s === "ruled" ? "var(--ft-dim)" : "var(--ft-line)");
     const hl = highlight ? new Set(highlight) : null;
 
-    // 连线：父的门底 → 汇流横线 → 子框顶。成立的那几条后画，压在上面
+    // 连线：父门底 → 汇流横线 → 子框顶。成立的几条后画，压在别的上面
     const edges = [];
     for (const n of Object.values(tree.nodes)) {
       const p = layout.pos[n.id];
@@ -1088,7 +1034,7 @@ export function onload(api) {
     return null;
   }
 
-  /* ---------------- 右栏：属性 + 分析 ---------------- */
+  /* ---------------- 右栏 ---------------- */
 
   const kindOf = (n) => (n.kind === "top" ? "top" : isLeaf(n) ? n.kind : "intermediate");
 
@@ -1702,7 +1648,7 @@ export function onload(api) {
     );
   }
 
-  /** 全部故障树：按建树日期、按关联任务筛 */
+  /** 按建树日期、关联任务筛 */
   function TreeList({ trees, items, activeId, onOpen, onDelete, onClose }) {
     const [f, setF] = useState({ from: "", to: "", task: "" });
     const byRef = useMemo(() => new Map(items.map((it) => [itemRef(it), it])), [items]);
@@ -1804,7 +1750,7 @@ export function onload(api) {
   }
 
   function EmptyArt() {
-    // 一棵小故障树：顶事件 → 或门 → 两个基本事件
+    // 顶事件 → 或门 → 两个基本事件
     return h(
       "svg",
       { width: 120, height: 92, viewBox: "0 0 120 92", className: "ft-empty-art", "aria-hidden": true },

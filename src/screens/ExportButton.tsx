@@ -1,19 +1,8 @@
 /**
- * 导出按钮：一个带完成态的小状态机。
+ * 导出按钮：导出中 / 已导出 / 失败三态。
  *
- * 两处在用 —— 工具条上的「导出 Excel」和时间线里的「导出 HTML」。抽出来是因为
- * 难的部分不是那个 `<button>`，是它周围的规矩：
- *
- *  · **导出前先 flush**。落库是防抖的（persistence.ts），刚拖完的那一下可能还没
- *    写进库；导出读的是内存里的任务表，但风险点和逐日记录是直接从库里查的，
- *    两边口径不一致会导出一份自相矛盾的文件。
- *  · **取消不是失败**。用户在保存对话框里点取消要安静地回到 idle，
- *    弹一个「导出失败」是在骂用户。
- *  · **导出完给个去处**。成功态本身就是「在访达中显示」的按钮，
- *    否则用户还得自己翻目录找那个文件。
- *
- * 生成器用 `() => import(...)` 传进来：exceljs 有 900KB，而导出是低频动作，
- * 挂在主包里等于让每一次冷启动都为一个多数会话根本不会点的按钮买单。
+ * 导出前先 flush：落库是防抖的，风险点和逐日记录直接查库，不 flush 会导出前后矛盾的文件。
+ * 保存对话框里点取消不算失败，安静回到 idle。
  */
 
 import { useState } from "react";
@@ -26,14 +15,11 @@ type Run = () => Promise<{ path: string | null }>;
 interface Props {
   label: string;
   title: string;
-  /** 真正干活的那一步；path 为 null 表示用户取消了保存对话框 */
+  /** path 为 null 表示用户取消了保存对话框 */
   run?: Run;
-  /**
-   * 多种格式时传这个：点按钮先弹菜单选格式，选完才走导出。
-   * 和 `run` 二选一 —— 只有一种格式时多一次点击是纯摩擦。
-   */
+  /** 多种格式时传这个：先弹菜单选格式；与 run 二选一 */
   formats?: { label: string; hint?: string; run: Run }[];
-  /** 时间线里那颗按钮跟「记一笔」并排，需要小一号 */
+  /** 时间线里与「记一笔」并排，小一号 */
   size?: "md" | "sm";
 }
 
@@ -66,8 +52,8 @@ export function ExportButton({ label, title, run, formats, size = "md" }: Props)
     return (
       <button
         onClick={() => void api.revealPath(detail).catch(() => {})}
-        title={`${detail}\n点击在访达中显示`}
-        className={`rounded-full bg-emerald-500/12 font-medium text-emerald-600 transition-colors hover:bg-emerald-500/20 ${pad}`}
+        title={`${detail}\n点击在文件管理器中显示`}
+        className={`rounded-full bg-[var(--ok)]/12 font-medium text-[var(--ok)] transition-colors hover:bg-[var(--ok)]/20 ${pad}`}
       >
         ✓ 已导出
       </button>
@@ -78,7 +64,7 @@ export function ExportButton({ label, title, run, formats, size = "md" }: Props)
     return (
       <span
         title={detail}
-        className={`rounded-full bg-rose-500/12 font-medium text-rose-500 ${pad}`}
+        className={`rounded-[var(--r-m)] bg-[var(--danger)]/12 font-medium text-[var(--danger)] ${pad}`}
       >
         导出失败
       </span>
@@ -92,7 +78,7 @@ export function ExportButton({ label, title, run, formats, size = "md" }: Props)
         onClick={() => (formats ? setMenuOpen((v) => !v) : void go(run))}
         disabled={state === "working"}
         title={title}
-        className={`rounded-full border border-[var(--rule)] font-medium text-[var(--text-dim)] transition-colors hover:text-[var(--text)] disabled:opacity-50 ${pad}`}
+        className={`rounded-[var(--r-m)] border border-[var(--rule)] font-medium text-[var(--text-dim)] transition-colors hover:text-[var(--text)] disabled:opacity-50 ${pad}`}
       >
         {state === "working" ? "导出中…" : formats ? `${label} ▾` : label}
       </button>

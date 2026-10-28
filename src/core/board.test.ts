@@ -56,10 +56,7 @@ describe("看板归列", () => {
     expect(columnOf(t, TODAY)).toBe("doing");
   });
 
-  /**
-   * 这条挡住的是「假警报」：人做完活之后不会记得回去关掉受阻记录，
-   * 于是一堆已完成的任务永远挂在卡住列里，警报一多就没人看了。
-   */
+  /** 已完成优先于受阻：人做完活不会回去关受阻记录。 */
   it("已完成优先于卡住 —— 忘了关的受阻不该让完成的活挂在卡住列", () => {
     const t = task({ progress: 1, blocked: [block(TODAY - 1, TODAY + 5)] });
     expect(columnOf(t, TODAY)).toBe("done");

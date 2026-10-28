@@ -1,24 +1,9 @@
-//! AI 复盘用的 `claude` 进程。
+//! AI 复盘用的 `claude` 进程。内置功能本来没有起子进程的通道（那是插件的能力），
+//! 这里单开一个窄口子：程序名写死、参数全在这里拼、零工具（`--tools ""` +
+//! `--strict-mcp-config`），它只能「读提示词，吐文字」。
 //!
-//! 内置功能本来没有起子进程的通道 —— 那是插件的能力，受 manifest 白名单约束
-//! （plugin_host.rs）。这里给 AI 复盘单开一个口子，而且开得尽量窄：
-//!
-//! - **程序写死是 `claude`**，前端传不了程序名；
-//! - **参数全在这里拼**，前端只给得了提示词和一份输出 schema；
-//! - **零工具**：`--tools ""` 把内置工具全关掉，`--strict-mcp-config` 不加载
-//!   任何 MCP 服务。这个进程读不了文件、跑不了命令、联不了网，它能做的只有
-//!   「读提示词，吐文字」。项目数据由前端拼成快照随提示词送进去（见
-//!   src/aiReview/snapshot.ts），它不需要、也拿不到任何别的东西。
-//!
-//! 所以这条命令不是「前端能起任意进程」，而是「前端能问 Claude 一个问题」。
-//!
-//! ## 为什么每次调用都是独立的
-//!
-//! 一次复盘要调三次（出题 → 追问 → 写文档）。用 `--resume` 把它们串成一个会话
-//! 看起来更省，但会话存在 `~/.claude` 里，会被定期清理，换台电脑也带不走 ——
-//! 而复盘是入库的，隔一个月回来接着答是正常用法。届时 `--resume` 只会得到一句
-//! `No conversation found`。所以每次调用都由前端带上完整上下文，这里加
-//! `--no-session-persistence`，不在用户的会话列表里留下一堆他没见过的对话。
+//! 每次调用独立（前端带全部上下文）：会话存在 `~/.claude` 会被清理、换机器带不走，
+//! 而复盘是入库的，隔月回来 `--resume` 只会得到 `No conversation found`。
 
 use tauri::Manager;
 
@@ -26,16 +11,12 @@ use crate::plugin_host::{spawn_piped, which, Procs};
 
 type Result<T> = std::result::Result<T, String>;
 
-/// 进程的工作目录，在 app_config_dir() 下。
-///
-/// 一个专门的空目录：`claude` 会从工作目录往上找 CLAUDE.md 和项目级设置，
-/// 在用户的某个代码仓库里起它，那个仓库的指令就会混进复盘的提示词。
+/// 进程工作目录（app_config_dir 下的空目录）：`claude` 会从 cwd 往上找
+/// CLAUDE.md 和项目级设置，在用户的代码仓库里起它会把那个仓库的指令混进来。
 const WORK_DIR: &str = "ai-review";
 
-/// 系统提示词。**必须是单行、不含引号**。
-///
-/// Windows 上 `claude` 是个 `.cmd`，参数要过一遍 cmd.exe 的转义规则，换行过不去。
-/// 所以这里只留一句身份，真正的要求全部写在提示词里走 stdin（那边没有任何限制）。
+/// 系统提示词。**必须是单行、不含引号**：Windows 上 `claude` 是 `.cmd`，
+/// 参数要过 cmd.exe 转义，换行过不去。真正的要求走 stdin 的提示词。
 const SYSTEM_PROMPT: &str =
     "你是一位资深的项目复盘顾问，帮助团队把一个项目的经过变成下次可以直接用的经验。严格按用户消息里给出的要求和格式输出，只用中文。";
 
@@ -47,8 +28,7 @@ pub fn ai_review_available() -> bool {
 
 /// 问 Claude 一次。返回 run id，输出按行走 `plugin-proc` 事件，用 `plugin_kill` 取消。
 ///
-/// `schema` 有值时要求结构化输出（出题用），结果在最后那条 result 事件的
-/// `structured_output` 里；没有时是普通文本，并打开逐字流式（写文档用）。
+/// `schema` 有值时要求结构化输出，结果在最后一条 result 事件的 `structured_output`。
 #[tauri::command]
 pub fn ai_review_run(
     app: tauri::AppHandle,
@@ -78,8 +58,7 @@ fn build_args(schema: Option<&str>) -> Result<Vec<String>> {
         "",
         "--strict-mcp-config",
         "--disable-slash-commands",
-        // 只读用户级设置：登录方式、代理、模型偏好都在那里，丢了它有些人就连不上了。
-        // 项目级和本地级不读 —— 工作目录是我们自己的空目录，本来也不该有
+        // 只读用户级设置：登录方式、代理、模型偏好都在那里，丢了有些人连不上
         "--setting-sources",
         "user",
         "--no-session-persistence",
@@ -95,8 +74,8 @@ fn build_args(schema: Option<&str>) -> Result<Vec<String>> {
 
     match schema {
         Some(schema) => {
-            // 压成一行再传：理由同 SYSTEM_PROMPT。顺便挡掉不是 JSON 的东西 ——
-            // 那种情况 claude 会报一个和 schema 毫无关系的错，很难对上号
+            // 压成一行再传：理由同 SYSTEM_PROMPT。顺便挡掉非 JSON ——
+            // 那样 claude 会报一个和 schema 毫无关系的错
             let value: serde_json::Value =
                 serde_json::from_str(schema).map_err(|e| format!("输出 schema 不是合法的 JSON：{e}"))?;
             args.push("--json-schema".into());

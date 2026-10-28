@@ -3,14 +3,8 @@ import { motion } from "motion/react";
 import { dayToDate, dayToIso, isoToDay, isWeekend, today } from "../gantt/time";
 
 /**
- * 日期单元格编辑器：输入框 + 日历浮层。
- *
- * 两种输入方式并存是刻意的 —— 键盘流是这个应用的一等公民（DESIGN.md §5），
- * 从 Excel 粘一列日期进来、或者直接敲 `8-20`，都不该被迫去点日历。
- * 日历负责「我不确定 20 号是周几」这类场景。
- *
- * 没有用原生 <input type="date">：macOS 的 WKWebView 把它渲染成分段步进器
- * 而不是日历弹层，且完全无法配合周末底纹、今天标记这些语义着色。
+ * 日期单元格编辑器：输入框 + 日历浮层，键盘输入和点日历都可用。
+ * 不用原生 <input type="date">：WKWebView 下它渲染成分段步进器，做不了周末底纹和今天标记。
  */
 
 const WEEKDAY_LABELS = ["一", "二", "三", "四", "五", "六", "日"];
@@ -18,7 +12,7 @@ const WEEKDAY_LABELS = ["一", "二", "三", "四", "五", "六", "日"];
 interface Props {
   /** 当前值（天序号） */
   value: number;
-  /** 早于它的日期会被标灰，用于「结束日期不能早于开始日期」这类约束提示 */
+  /** 早于它的日期标灰不可选，用于「结束不能早于开始」这类约束 */
   minDay?: number;
   onCommit: (day: number) => void;
   onCancel: () => void;
@@ -47,7 +41,7 @@ export function DatePicker({ value, minDay, onCommit, onCancel }: Props) {
     const onDown = (e: PointerEvent) => {
       if (!rootRef.current?.contains(e.target as Node)) onCancel();
     };
-    // 延后一帧注册，否则触发打开的这一次点击会立刻把自己关掉
+    // 延后一帧注册，否则打开它的那次点击会立刻把它关掉
     const id = setTimeout(() => document.addEventListener("pointerdown", onDown), 0);
     return () => {
       clearTimeout(id);
@@ -62,7 +56,7 @@ export function DatePicker({ value, minDay, onCommit, onCancel }: Props) {
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
-    e.stopPropagation(); // 别让 Enter / ⌫ 被工作区的全局快捷键接走
+    e.stopPropagation(); // 别让 Enter / ⌫ 触发工作区全局快捷键
     switch (e.key) {
       case "Enter":
         e.preventDefault();
@@ -170,7 +164,7 @@ export function DatePicker({ value, minDay, onCommit, onCancel }: Props) {
             今天
           </button>
           <span className="text-[9px] text-[var(--text-dim)]">
-            ↑↓←→ 选日 · Enter 确认
+            ↑↓←→ 选日期，Enter 确认
           </span>
         </div>
       </motion.div>
@@ -236,7 +230,7 @@ function NavButton({ children, onClick }: { children: React.ReactNode; onClick: 
 /** 覆盖整个月的 6×7 网格，周一起始，前后补齐相邻月份。 */
 export function monthGrid(year: number, month: number): number[] {
   const first = isoToDay(`${year}-${pad(month + 1)}-01`);
-  // getUTCDay 里 0 是周日；这里周一为一周之首，所以要把周日折算成 6
+  // getUTCDay 的 0 是周日；这里周一起始，周日折算成 6
   const offset = (dayToDate(first).getUTCDay() + 6) % 7;
   const start = first - offset;
   return Array.from({ length: 42 }, (_, i) => start + i);
@@ -261,7 +255,7 @@ export function parseDate(raw: string): number | null {
   return null;
 }
 
-/** 挡掉 2026-13-45 这种越界写法 —— Date.UTC 会默默进位，不能直接信它。 */
+/** 挡掉 2026-13-45：Date.UTC 会静默进位，不能直接信。 */
 function safeIso(iso: string): number | null {
   const [, m, d] = iso.split("-").map(Number);
   if (m < 1 || m > 12 || d < 1 || d > 31) return null;

@@ -1,30 +1,7 @@
-//! 整库（`.db`）的导出与导入 —— 跨电脑的另一条通道。
-//!
-//! 和 `transfer.rs`（`.ganttproj`）的分工：
-//!   · `.ganttproj` —— 一次带**一个**项目，挑着搬
-//!   · `.db`        —— 一次带**整个库**：那台电脑上的所有项目和全部负责人
-//!
-//! SQLite 的文件格式本身跨平台（大端序、自描述的页头），Mac 上的 gantt.db
-//! 原样拷到 Windows 就打得开 —— 难的不是字节，是**合进本机已有的数据**。
-//!
-//! ## 为什么是合并，而不是把本机的库整个换掉
-//!
-//! 整个换掉最省事，但它会静默抹掉本机独有的项目：你在 Windows 上已经记了
-//! 两周的新工地，导入一次 Mac 的库就没了，而对话框里根本看不出这一点。
-//!
-//! 所以这里不另起炉灶：源库里的每个项目先 `transfer::collect` 成一份和
-//! .ganttproj 一模一样的 Archive，再走同一套校验、同一套「uuid 优先、名字兜底」
-//! 的对号、同一个 `apply_in` 落库。两条通道共用一条写库路径 —— 任何一条被
-//! 日常走过，另一条也就跟着被验证过。
-//!
-//! ## 三条规矩
-//!
-//! 1. **源文件一个字节都不碰。** 先整份拷进临时目录（连同旁边的 `-wal`），
-//!    在副本上迁移、读取。直接打开会让 SQLite 在用户的 U 盘上 checkpoint、
-//!    留下 `-shm`，旧版本的库还会被当场迁移掉。
-//! 2. **全有或全无。** 所有项目放进同一个事务，第 17 个写不进去就一个都不写。
-//! 3. **写之前先给本机整库拍快照。** 「撤销」就是把快照恢复回来 ——
-//!    覆盖了哪些、新建了哪些，都不用逐个记。
+//! 整库（`.db`）导入导出。与 `transfer.rs`（`.ganttproj`，只带一个项目）互补。
+//! 只合并不替换（替换会抹掉本机独有项目）：源库每个项目先 `transfer::collect`，再走 .ganttproj 同一套校验与 `apply_in`。
+//! 三条规矩：源文件一个字节都不碰（连 `-wal` 整份拷进临时目录再读，否则会在用户 U 盘上 checkpoint、留 `-shm`、旧库被当场迁移）；
+//! 全有或全无（同一事务）；写之前先拍本机整库快照，「撤销」就是恢复它。
 
 use crate::backup;
 use crate::db::{self, Db, MIGRATIONS};
@@ -39,15 +16,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 type Result<T> = std::result::Result<T, String>;
 
-/// SQLite 文件头的前 16 字节。所有平台、所有版本都一样 —— 这正是 Mac 的库
-/// 能直接拿到 Windows 上读的原因。
+/// SQLite 文件头的前 16 字节，所有平台一致。
 const SQLITE_MAGIC: &[u8] = b"SQLite format 3\0";
 
 /* ------------------------------------------------------------------ */
 /* 源库：拷一份再读                                                     */
 /* ------------------------------------------------------------------ */
 
-/// 临时目录，离开作用域就删掉。
+/// 临时目录，出作用域即删。
 struct TempDir(PathBuf);
 
 impl TempDir {
@@ -73,10 +49,7 @@ impl Drop for TempDir {
     }
 }
 
-/// 源库在临时目录里的副本。
-///
-/// 字段顺序是有意的：Rust 按声明顺序析构，连接必须先于目录关掉 ——
-/// Windows 上被打开着的文件删不掉。
+/// 源库在临时目录里的副本。字段顺序有意义：按声明顺序析构，连接必须先于目录关掉，Windows 上打开着的文件删不掉。
 pub struct Source {
     pub conn: Connection,
     /// 能读，但用户应该知道的事
@@ -91,11 +64,7 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// 拷文件，但不和别的进程抢锁。
-///
-/// Windows 上 fs::copy 走 CopyFileEx，源文件正被别的程序以写方式打开时可能
-/// 报共享冲突；std 的 File::open 在 Windows 上默认允许读、写、删共享 ——
-/// 另一个 Gantt 或 SQLite 工具开着的库也照样读得出来。
+/// 不抢锁地拷文件：Windows 上 fs::copy（CopyFileEx）在源文件被写时可能报共享冲突，File::open 默认允许共享。
 fn copy_shared(from: &Path, to: &Path) -> std::io::Result<u64> {
     let mut src = fs::File::open(from)?;
     let mut dst = fs::File::create(to)?;
@@ -118,8 +87,7 @@ pub fn open_source(path: &Path) -> Result<Source> {
     let dir = TempDir::new()?;
     let copy = dir.0.join("source.db");
     copy_shared(path, &copy).map_err(|e| format!("读取数据库失败：{e}"))?;
-    // 还没 checkpoint 的提交全在 -wal 里。只拷主文件，拿到的是缺了最近
-    // 一段时间修改的库 —— 和 backup.rs 顶部说的是同一个坑
+    // 未 checkpoint 的提交全在 -wal 里，只拷主文件会缺最近的修改
     if has_wal {
         copy_shared(&wal, &with_suffix(&copy, "-wal"))
             .map_err(|e| format!("读取 {} 失败：{e}", wal.display()))?;
@@ -137,8 +105,7 @@ pub fn open_source(path: &Path) -> Result<Source> {
 
     let conn = Connection::open(&copy).map_err(|e| format!("打不开这个数据库：{e}"))?;
 
-    // 先认身份，再迁移。顺序反过来的话，随便一个 SQLite 文件都会被迁移
-    // 「建」出一套空表，然后报「0 个项目」—— 比直接说「不是」更让人糊涂
+    // 先认身份再迁移，否则随便一个 SQLite 文件都会被建出空表，报「0 个项目」而非「不是 Gantt 的库」
     let has_projects = conn
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'projects'",
@@ -195,18 +162,18 @@ pub struct DbImportItem {
     /// "uuid" | "name"
     pub matched_by: Option<String>,
     pub target_id: Option<i64>,
-    /// 落库后的名字。和 file.name 不同 = 原名被本机另一个项目占着，换了一个
+    /// 落库后的名字。与 file.name 不同 = 原名被本机项目占着，已改名
     pub final_name: String,
 }
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct DbImportPreview {
-    /// 非空 = 不能导入。全有或全无，有一条就一个项目都不写
+    /// 非空 = 不能导入。全有或全无，一条问题就一个项目都不写
     pub problems: Vec<String>,
     pub warnings: Vec<String>,
     pub projects: Vec<DbImportItem>,
-    /// 源库里有、没有任何项目用到、本机也还没有的负责人 —— 一并带过来
+    /// 源库里有、没被任何项目用到、本机也没有的负责人，一并带过来
     pub extra_people: Vec<String>,
 }
 
@@ -216,7 +183,7 @@ pub struct DbImportOutcome {
     pub created: i64,
     pub overwritten: i64,
     pub new_people: Vec<String>,
-    /// 导入前本机整库的快照；「撤销」就是把它恢复回来
+    /// 导入前本机整库快照，「撤销」即恢复它
     pub backup_path: String,
 }
 
@@ -244,7 +211,7 @@ impl Plan {
     }
 }
 
-/// 读源库、校验、和本机对号、定名 —— 一个字都不写。
+/// 读源库、校验、对号、定名，不写库。
 pub fn plan(local: &Connection, src: &Connection) -> rusqlite::Result<Plan> {
     let ids: Vec<i64> = src
         .prepare("SELECT id FROM projects ORDER BY sort_order, id")?
@@ -265,8 +232,7 @@ pub fn plan(local: &Connection, src: &Connection) -> rusqlite::Result<Plan> {
             project_uuid: bundle.project.uuid.clone(),
         };
         let archive = Archive { manifest, bundle, people, avatars, unknown_sections: Vec::new() };
-        // 带上项目名：几十个项目的问题混在一张清单里，
-        // 光说「任务「验收」……」没人知道是哪个项目的
+        // 问题带上项目名：几十个项目混在一张清单里，光说「任务「验收」」分不清哪个
         for p in transfer::validate(&archive) {
             problems.push(format!("「{}」{p}", archive.bundle.project.name));
         }
@@ -281,11 +247,7 @@ pub fn plan(local: &Connection, src: &Connection) -> rusqlite::Result<Plan> {
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
 
-    // ---- 对号：uuid 优先、名字兜底，而且一个本机项目只能被认领一次 ----
-    //
-    // 单文件导入不需要「认领」：一次只有一个项目。整库导入时，源库里的 A 可能
-    // 按 uuid 认走了本机的 X，而源库里的 B 恰好和 X 同名 —— 不挡的话两个项目
-    // 会覆盖同一个本机项目，后写的那个把先写的整个冲掉
+    // uuid 优先、名字兜底，一个本机项目只能被认领一次（否则同名的第二个源项目会冲掉它）
     let mut claimed: HashSet<i64> = HashSet::new();
     let mut matched: Vec<Option<(i64, &'static str)>> = vec![None; archives.len()];
     for (i, a) in archives.iter().enumerate() {
@@ -307,18 +269,14 @@ pub fn plan(local: &Connection, src: &Connection) -> rusqlite::Result<Plan> {
         }
     }
 
-    // ---- 定名 ----
-    //
-    // 没被覆盖的本机项目名字不动，它们占着的名字谁也不能用。导入的项目尽量
-    // 用源库里的原名；原名被占时，覆盖的沿用本机原名，实在不行才加后缀 ——
-    // 并且在预检里明说，不悄悄改
+    // 未被覆盖的本机项目占着的名字不能用。原名被占时覆盖的沿用本机原名，否则加后缀并在预检里说明
     let mut taken: HashSet<String> = locals
         .iter()
         .filter(|(id, _, _)| !claimed.contains(id))
         .map(|(_, _, name)| name.clone())
         .collect();
     let mut names: Vec<Option<String>> = vec![None; archives.len()];
-    // 源库里的名字本身唯一，所以第一轮之间不会互相撞，只可能撞本机的
+    // 源库内名字唯一，第一轮只可能撞本机
     for (i, a) in archives.iter().enumerate() {
         let want = &a.bundle.project.name;
         if taken.insert(want.clone()) {
@@ -369,10 +327,7 @@ pub fn plan(local: &Connection, src: &Connection) -> rusqlite::Result<Plan> {
         items.push((archive, item));
     }
 
-    // ---- 没有项目用到的负责人 ----
-    //
-    // .ganttproj 只带用到的人（传一个项目不该改掉对方的整张人员表）；
-    // 但整库导入的意思就是「把那台电脑上的东西都搬过来」，人员表也是其中之一
+    // 未用到的负责人也带过来：整库导入即「都搬过来」，.ganttproj 只带用到的人
     let used: HashSet<String> = items
         .iter()
         .flat_map(|(a, _)| a.people.iter().map(|p| p.name.clone()))
@@ -395,7 +350,7 @@ pub fn plan(local: &Connection, src: &Connection) -> rusqlite::Result<Plan> {
 }
 
 fn names_unwrap(name: Option<String>) -> String {
-    // 两轮定名覆盖了每一个下标，走到这里一定有值
+    // 两轮定名覆盖所有下标
     name.expect("每个项目都已定名")
 }
 
@@ -411,18 +366,14 @@ fn now_secs() -> String {
         .to_string()
 }
 
-/// 落库。返回（新建数，覆盖数，新增的负责人）。
+/// 落库。返回（新建数，覆盖数，新增负责人）。
 pub fn import_all(conn: &mut Connection, plan: &Plan) -> Result<(i64, i64, Vec<String>)> {
     if !plan.problems.is_empty() {
         return Err(plan.problems.join("\n"));
     }
     let tx = conn.transaction().map_err(|e| e.to_string())?;
 
-    // 先把要被覆盖的项目统统挪到临时名字上。
-    //
-    // 项目名是唯一索引，而且逐条语句检查：两个本机项目互换名字（A↔B）时，
-    // 不管先写哪个，第一条 UPDATE 都会撞上另一个还没改的。事务内的中间状态
-    // 外面看不见，挪一下不留痕迹
+    // 先把被覆盖的项目挪到临时名字：项目名有唯一索引，A↔B 互换时先写哪个都会撞上还没改的那个
     for (_, item) in &plan.items {
         if let Some(id) = item.target_id {
             tx.execute(
@@ -462,10 +413,7 @@ pub fn import_all(conn: &mut Connection, plan: &Plan) -> Result<(i64, i64, Vec<S
     Ok((created, overwritten, new_people))
 }
 
-/// 把快照整份恢复进活动连接 —— 「撤销整库导入」。
-///
-/// 走 SQLite 的在线备份 API 反方向拷：连接不用关、文件不用换，
-/// 前端手里的一切句柄都还有效。
+/// 把快照恢复进活动连接（撤销导入）。走在线备份 API 反向拷，连接不用关、文件不用换。
 pub fn restore(live: &mut Connection, snapshot: &Path) -> Result<()> {
     let src = Connection::open_with_flags(snapshot, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| format!("打不开快照：{e}"))?;
@@ -473,7 +421,7 @@ pub fn restore(live: &mut Connection, snapshot: &Path) -> Result<()> {
         let backup = rusqlite::backup::Backup::new(&src, live).map_err(|e| e.to_string())?;
         backup.step(-1).map_err(|e| format!("恢复失败：{e}"))?;
     }
-    // 快照是回滚日志模式的单文件；拷完之后活动库要回到 WAL，和 db::open 一致
+    // 快照是回滚日志模式单文件；恢复后活动库要回 WAL，与 db::open 一致
     live.pragma_update(None, "journal_mode", "WAL").map_err(|e| e.to_string())?;
     db::migrate(live).map_err(|e| e.to_string())
 }
@@ -499,15 +447,11 @@ fn is_live_db(app: &tauri::AppHandle, path: &Path) -> bool {
     )
 }
 
-/// 把整个库导出成一个独立的 .db 文件 —— 拷到另一台电脑上导入用。
-///
-/// 和「立即备份」是同一个快照，只是位置由用户挑：备份埋在应用数据目录里，
-/// 那个目录在 Mac 上藏在 ~/Library 下，让人去那儿翻文件等于没给这个功能。
+/// 把整个库导出成独立 .db，可拷到另一台电脑导入。
 #[tauri::command]
 pub fn export_database(app: tauri::AppHandle, db: tauri::State<Db>, path: String) -> Result<String> {
     let path = PathBuf::from(path);
-    // 挑中了正在用的库本身：Mac 上改名覆盖会让活动连接对着一个已被替换掉的
-    // 文件继续写，Windows 上则直接失败。两种都不该发生
+    // 不能选中正在用的库：Mac 上改名覆盖会让活动连接继续写已被替换的文件，Windows 上直接失败
     if is_live_db(&app, &path) {
         return Err("不能导出到本机正在使用的数据库文件上，请换一个位置。".into());
     }
@@ -519,7 +463,7 @@ pub fn export_database(app: tauri::AppHandle, db: tauri::State<Db>, path: String
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// 读源库、校验、和本机对号 —— 一个字都不写库。
+/// 预检：读源库、校验、对号，不写库。
 #[tauri::command]
 pub fn inspect_db_import(
     app: tauri::AppHandle,
@@ -536,10 +480,7 @@ pub fn inspect_db_import(
     Ok(plan.preview(&src.warnings))
 }
 
-/// 真正落库。
-///
-/// 和 .ganttproj 一样：源文件**重新读、重新对号**，不复用预检的结果 ——
-/// 预检和确认之间隔着用户的思考时间，那期间文件可能被云盘同步换掉。
+/// 真正落库。源文件重读重对号，不复用预检结果：中间可能被云盘同步换掉。
 #[tauri::command]
 pub fn commit_db_import(
     app: tauri::AppHandle,
@@ -558,8 +499,7 @@ pub fn commit_db_import(
         return Err(plan.problems.join("\n"));
     }
 
-    // 文件名故意不以 gantt 开头：滚动备份按这个前缀清理旧文件，
-    // 撤销要用的快照不能被下次启动顺手删掉
+    // 文件名故意不以 gantt 开头：滚动备份按该前缀清旧文件，撤销快照不能被顺手删掉
     let backup_path = backups_dir(&app)?.join(format!(
         "整库导入前-{}.db",
         transfer::safe_stem(&backup_stamp)
@@ -576,7 +516,7 @@ pub fn commit_db_import(
     })
 }
 
-/// 撤销一次整库导入：把导入前的快照恢复回来。
+/// 撤销整库导入：恢复导入前的快照。
 #[tauri::command]
 pub fn undo_db_import(
     app: tauri::AppHandle,
@@ -585,8 +525,7 @@ pub fn undo_db_import(
 ) -> Result<()> {
     let dir = backups_dir(&app)?;
     let path = PathBuf::from(backup_path);
-    // 只认 backups/ 里的快照：这条命令会把整个库换掉，
-    // 不能变成一个「随便给个文件就覆盖全部数据」的入口
+    // 只认 backups/ 里的快照：这条命令会换掉整个库
     let inside = matches!(
         (fs::canonicalize(&path), fs::canonicalize(&dir)),
         (Ok(p), Ok(d)) if p.starts_with(&d)
@@ -620,7 +559,7 @@ mod tests {
         conn
     }
 
-    /// 一个项目：两层任务、一条风险、一条项目级当日记录、一个带头像的负责人。
+    /// 造一个项目：两层任务、一条风险、一条项目级当日记录、一个带头像的负责人。
     fn project(conn: &Connection, uuid: &str, name: &str, person: &str) -> i64 {
         conn.execute(
             "INSERT INTO projects (name, uuid, created_at, updated_at) VALUES (?1, ?2, '1', '2')",
@@ -678,8 +617,7 @@ mod tests {
             .unwrap()
     }
 
-    /// 主线场景：Mac 上的整个库导进一台已经有自己项目的 Windows。
-    /// 本机独有的项目必须还在，人员表里没被任何任务用到的人也要带过来。
+    /// 主线：整个库导进已有项目的本机。本机独有项目要留着，未用到的负责人也要带过来。
     #[test]
     fn imports_every_project_and_keeps_local_ones() {
         let d = dir("all");
@@ -710,7 +648,7 @@ mod tests {
         assert_eq!(count(&local, "SELECT COUNT(*) FROM risks"), 3);
         assert!(new_people.contains(&"王五".to_string()), "{new_people:?}");
 
-        // 父子关系没有跨项目串线
+        // 父子关系不跨项目
         assert_eq!(
             count(
                 &local,
@@ -719,17 +657,14 @@ mod tests {
             ),
             0
         );
-        // 头像跟着人一起过来了
+        // 头像一起过来
         let avatar: Option<String> = local
             .query_row("SELECT avatar FROM people WHERE name = '张三'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(avatar.as_deref(), Some("data:image/png;base64,UEsDBBQA"));
     }
 
-    /// 源文件一个字节都不能动；还在 -wal 里的提交必须读得到。
-    ///
-    /// 这里刻意让源库的连接一直开着、不 checkpoint —— 这就是「Mac 上的 Gantt
-    /// 还开着，用户直接把数据目录拷走」时的样子：主文件里几乎什么都没有。
+    /// 源文件一字不动，-wal 里的提交要读得到。连接一直开着不 checkpoint，模拟「还开着就拷走数据目录」。
     #[test]
     fn reads_the_wal_and_never_touches_the_source() {
         let d = dir("wal");
@@ -753,7 +688,7 @@ mod tests {
         drop(live);
     }
 
-    /// 只拷了主文件、没带 -wal 时要提醒一句；导出的快照是单文件，不该误报。
+    /// 只有主文件、没带 -wal 要提醒；导出的快照是单文件，不该误报。
     #[test]
     fn warns_only_when_a_wal_database_arrives_alone() {
         let d = dir("lonely");
@@ -763,7 +698,7 @@ mod tests {
         {
             let live = db::open(&live_path).unwrap();
             project(&live, "u1", "P", "张三");
-            // 连接开着时 -wal 还在；只拷主文件就是用户最容易犯的那个错
+            // 连接开着时 -wal 还在；只拷主文件是最常见的错
             live.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
             copy_shared(&live_path, &lonely).unwrap();
             backup::snapshot(&live, &exported).unwrap();
@@ -774,13 +709,13 @@ mod tests {
         assert!(open_source(&exported).unwrap().warnings.is_empty());
     }
 
-    /// 另一台电脑上的 Gantt 比本机旧：在副本上迁移，源文件原封不动。
+    /// 旧版本库只在副本上迁移，源文件不动。
     #[test]
     fn upgrades_an_older_database_on_the_copy_only() {
         let d = dir("old");
         let path = d.join("old.db");
         {
-            // 停在 006：还没有 uuid，也还没有项目名唯一
+            // 停在 006：还没有 uuid 和项目名唯一索引
             let old = Connection::open(&path).unwrap();
             old.pragma_update(None, "foreign_keys", "ON").unwrap();
             for sql in &MIGRATIONS[..6] {
@@ -812,7 +747,7 @@ mod tests {
         assert!(fs::read(&path).unwrap() == before, "源文件不该被迁移");
     }
 
-    /// 读不了的东西要说人话，而且说清楚是哪种读不了。
+    /// 读不了的文件要说清是哪一种读不了。
     #[test]
     fn rejects_what_it_cannot_read() {
         let d = dir("reject");
@@ -836,7 +771,7 @@ mod tests {
         assert!(open_source(&newer).err().unwrap().contains("请先升级"));
     }
 
-    /// uuid 对上 → 覆盖并改名；本机独有的项目原样留着。
+    /// uuid 对上即覆盖改名；本机独有项目保留。
     #[test]
     fn overwrites_by_uuid_and_leaves_local_only_projects_alone() {
         let src = mem();
@@ -865,8 +800,7 @@ mod tests {
         assert_eq!(count(&local, "SELECT COUNT(*) FROM tasks WHERE name = '本机独有的任务'"), 0);
     }
 
-    /// 两个本机项目在另一台电脑上互换了名字。逐个写的话第一条 UPDATE 就会
-    /// 撞上唯一索引 —— 先挪到临时名字上才过得去。
+    /// 两个项目互换名字：逐条写会撞唯一索引，必须先挪到临时名字。
     #[test]
     fn swapped_names_do_not_trip_the_unique_index() {
         let src = mem();
@@ -888,16 +822,15 @@ mod tests {
         assert_eq!(count(&local, "SELECT COUNT(*) FROM projects"), 2);
     }
 
-    /// 名字被本机另一个项目占着：覆盖的沿用本机原名；原名也被占了才加后缀。
-    /// 两种情况都要在预检里说出来，并且最后所有名字仍然唯一。
+    /// 名字被占：覆盖的沿用本机原名，否则加后缀；两种情况都要在预检里说明。
     #[test]
     fn a_taken_name_falls_back_and_is_announced() {
-        // 源库：P 的 uuid 对上本机的「B」，但它自己叫「A」；Q 是新项目，叫「B」
+        // 源库：P 的 uuid 对上本机「B」但自己叫「A」；Q 是新项目叫「B」
         let src = mem();
         project(&src, "u1", "A", "张三");
         project(&src, "u3", "B", "张三");
 
-        // 本机：「A」被一个和这次导入无关的项目占着
+        // 本机：「A」被无关项目占着
         let mut local = mem();
         project(&local, "u1", "B", "张三");
         project(&local, "u2", "A", "张三");
@@ -911,7 +844,7 @@ mod tests {
         assert_eq!(names(&local), vec!["A", "A（导入）", "B"]);
     }
 
-    /// 全有或全无：一个项目有问题，整份库都不导；写到一半失败，前面写的也要退回去。
+    /// 全有或全无：一个项目有问题整份不导，写到一半失败也要退回。
     #[test]
     fn all_or_nothing() {
         let src = mem();
@@ -926,8 +859,7 @@ mod tests {
         assert!(import_all(&mut local, &rejected).is_err());
         assert_eq!(count(&local, "SELECT COUNT(*) FROM projects"), 0);
 
-        // 预检之后本机又冒出一个同名项目，第二个项目会在唯一索引上失败 ——
-        // 这时第一个已经写进去的也必须一起撤掉
+        // 预检后本机冒出同名项目，第二个会撞唯一索引，第一个写进去的也要撤掉
         let src = mem();
         project(&src, "u1", "第一个", "张三");
         project(&src, "u2", "第二个", "张三");
@@ -945,7 +877,7 @@ mod tests {
         assert_eq!(count(&local, "SELECT COUNT(*) FROM tasks"), 0);
     }
 
-    /// 撤销 = 把导入前的快照恢复回来。恢复之后活动库仍然是 WAL。
+    /// 撤销即恢复快照，之后活动库仍是 WAL。
     #[test]
     fn undo_restores_the_snapshot() {
         let d = dir("undo");
@@ -970,7 +902,7 @@ mod tests {
         assert_eq!(mode, "wal");
     }
 
-    /// 导出的库是一个自给自足的单文件：不带 -wal、不留 .part，拷走就能用。
+    /// 导出的是自给自足的单文件：不带 -wal、不留 .part。
     #[test]
     fn exported_database_is_one_self_contained_file() {
         let d = dir("export");
@@ -979,7 +911,7 @@ mod tests {
 
         let out = d.join("Gantt 数据库.db");
         backup::snapshot(&live, &out).unwrap();
-        // 再导一次覆盖同名文件 —— 用户在保存对话框里点了「替换」就是这样
+        // 再导一次覆盖同名文件（保存对话框里点「替换」）
         backup::snapshot(&live, &out).unwrap();
 
         assert!(!with_suffix(&out, "-wal").exists());

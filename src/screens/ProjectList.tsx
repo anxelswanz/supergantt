@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { isoToDay, today } from "../gantt/time";
+import { dayToIso, isoToDay, today } from "../gantt/time";
 import {
   api,
   type DbImportOutcome,
@@ -167,29 +167,33 @@ export function ProjectList() {
 
   return (
     <div className="relative h-full overflow-y-auto bg-[var(--surface)]">
-      <div className="mx-auto max-w-5xl px-8 py-10">
-        <div className="mb-8 flex items-baseline gap-4">
-          <h1 className="text-2xl font-bold tracking-tight text-[var(--text)]">
-            我的项目
-          </h1>
-          <span className="text-xs text-[var(--text-dim)]">
-            {loading ? "加载中…" : `${projects.length} 个项目`}
-          </span>
-          <button
-            onClick={() => void pickProjectFile().then((p) => { if (p) void beginImport(p); })}
-            disabled={reading}
-            title="从 .ganttproj 项目文件或另一台电脑导出的 .db 数据库导入（也可以把文件直接拖进窗口）"
-            className="ml-auto rounded-full border border-[var(--rule)] px-4 py-2 text-xs font-semibold text-[var(--text-dim)] transition-colors hover:text-[var(--text)] disabled:opacity-40"
-          >
-            {reading ? "读取中…" : "↧ 导入项目"}
-          </button>
-          <button
-            onClick={() => setCreating(true)}
-            className="rounded-full bg-[var(--accent)] px-4 py-2 text-xs font-semibold text-white transition-transform active:scale-95"
-          >
-            + 新建项目
-          </button>
-        </div>
+      <div className="mx-auto max-w-6xl px-10 pt-12 pb-16">
+        <header className="flex items-end gap-4 border-b border-[var(--rule)] pb-5">
+          <div>
+            <div className="text-[11px] font-medium tracking-[0.14em] text-[var(--text-dim)]">
+              SUPERGANTT
+            </div>
+            <h1 className="mt-1.5 text-[26px] leading-none font-semibold tracking-[-0.02em] text-[var(--text)]">
+              我的项目
+            </h1>
+          </div>
+          <div className="mb-1 text-[12px] text-[var(--text-dim)]">
+            {loading ? "正在读取…" : `${projects.length} 个项目`}
+          </div>
+          <div className="mb-0.5 ml-auto flex items-center gap-2">
+            <button
+              onClick={() => void pickProjectFile().then((p) => { if (p) void beginImport(p); })}
+              disabled={reading}
+              title="导入 .ganttproj，或另一台电脑的 .db；也可以把文件拖进窗口"
+              className="btn h-7 px-3"
+            >
+              {reading ? "读取中…" : "↧ 导入项目"}
+            </button>
+            <button onClick={() => setCreating(true)} className="btn btn-primary h-7 px-3">
+              + 新建项目
+            </button>
+          </div>
+        </header>
 
         <AnimatePresence>
           {notice && (
@@ -211,7 +215,9 @@ export function ProjectList() {
           )}
         </AnimatePresence>
 
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(248px,1fr))] gap-4">
+        {projects.length > 0 && <PortfolioTimeline projects={projects} onOpen={openProject} />}
+
+        <div className="mt-8 grid grid-cols-[repeat(auto-fill,minmax(268px,1fr))] gap-3">
           <AnimatePresence mode="popLayout">
             {creating && (
               <motion.div
@@ -220,7 +226,7 @@ export function ProjectList() {
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.94 }}
                 transition={{ type: "spring", stiffness: 400, damping: 30 }}
-                className="rounded-2xl border-2 border-dashed border-[var(--accent)] p-5"
+                className="rounded-[var(--r-l)] border border-dashed border-[var(--accent)] bg-[var(--surface)] p-5"
               >
                 <NewProjectInput
                   taken={(name) => projects.some((p) => p.project.name === name)}
@@ -244,15 +250,35 @@ export function ProjectList() {
         </div>
 
         {!loading && projects.length === 0 && !creating && (
-          <div className="mt-16 text-center text-sm leading-relaxed text-[var(--text-dim)]">
-            还没有项目。点右上角新建一个开始，
-            <br />
-            或者把另一台电脑导出的 <code>.ganttproj</code> 或 <code>.db</code> 拖进这个窗口。
+          <div className="mt-24 flex flex-col items-center gap-2 text-[13px] text-[var(--text-dim)]">
+            <div className="text-[15px] font-medium text-[var(--text)]">还没有项目</div>
+            <div>新建一个项目开始排期，或把 .ganttproj / .db 文件拖进窗口。</div>
           </div>
+        )}
+        {projects.length > 0 && (
+          <footer className="mt-10 flex items-stretch border-t border-[var(--rule)] text-[11px] text-[var(--text-dim)]">
+            {[
+              ["项目", String(projects.length)],
+              ["任务", String(projects.reduce((n, p) => n + p.taskCount, 0))],
+              ["逾期", String(projects.reduce((n, p) => n + p.overdueCount, 0))],
+              ["进行中", String(projects.filter((p) => p.progress > 0 && p.progress < 1).length)],
+            ].map(([label, value], i) => (
+              <div
+                key={label}
+                className={`flex items-baseline gap-2 px-4 py-3 ${i > 0 ? "border-l border-[var(--rule)]" : "pl-0"}`}
+              >
+                <span className="font-mono text-[13px] font-semibold text-[var(--text)]">{value}</span>
+                <span>{label}</span>
+              </div>
+            ))}
+            <div className="ml-auto self-center pr-0.5 text-[10px]">
+              数据存在本机的同一个 .db 里
+            </div>
+          </footer>
         )}
       </div>
 
-      {/* 拖入时整页变成接收区。半透明盖住内容，让「松手会发生什么」一目了然 */}
+      {/* 拖入时整页变成接收区 */}
       <AnimatePresence>
         {dragging && (
           <motion.div
@@ -261,10 +287,10 @@ export function ProjectList() {
             exit={{ opacity: 0 }}
             className="pointer-events-none fixed inset-0 z-40 grid place-items-center bg-[var(--surface)]/85 p-10"
           >
-            <div className="grid place-items-center gap-2 rounded-3xl border-2 border-dashed border-[var(--accent)] px-16 py-14">
-              <div className="text-3xl">↧</div>
+            <div className="grid place-items-center gap-2 rounded-[var(--r-l)] border-2 border-dashed border-[var(--accent)] px-16 py-14">
+              <div className="text-2xl text-[var(--accent)]">↧</div>
               <div className="text-sm font-semibold text-[var(--text)]">松开以导入项目</div>
-              <div className="font-mono text-[11px] text-[var(--text-dim)]">.ganttproj · .db</div>
+              <div className="font-mono text-[11px] text-[var(--text-dim)]">.ganttproj / .db</div>
             </div>
           </motion.div>
         )}
@@ -336,7 +362,7 @@ function NoticeBanner({
       exit={{ opacity: 0, y: -6 }}
       className="mb-5 flex items-center gap-3 rounded-xl border border-[var(--rule)] bg-[var(--surface-alt)] px-4 py-3"
     >
-      <span className="text-sm text-emerald-500">✓</span>
+      <span className="text-sm text-[var(--ok)]">✓</span>
       <div className="min-w-0 flex-1 text-xs leading-relaxed text-[var(--text)]">
         {imported ? (
           <>
@@ -350,7 +376,7 @@ function NoticeBanner({
             </span>
             {imported.backupPath && (
               <div className="mt-0.5 text-[11px] text-[var(--text-dim)]">
-                旧版已备份到 <code>backups/</code>，横幅关掉后文件仍在。
+                旧版已备份到 <code>backups/</code>。
               </div>
             )}
           </>
@@ -364,7 +390,7 @@ function NoticeBanner({
               </span>
             )}
             <div className="mt-0.5 text-[11px] text-[var(--text-dim)]">
-              导入前的整库快照在 <code>backups/</code>，横幅关掉后文件仍在。
+              导入前的整库快照在 <code>backups/</code>。
             </div>
           </>
         ) : (
@@ -407,9 +433,9 @@ function ErrorBanner({ message, onClose }: { message: string; onClose: () => voi
       initial={{ opacity: 0, y: -6 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -6 }}
-      className="mb-5 flex items-start gap-3 rounded-xl border border-rose-500/30 bg-rose-500/8 px-4 py-3"
+      className="mb-5 flex items-start gap-3 rounded-xl border border-[var(--danger)]/30 bg-[var(--danger)]/8 px-4 py-3"
     >
-      <span className="text-sm text-rose-500">!</span>
+      <span className="text-sm text-[var(--danger)]">!</span>
       <div className="min-w-0 flex-1 text-xs leading-relaxed text-[var(--text)]">{message}</div>
       <button
         onClick={onClose}
@@ -476,13 +502,12 @@ function DeleteProjectDialog({
           删除「{summary.project.name || "未命名项目"}」
         </div>
 
-        {/* 把代价写成具体的数字。「此操作不可恢复」是套话，
-            「37 个任务」才会让人停下来想一下 */}
+        {/* 写具体数字，比「不可恢复」更让人停一下 */}
         <p className="mt-2 text-xs leading-relaxed text-[var(--text-dim)]">
-          {summary.taskCount} 个任务，连同它们的风险、评论和逐日记录会一起删掉。
+          {summary.taskCount} 个任务，连同风险、评论和逐日记录会一起删掉。
           <br />
-          <span className="font-medium text-rose-500">这一步不能撤销</span>
-          —— {shortcut("mod", "Z")} 救不回来，只能从 <code>backups/</code> 里的备份回滚。
+          <span className="font-medium text-[var(--danger)]">不能撤销</span>，
+          {shortcut("mod", "Z")} 也救不回来，只能从 <code>backups/</code> 恢复。
         </p>
 
         <label className="mt-4 block text-[11px] text-[var(--text-dim)]">
@@ -500,7 +525,7 @@ function DeleteProjectDialog({
           spellCheck={false}
           autoComplete="off"
           className="mt-1.5 w-full rounded-lg border bg-[var(--surface-alt)] px-2.5 py-1.5 font-mono text-xs text-[var(--text)] outline-none transition-colors"
-          style={{ borderColor: ok ? "#f43f5e" : "var(--rule)" }}
+          style={{ borderColor: ok ? "var(--danger)" : "var(--rule)" }}
         />
 
         <div className="mt-4 flex items-center gap-2">
@@ -515,7 +540,7 @@ function DeleteProjectDialog({
             disabled={!ok}
             title={ok ? "删除这个项目" : `输入 ${CONFIRM_WORD} 才能删除`}
             className="rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition-opacity disabled:cursor-not-allowed disabled:opacity-35"
-            style={{ background: "#f43f5e" }}
+            style={{ background: "var(--danger)" }}
           >
             永久删除
           </button>
@@ -544,22 +569,24 @@ function ProjectCard({
     <motion.button
       layoutId={`project-${project.id}`}
       onClick={onOpen}
-      whileHover={{ y: -2 }}
-      // dramatic 档：卡片展开成工作区是全应用最值得花力气的转场（DESIGN.md §9）
       transition={{ type: "spring", stiffness: 120, damping: 20 }}
-      className="group relative flex flex-col gap-3 rounded-2xl border border-[var(--rule)] bg-[var(--surface-alt)] p-5 text-left"
+      className="group relative flex flex-col gap-3.5 overflow-hidden rounded-[var(--r-l)] border border-[var(--rule)] bg-[var(--surface)] p-5 text-left transition-colors hover:border-[var(--rule-strong)]"
     >
+      <span
+        className="absolute inset-x-0 top-0 h-[2px] origin-left scale-x-0 transition-transform duration-200 group-hover:scale-x-100"
+        style={{ background: project.color }}
+      />
       <div className="flex items-start gap-3">
         <ProgressRing value={progress} color={project.color} />
         <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-semibold text-[var(--text)]">
+          <div className="truncate text-[13px] font-semibold tracking-[-0.01em] text-[var(--text)]">
             {project.name}
           </div>
-          <div className="mt-0.5 text-[11px] text-[var(--text-dim)]">
-            {taskCount} 个任务
+          <div className="mt-1 flex items-center gap-2 text-[11px] text-[var(--text-dim)]">
+            <span className="font-mono">{taskCount} 个任务</span>
             {overdueCount > 0 && (
-              <span className="ml-1.5 font-semibold text-rose-500">
-                ⚠ {overdueCount} 逾期
+              <span className="font-mono font-semibold text-[var(--danger)]">
+                {overdueCount} 逾期
               </span>
             )}
           </div>
@@ -568,8 +595,8 @@ function ProjectCard({
 
       <SpanBar startDate={startDate} endDate={endDate} color={project.color} />
 
-      <div className="font-mono text-[10px] tabular-nums text-[var(--text-dim)]">
-        {startDate && endDate ? `${startDate.slice(5)} – ${endDate.slice(5)}` : "尚无任务"}
+      <div className="font-mono text-[11px] tabular-nums text-[var(--text-dim)]">
+        {startDate && endDate ? `${startDate.slice(5)} → ${endDate.slice(5)}` : "尚无任务"}
       </div>
 
       {/*
@@ -581,7 +608,7 @@ function ProjectCard({
         放在卡片上是因为想找数据的人多半正站在项目列表这一屏，
         而不是记得先进某个项目再翻设置。
       */}
-      <div className="absolute right-3 top-3 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+      <div className="absolute top-2 right-2 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
         <span
           role="button"
           tabIndex={0}
@@ -589,10 +616,10 @@ function ProjectCard({
             e.stopPropagation();
             onRevealData();
           }}
-          title={`${REVEAL_LABEL}数据文件所在的目录（所有项目共用同一个 .db）`}
-          className="rounded-lg px-2 py-1 text-[10px] font-medium text-[var(--text-dim)] hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
+          title={`${REVEAL_LABEL}数据文件所在目录`}
+          className="rounded-[var(--r-s)] px-2 py-1 text-[10px] font-medium text-[var(--text-dim)] hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
         >
-          ⧉ 数据目录
+          数据目录
         </span>
         {/*
           「导出」在这里而不在工作区的工具条上。工具条那两个导出
@@ -608,8 +635,8 @@ function ProjectCard({
             e.stopPropagation();
             onExport();
           }}
-          title="导出成 .ganttproj：完整数据，可以在另一台电脑上导回来"
-          className="rounded-lg px-2 py-1 text-[10px] font-medium text-[var(--text-dim)] hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
+          title="导出 .ganttproj，可在另一台电脑导入"
+          className="rounded-[var(--r-s)] px-2 py-1 text-[10px] font-medium text-[var(--text-dim)] hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
         >
           ⤴ 导出
         </span>
@@ -620,8 +647,8 @@ function ProjectCard({
             e.stopPropagation();
             onDelete();
           }}
-          title="删除这个项目（要手动输入确认）"
-          className="rounded-lg px-2 py-1 text-[10px] font-medium text-[var(--text-dim)] hover:bg-[var(--row-hover)] hover:text-rose-500"
+          title="删除这个项目，需要输入确认"
+          className="rounded-[var(--r-s)] px-2 py-1 text-[10px] font-medium text-[var(--text-dim)] hover:bg-[var(--row-hover)] hover:text-[var(--danger)]"
         >
           删除
         </span>
@@ -630,10 +657,7 @@ function ProjectCard({
   );
 }
 
-/**
- * 时间跨度条：项目起止区间 + 今天的位置 + 已完成比例。
- * 一眼看出「项目是过去式、进行中还是还没开始」，以及进度和时间是否匹配。
- */
+/** 时间跨度条：项目起止区间 + 今天的位置 */
 function SpanBar({
   startDate,
   endDate,
@@ -644,7 +668,7 @@ function SpanBar({
   color: string;
 }) {
   if (!startDate || !endDate) {
-    return <div className="h-1.5 rounded-full bg-[var(--row-hover)]" />;
+    return <div className="h-2" />;
   }
 
   const start = isoToDay(startDate);
@@ -653,17 +677,130 @@ function SpanBar({
   const todayPos = Math.min(1, Math.max(0, (today() - start) / span));
 
   return (
-    <div className="relative h-1.5 overflow-hidden rounded-full bg-[var(--row-hover)]">
+    <div className="relative h-2">
       <div
-        className="absolute inset-y-0 left-0 rounded-full opacity-30"
-        style={{ width: "100%", background: color }}
+        className="absolute inset-y-0 left-0 right-0 rounded-[1px] opacity-20"
+        style={{ background: color }}
       />
-      {/* 今天线：时间过去了多少 */}
       <div
-        className="absolute inset-y-0 w-0.5 bg-rose-500"
-        style={{ left: `${todayPos * 100}%` }}
+        className="absolute top-[-2px] bottom-[-2px] w-px"
+        style={{ left: `${todayPos * 100}%`, background: "var(--today)" }}
+        title="今天"
       />
     </div>
+  );
+}
+
+const MONTH_MS_DAYS = 30.44;
+
+/**
+ * 项目总览：所有项目画在同一条日历上，一眼看出谁在跑、谁已收尾、谁还没开始。
+ * 时间窗取所有项目的并集，两端各留半个月；没有日期的项目不画。
+ */
+function PortfolioTimeline({
+  projects,
+  onOpen,
+}: {
+  projects: ProjectSummary[];
+  onOpen: (id: number) => void | Promise<void>;
+}) {
+  const dated = projects.filter((p) => p.startDate && p.endDate);
+  if (dated.length === 0) return null;
+
+  const now = today();
+  const starts = dated.map((p) => isoToDay(p.startDate!));
+  const ends = dated.map((p) => isoToDay(p.endDate!));
+  const from = Math.min(now, ...starts) - 15;
+  const to = Math.max(now, ...ends) + 15;
+  const span = Math.max(1, to - from);
+  const at = (day: number) => ((day - from) / span) * 100;
+
+  const ticks: { day: number; label: string; strong: boolean }[] = [];
+  const first = new Date(dayToIso(from) + "T00:00:00");
+  first.setDate(1);
+  first.setMonth(first.getMonth() + 1);
+  const months = Math.ceil(span / MONTH_MS_DAYS) + 1;
+  const step = months > 18 ? 3 : months > 9 ? 2 : 1;
+  for (let i = 0; i < months; i += step) {
+    const d = new Date(first);
+    d.setMonth(first.getMonth() + i);
+    const day = isoToDay(
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`,
+    );
+    if (day > to) break;
+    ticks.push({
+      day,
+      label: d.getMonth() === 0 ? String(d.getFullYear()) : `${d.getMonth() + 1}月`,
+      strong: d.getMonth() === 0,
+    });
+  }
+
+  const rowH = 26;
+
+  return (
+    <section className="mt-8" aria-label="项目总览">
+      <div className="relative" style={{ height: 26 + dated.length * rowH }}>
+        {ticks.map((t) => (
+          <div key={t.day} className="absolute top-0 bottom-0" style={{ left: `${at(t.day)}%` }}>
+            <div className={`h-full w-px ${t.strong ? "bg-[var(--rule-strong)]" : "bg-[var(--rule)]"}`} />
+            <div
+              className={`absolute top-0 left-1.5 text-[10px] whitespace-nowrap ${t.strong ? "font-semibold text-[var(--text)]" : "text-[var(--text-dim)]"}`}
+            >
+              {t.label}
+            </div>
+          </div>
+        ))}
+
+        {dated.map((p, i) => {
+          const s = isoToDay(p.startDate!);
+          const e = isoToDay(p.endDate!) + 1;
+          const done = p.progress >= 1;
+          return (
+            <div
+              key={p.project.id}
+              className="group absolute inset-x-0 flex h-5 items-center"
+              style={{ top: 26 + i * rowH }}
+            >
+              <button
+                onClick={() => void onOpen(p.project.id)}
+                title={`${p.project.name}　${p.startDate} → ${p.endDate}　${Math.round(p.progress * 100)}%`}
+                className="absolute inset-y-1.5 rounded-[2px]"
+                style={{
+                  left: `${at(s)}%`,
+                  width: `${Math.max(0.4, at(e) - at(s))}%`,
+                  background: p.project.color,
+                  opacity: done ? 0.4 : 0.16,
+                }}
+              />
+              <button
+                onClick={() => void onOpen(p.project.id)}
+                title={`${p.project.name}　${Math.round(p.progress * 100)}%`}
+                className="absolute inset-y-1.5 rounded-[2px]"
+                style={{
+                  left: `${at(s)}%`,
+                  width: `${(Math.max(0.4, at(e) - at(s)) * p.progress).toFixed(2)}%`,
+                  background: p.project.color,
+                }}
+              />
+              <button
+                onClick={() => void onOpen(p.project.id)}
+                className="absolute z-10 truncate text-left text-[11px] font-medium text-[var(--text-dim)] transition-colors group-hover:text-[var(--text)]"
+                style={{ left: `calc(${at(e)}% + 8px)`, maxWidth: "34%" }}
+              >
+                {p.project.name}
+              </button>
+            </div>
+          );
+        })}
+
+        <div
+          className="pointer-events-none absolute top-4 bottom-0 w-px"
+          style={{ left: `${at(now)}%`, background: "var(--today)" }}
+        >
+          <div className="absolute -top-[3px] -left-[3px] size-[7px] rotate-45 bg-[var(--today)]" />
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -742,7 +879,7 @@ function NewProjectInput({
         onBlur={submit}
       />
       {duplicate && (
-        <div className="mt-1.5 text-[11px] font-medium text-amber-600 dark:text-amber-400">
+        <div className="mt-1.5 text-[11px] font-medium text-[var(--warn)]">
           已有同名项目 —— 项目名要唯一
         </div>
       )}

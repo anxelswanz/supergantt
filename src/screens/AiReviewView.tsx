@@ -219,7 +219,7 @@ function BackgroundForm({ projectId, projectName }: { projectId: number; project
             <button
               key={k}
               onClick={() => set({ kind: k })}
-              className={`rounded-full px-3 py-1 text-xs transition-colors ${
+              className={`rounded-[var(--r-m)] px-3 py-1 text-xs transition-colors ${
                 bg.kind === k
                   ? "bg-[var(--surface)] font-medium text-[var(--text)] shadow-sm"
                   : "text-[var(--text-dim)] hover:text-[var(--text)]"
@@ -376,7 +376,7 @@ function PaneHeader({ review }: { review: Review }) {
           <span className="text-[10px] text-[var(--text-dim)]">问答和文档都会删掉</span>
           <button
             onClick={() => void remove(review.id)}
-            className="rounded-lg bg-rose-500 px-2.5 py-1 text-[11px] font-medium text-white"
+            className="rounded-lg bg-[var(--danger)] px-2.5 py-1 text-[11px] font-medium text-white"
           >
             确认删除
           </button>
@@ -501,7 +501,7 @@ function QuestionPane({ review }: { review: Review }) {
         <span className="text-xs font-medium tabular-nums text-[var(--text)]">
           {number} / {total}
         </span>
-        <div className="h-1 flex-1 overflow-hidden rounded-full bg-[var(--surface-alt)]">
+        <div className="h-1 flex-1 overflow-hidden rounded-[var(--r-m)] bg-[var(--surface-alt)]">
           <div
             className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-300"
             style={{ width: `${(number / total) * 100}%` }}
@@ -665,7 +665,7 @@ function DocumentPane({ review, projectName }: { review: Review; projectName: st
             placeholder="可选：对这一版有什么要求？例：失败归因写短一点；SOP 部分再具体些。"
             className={FIELD}
           />
-          <div className="text-[10px] leading-relaxed text-rose-500">
+          <div className="text-[10px] leading-relaxed text-[var(--danger)]">
             会覆盖现在这份文档，包括你手动改过的地方。要留底请先下载。
           </div>
           <div className="flex justify-end gap-2">
@@ -712,7 +712,7 @@ function Field({ label, required, children }: { label: string; required?: boolea
     <div>
       <div className="mb-1.5 text-xs font-medium text-[var(--text)]">
         {label}
-        {required && <span className="ml-1 text-rose-500">*</span>}
+        {required && <span className="ml-1 text-[var(--danger)]">*</span>}
       </div>
       {children}
     </div>
@@ -724,7 +724,7 @@ const Hint = ({ children }: { children: React.ReactNode }) => (
 );
 
 function Notice({ tone, children }: { tone: "info" | "warn" | "error"; children: React.ReactNode }) {
-  const color = tone === "error" ? "#f43f5e" : tone === "warn" ? "#f59e0b" : "var(--text-dim)";
+  const color = tone === "error" ? "var(--danger)" : tone === "warn" ? "#f59e0b" : "var(--text-dim)";
   return (
     <div
       className="rounded-lg border px-3 py-2 text-xs leading-relaxed select-text"

@@ -1,44 +1,25 @@
 /**
- * manifest.json 的校验。
- *
- * 纯函数，不碰 IO —— 这样每一条规则都能在 vitest 里直接测，不用起 Tauri。
- * 拆出来的另一个理由：错误信息是给插件作者看的，必须说清楚「哪个字段、
- * 什么问题、应该是什么」。一个「manifest 无效」的笼统报错会让人在
- * 一个 20 行的 JSON 里逐字对比半小时。
+ * manifest.json 的校验。纯函数、不碰 IO，可直接单测；
+ * 错误信息要指明哪个字段、应该是什么 —— 它唯一的读者是插件作者。
  */
 
 import type { PluginManifest, PluginViewDeclaration, Version } from "./types";
 import { APP_VIEWS } from "../core/views";
 
 /**
- * 宿主当前提供的 API 版本。
- *
- * 规则（与项目文件格式一致，DESIGN.md 变更 5）：
- *   - 删字段、改语义 → major + 1，旧插件拒绝加载
- *   - 只加新方法 → minor + 1，旧插件照常跑
+ * 宿主当前提供的 API 版本。删字段/改语义 → major+1（旧插件拒绝加载）；
+ * 只加新方法 → minor+1（旧插件照常跑）。
  */
 export const HOST_API_VERSION: Version = { major: 1, minor: 2 };
-/* 1.1：data.items（事项清单，只读）
-   1.2：itemActions / itemBadges（事项页扩展点）、proc（受限子进程）、
-        storage（插件私有文件）、data.project / data.people、
-        ItemView.closedDay / noteId、manifest 的 permissions 与 skills */
+/* 1.1：data.items；1.2：itemActions/itemBadges、proc、storage、data.project/people、
+   ItemView.closedDay/noteId、permissions、skills */
 
-/**
- * 内置视图的 key。插件视图不能用这些，否则会把甘特图顶掉。
- *
- * 直接从 core/views.ts 读，不再抄一份 ——
- * 抄一份的后果是加了第五个内置视图之后，插件仍然能注册 "items" 把它顶掉，
- * 而那种冲突只在「装了那个插件」的机器上复现。
- */
+/** 内置视图的 key，插件视图不能用。从 core/views.ts 读而不另抄一份 ——
+ *  抄的那份会在新增内置视图后漏掉，冲突只在装了那个插件的机器上复现。 */
 const RESERVED_VIEW_TYPES = new Set<string>(APP_VIEWS.map((v) => v.key));
 
-/**
- * 插件 id 的形状：小写字母、数字、连字符，字母开头。
- *
- * 这么严是因为 id 会出现在三个地方：目录名、settings 表的 key 前缀、
- * 视图 type 的前缀。任何一处出现空格、斜杠或点都会各自出一种 bug ——
- * 在入口处拦住比在三处分别转义省事得多。
- */
+/** 插件 id 的形状。id 同时用作目录名、settings key 前缀、视图 type 前缀，
+ *  任一处出现空格/斜杠/点都各出一种 bug，所以在入口一次拦住。 */
 const ID_PATTERN = /^[a-z][a-z0-9-]{1,63}$/;
 
 export type ValidationResult =
@@ -52,10 +33,7 @@ export function parseVersion(raw: string): Version | null {
   return { major: Number(m[1]), minor: Number(m[2]) };
 }
 
-/**
- * 比较两个 "1.2.3" 形式的版本号。看不懂的段按 0 算 ——
- * 只用来决定设置页上写「更新」还是「已安装」，不值得为它较真。
- */
+/** 版本比较，看不懂的段按 0 算 —— 只用于设置页显示「更新」还是「已安装」 */
 export function compareVersions(a: string, b: string): number {
   const pa = a.split(".").map((x) => parseInt(x, 10) || 0);
   const pb = b.split(".").map((x) => parseInt(x, 10) || 0);
@@ -69,11 +47,7 @@ export function compareVersions(a: string, b: string): number {
 const str = (v: unknown): v is string => typeof v === "string" && v.trim().length > 0;
 
 /**
- * 校验 manifest。
- *
- * @param raw     manifest.json 的原文；null 表示文件不存在
- * @param dirName 所在目录名，id 必须和它一致
- * @param host    宿主 API 版本，测试时可以注入
+ * 校验 manifest。dirName 必须与 id 一致；host 可注入以便测试。
  */
 export function validateManifest(
   raw: string | null,
@@ -88,7 +62,6 @@ export function validateManifest(
   try {
     json = JSON.parse(raw);
   } catch (e) {
-    // 把 JSON.parse 的原始报错带出来 —— 它通常会说是第几个字符出的问题
     return { ok: false, error: `manifest.json 不是合法的 JSON：${(e as Error).message}` };
   }
   if (typeof json !== "object" || json === null || Array.isArray(json)) {
@@ -135,9 +108,7 @@ export function validateManifest(
     };
   }
   if (need.minor > host.minor) {
-    // 插件用了比宿主新的 minor —— 它可能调用宿主还没有的方法。
-    // 不拒绝：大部分插件只用到老方法，拒绝的话宿主一落后就全挂。
-    // 但必须说出来，否则某个按钮点了没反应时没人会想到是版本问题
+    // 不拒绝（宿主一落后就全挂），但要警告：新接口可能不可用
     warnings.push(
       `插件按宿主 API ${need.major}.${need.minor} 写的，当前是 ${host.major}.${host.minor}，新接口可能不可用`,
     );
@@ -147,7 +118,7 @@ export function validateManifest(
 
   if (m.main !== undefined) {
     if (!str(m.main)) return { ok: false, error: `"main" 必须是非空字符串` };
-    // 只允许插件目录下的一层文件名。允许 "../" 等于允许读任意文件
+    // 只允许一层文件名，"../" 等于允许读任意文件
     if (/[\\/]|\.\./.test(m.main as string)) {
       return { ok: false, error: `"main" 只能是插件目录里的文件名，不能带路径：${m.main}` };
     }
@@ -171,7 +142,7 @@ export function validateManifest(
       if (seen.has(type)) return { ok: false, error: `${at}.type "${type}" 重复了` };
       seen.add(type);
       if (!type.startsWith(`${id}.`)) {
-        // 不强制，但强烈建议 —— 两个插件都注册 "notes" 视图时只有前缀能救
+        // 不强制；两个插件撞名时只有前缀能救
         warnings.push(`视图 "${type}" 没有用 "${id}." 作前缀，可能和别的插件撞名`);
       }
       views.push({ type, label: vv.label as string, hint: vv.hint as string });

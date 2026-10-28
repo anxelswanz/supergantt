@@ -17,7 +17,7 @@ import { isInProgress } from "./board";
 import type { Risk } from "../db/api";
 
 export const RISK_LEVELS = ["高", "中", "低"];
-export const RISK_COLORS = ["#ef4444", "#f59e0b", "#64748b"];
+export const RISK_COLORS = ["#a83e3e", "#b0752a", "#6a7a7d"];
 
 export const riskLevelLabel = (level: number): string => RISK_LEVELS[level] ?? "中";
 

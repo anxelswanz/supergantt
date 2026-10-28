@@ -104,7 +104,7 @@ export function BlockerPanel({
             onClick={onCompose}
             disabled={!canAdd}
             title={canAdd ? "记一条阻碍：此刻卡着的，或者补记一段已经过去的" : "还没有开工的任务"}
-            className="shrink-0 rounded-full border border-[var(--rule)] px-2.5 py-1 text-[10px] font-medium text-[var(--text-dim)] transition-colors hover:border-[#f43f5e] hover:text-[#f43f5e] disabled:pointer-events-none disabled:opacity-40"
+            className="shrink-0 rounded-[var(--r-m)] border border-[var(--rule)] px-2.5 py-1 text-[10px] font-medium text-[var(--text-dim)] transition-colors hover:border-[var(--danger)] hover:text-[var(--danger)] disabled:pointer-events-none disabled:opacity-40"
           >
             ＋ 新建
           </button>
@@ -122,7 +122,7 @@ export function BlockerPanel({
             <button
               key={f.key}
               onClick={() => setFilter(f.key)}
-              className="rounded-full border px-2.5 py-0.5 text-[10px] font-medium transition-colors"
+              className="rounded-[var(--r-m)] border px-2.5 py-0.5 text-[10px] font-medium transition-colors"
               style={
                 filter === f.key
                   ? { borderColor: "var(--accent)", color: "var(--accent)" }
@@ -141,8 +141,8 @@ export function BlockerPanel({
             {byReason.map(([reason, days]) => (
               <span
                 key={reason}
-                className="rounded px-1.5 py-0.5 text-[9px] font-medium text-amber-600"
-                style={{ background: "rgba(245,158,11,0.14)" }}
+                className="rounded px-1.5 py-0.5 text-[9px] font-medium text-[var(--warn)]"
+                style={{ background: "color-mix(in srgb, var(--warn) 14%, transparent)" }}
               >
                 {reasonLabel(reason)} {days} 天
               </span>
@@ -205,12 +205,12 @@ function Row({
       className={`group cursor-pointer rounded-md px-2 py-1.5 transition-colors hover:bg-[var(--row-hover)] ${
         live ? "" : "opacity-70"
       }`}
-      style={live ? { background: "rgba(244,63,94,0.06)" } : undefined}
+      style={live ? { background: "color-mix(in srgb, var(--danger) 6%, transparent)" } : undefined}
     >
       <div className="flex items-baseline gap-1.5">
         <span
-          className="shrink-0 rounded px-1 text-[9px] font-semibold leading-none text-amber-600"
-          style={{ background: "rgba(245,158,11,0.16)" }}
+          className="shrink-0 rounded px-1 text-[9px] font-semibold leading-none text-[var(--warn)]"
+          style={{ background: "color-mix(in srgb, var(--warn) 16%, transparent)" }}
         >
           {reasonLabel(period.reason)}
         </span>
@@ -227,7 +227,7 @@ function Row({
         </button>
         <span
           className="ml-auto shrink-0 font-mono text-[10px] tabular-nums"
-          style={{ color: live ? "#f43f5e" : "var(--text-dim)" }}
+          style={{ color: live ? "var(--danger)" : "var(--text-dim)" }}
         >
           {days} 天
         </span>
@@ -238,7 +238,7 @@ function Row({
       </div>
 
       {period.resolution && (
-        <div className="mt-0.5 text-[10px] leading-snug text-emerald-600">
+        <div className="mt-0.5 text-[10px] leading-snug text-[var(--ok)]">
           结论：{period.resolution}
         </div>
       )}
@@ -250,7 +250,7 @@ function Row({
         {live && (
           <span
             className="rounded px-1 text-[9px] font-semibold leading-none text-white"
-            style={{ background: "#f43f5e" }}
+            style={{ background: "var(--danger)" }}
           >
             持续中
           </span>
@@ -269,7 +269,7 @@ function Row({
               onClose();
             }}
             title="这条阻碍已解决"
-            className="ml-auto shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium text-[var(--text-dim)] opacity-0 transition-opacity hover:text-emerald-600 group-hover:opacity-100"
+            className="ml-auto shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium text-[var(--text-dim)] opacity-0 transition-opacity hover:text-[var(--ok)] group-hover:opacity-100"
           >
             ✓ 关闭
           </button>

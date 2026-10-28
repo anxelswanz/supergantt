@@ -1,7 +1,6 @@
 /**
- * 极小的 spring 积分器，用于 Canvas 内部的动画（DOM 层用 Motion，不共用）。
- *
- * 用固定子步长积分而不是直接用 rAF 的 dt，否则掉帧时 dt 变大会让弹簧发散抖动。
+ * Canvas 内部动画用的 spring 积分器。
+ * 用固定子步长积分：直接用 rAF 的 dt，掉帧时 dt 变大会让弹簧发散抖动。
  */
 
 export interface SpringConfig {
@@ -9,7 +8,6 @@ export interface SpringConfig {
   damping: number;
 }
 
-/** 全局三档参数，与 DESIGN.md §9 的动效规范一致。 */
 export const SPRING = {
   /** 按钮、悬停、吸附反馈 */
   snappy: { stiffness: 400, damping: 30 },
@@ -17,7 +15,7 @@ export const SPRING = {
   smooth: { stiffness: 200, damping: 26 },
   /** 项目卡片展开成工作区 */
   dramatic: { stiffness: 120, damping: 20 },
-  /** 滚轮缩放专用：刚度极高，跟手但松手后留一点余韵（即「阻尼」） */
+  /** 滚轮缩放专用：刚度极高，跟手但松手后留一点余韵 */
   wheel: { stiffness: 900, damping: 42 },
 } satisfies Record<string, SpringConfig>;
 
@@ -35,7 +33,7 @@ export class Spring {
     this.config = config;
   }
 
-  /** 推进一帧。返回 true 表示仍在运动中（调用方据此决定要不要继续申请下一帧）。 */
+  /** 推进一帧，返回是否仍在运动。 */
   step(dt: number): boolean {
     if (this.settled()) {
       this.value = this.target;
@@ -62,7 +60,6 @@ export class Spring {
     );
   }
 
-  /** 无动画直接落到目标值。 */
   snap(to: number) {
     this.value = this.target = to;
     this.velocity = 0;

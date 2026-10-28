@@ -1,11 +1,4 @@
-/**
- * 数据库行 ↔ 内存模型的转换。
- *
- * 唯一实质性的工作是日期表示的切换：
- *   数据库存 ISO 'YYYY-MM-DD'（自描述、可被 Excel 和 DB 浏览器直接读）
- *   内存用天序号   number      （可做浮点插值和像素换算）
- * 两种表示各有不可替代的理由，转换只发生在这一层。
- */
+/** 数据库行 ↔ 内存模型：库存 ISO 'YYYY-MM-DD'，内存用天序号，转换只在这一层。 */
 
 import type { Priority, Task } from "../gantt/model";
 import { dayToIso, isoToDay } from "../gantt/time";
@@ -42,7 +35,7 @@ export function taskToRow(task: Task, previous?: TaskRow): TaskRow {
     name: task.name,
     startDate: dayToIso(task.startDay),
     endDate: dayToIso(task.endDay),
-    // 两端必须同空同有 —— 库层有触发器兜底，这里保证不会送出半填状态
+    // 两端必须同空同有（库层触发器兜底）
     actualStart:
       task.actualStartDay != null && task.actualEndDay != null
         ? dayToIso(task.actualStartDay)

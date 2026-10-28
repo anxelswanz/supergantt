@@ -184,7 +184,7 @@ export function QuickNote() {
               先记下来，什么时候想清楚它是什么再分拣
             </span>
             {saved > 0 && (
-              <span className="ml-auto text-[10px] font-medium text-emerald-600">
+              <span className="ml-auto text-[10px] font-medium text-[var(--ok)]">
                 已记 {saved} 条
               </span>
             )}

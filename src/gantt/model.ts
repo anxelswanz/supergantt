@@ -1,9 +1,4 @@
-/**
- * 任务模型与汇总规则（DESIGN.md §1）。
- *
- * 这里的函数全部是纯函数，不碰 UI 也不碰数据库 —— 它们是整个应用最容易出错
- * 也最值得先钉死的部分。
- */
+/** 任务模型与汇总规则。全部是纯函数，不碰 UI 也不碰数据库。 */
 
 import type { BlockedPeriod } from "../core/blocked";
 
@@ -16,10 +11,7 @@ export interface Task {
   /** 叶子任务的计划起止（含首尾两天）。父任务的这两个字段由子任务汇总覆盖 */
   startDay: number;
   endDay: number;
-  /**
-   * 实施起止。null = 还没动过 —— 界面据此显示计划的虚线轮廓。
-   * 两端同为 null 或同有值，库层有触发器保证。
-   */
+  /** 实施起止，null = 还没动过（显示计划虚线）。两端同为 null 或同有值，库层触发器保证 */
   actualStartDay: number | null;
   actualEndDay: number | null;
   /** 0–1。父任务的进度由子任务加权汇总，不可手填 */
@@ -28,33 +20,18 @@ export interface Task {
   /** 指向 people 表；null 表示未指派 */
   personId: number | null;
   milestone: boolean;
-  /** 手动权重覆盖；null 表示按工期加权（DESIGN.md §1.2） */
+  /** 手动权重覆盖；null 表示按工期加权 */
   weight: number | null;
   collapsed: boolean;
-  /** 锁定后不参与自动重排（DESIGN.md §2.3），v2 才会真正用到 */
+  /** 锁定后不参与自动重排，v2 才会真正用到 */
   pinned: boolean;
-  /**
-   * 同一父节点下的兄弟排序。
-   *
-   * 用 REAL 而不是整数序号：在两行之间插入新行时取中点即可，
-   * 不必把后面所有行重新编号（那会让一次「插入」变成 N 行的变更，
-   * 撤销栈里就成了一条巨大的命令）。
-   */
+  /** 兄弟排序。用 REAL：插入时取中点，不必给后面所有行重新编号 */
   sortOrder: number;
-  /**
-   * 受阻时段：区间内「这几天没能正常推进」的记录（core/blocked.ts）。
-   * 纯记录，不影响日期、工期、进度中的任何一个。
-   */
+  /** 受阻时段（core/blocked.ts）。纯记录，不影响日期、工期、进度 */
   blocked: BlockedPeriod[];
   /**
-   * 实施逾期时，跨天自动把计划结束日顺延到今天（core/rollover.ts）。
-   *
-   * 是**每条任务自己**的开关，不是全局偏好：一条活逾期了要不要自动往后推，
-   * 是这条活自己的排期决定 —— 关键路径上的活该把逾期暴露出来，辅助性的活
-   * 跟着实际走就行，两者完全可能同时存在于一个项目里。
-   *
-   * 只对叶子任务有意义：父任务的日期由子任务汇总（resolve），推了也会被覆盖。
-   * 默认 false —— 新增字段的默认值不该改写既有项目的排期。
+   * 实施逾期时跨天自动把计划结束日顺延到今天（core/rollover.ts）。
+   * 每条任务自己的开关；只对叶子有意义，父任务日期会被汇总覆盖。
    */
   autoRollover: boolean;
 }
@@ -67,7 +44,6 @@ export interface ResolvedTask extends Task {
   visible: boolean;
 }
 
-/** 汇总结果：计划区间、实施区间、进度 */
 interface Rollup {
   startDay: number;
   endDay: number;
@@ -80,14 +56,8 @@ export const durationOf = (t: { startDay: number; endDay: number }) =>
   Math.max(1, t.endDay - t.startDay + 1);
 
 /**
- * 自底向上汇总，并展平成渲染顺序。
- *
- * 父任务的两件事都是算出来的、不可手填：
- *   - 日期 = 最早子任务开始 ~ 最晚子任务结束
- *   - 进度 = Σ(子进度 × 子权重) / Σ子权重，权重默认取工期
- *
- * 进度只读这条不是洁癖：一旦允许手填，就会出现「父 80% / 子全 0%」的自相矛盾，
- * 用户从此不再相信界面上的任何数字。
+ * 自底向上汇总并展平成渲染顺序。父任务日期 = 子任务最早开始 ~ 最晚结束；
+ * 进度 = Σ(子进度 × 子权重) / Σ子权重，权重默认取工期。两者都不可手填。
  */
 export function resolve(tasks: Task[]): ResolvedTask[] {
   const childrenOf = new Map<number | null, Task[]>();
@@ -96,20 +66,12 @@ export function resolve(tasks: Task[]): ResolvedTask[] {
     if (list) list.push(t);
     else childrenOf.set(t.parentId, [t]);
   }
-  // 兄弟顺序由 sortOrder 决定，不是由数据到达的顺序决定。
-  // 否则「在选中行之后插入」就无法表达 —— 新任务只能落到末尾。
   for (const list of childrenOf.values()) {
     list.sort((a, b) => a.sortOrder - b.sortOrder || a.id - b.id);
   }
 
   const resolved = new Map<number, Rollup>();
-  /**
-   * 正在计算中的节点。
-   *
-   * 父子关系成环（a 的父是 b、b 的父是 a）时，后序遍历会无限递归直到爆栈 ——
-   * 整个界面白屏。环不该出现，但脏数据是会出现的（历史上就出过一次跨项目改写），
-   * 所以这里必须自保：遇到环就当叶子处理，让剩下的数据照样能显示出来。
-   */
+  /** 正在计算中的节点。脏数据里父子成环时当叶子处理，否则递归爆栈白屏 */
   const visiting = new Set<number>();
 
   // 后序遍历：先算完所有子节点，再算自己
@@ -141,8 +103,7 @@ export function resolve(tasks: Task[]): ResolvedTask[] {
     } else {
       let start = Infinity;
       let end = -Infinity;
-      // 实施区间只汇总**已经填过**的子任务。一个子任务都没动过时，
-      // 父任务的实施区间也是 null —— 它同样显示为「还没开始」的虚线
+      // 实施区间只汇总已填过的子任务；一个都没动过时父任务也是 null
       let actualStart = Infinity;
       let actualEnd = -Infinity;
       let weighted = 0;
@@ -156,7 +117,6 @@ export function resolve(tasks: Task[]): ResolvedTask[] {
           actualStart = Math.min(actualStart, c.actualStartDay);
           actualEnd = Math.max(actualEnd, c.actualEndDay);
         }
-        // 权重优先取手动覆盖，否则用汇总后的工期
         const w = child.weight ?? durationOf(c);
         weighted += c.progress * w;
         totalWeight += w;
@@ -184,7 +144,7 @@ export function resolve(tasks: Task[]): ResolvedTask[] {
     const children = childrenOf.get(parentId);
     if (!children) return;
     for (const task of children) {
-      // 同一条任务只展平一次。环形引用下 walk 也会绕不出来
+      // 同一条任务只展平一次，否则成环时 walk 也绕不出来
       if (seen.has(task.id)) continue;
       seen.add(task.id);
       const agg = compute(task);
@@ -201,7 +161,6 @@ export function resolve(tasks: Task[]): ResolvedTask[] {
   };
 
   walk(null, 0, false);
-  // 折叠的分支已经被标记为不可见，这里直接过滤掉，渲染层不必再关心层级
   return flat.filter((t) => t.visible);
 }
 

@@ -1,17 +1,11 @@
 /**
- * 视口：整个甘特图的相机。
+ * 视口：整个甘特图的相机。时间轴状态只有一个变量 pxPerDay，
+ * 「日/周/月/年」按钮和 Cmd+滚轮都只是往它推目标值。
  *
- * 全部时间轴状态压缩成一个变量 —— pxPerDay（每天占多少像素）。
- * 「日/周/月/年」按钮和 Cmd+滚轮不是两套逻辑，只是往同一个变量推不同的目标值
- * （DESIGN.md §6.3）。
- *
- * 水平位置不直接存 originDay，而是存一对锚点 (anchorDay, anchorX)：
- *
+ * 水平位置存锚点对 (anchorDay, anchorX) 而非 originDay：
  *     originDay = anchorDay − anchorX / pxPerDay
- *
- * 这样在 pxPerDay 做 spring 动画的整个过程中，anchorDay 这一天会牢牢钉在
- * 屏幕 anchorX 这个位置上。缩放锚点是鼠标位置这件事因此是「免费」的，
- * 而不是每帧去补偿修正 —— 后者在动画中必然产生漂移。
+ * 这样缩放动画过程中 anchorDay 始终钉在屏幕 anchorX 处，锚定鼠标位置是免费的，
+ * 不必每帧补偿（补偿必然漂移）。
  */
 
 import { Spring, SPRING } from "./spring";
@@ -20,7 +14,7 @@ import { today } from "./time";
 export const MIN_PX_PER_DAY = 0.15; // 一年约 55px
 export const MAX_PX_PER_DAY = 80; // 一天 80px
 
-/** 「日/周/月/年」四个预设档位对应的 pxPerDay。 */
+/** 「日/周/月/年」预设档位 */
 export const ZOOM_PRESETS = {
   day: 36,
   week: 12,
@@ -44,9 +38,7 @@ export class Viewport {
   scrollY = 0;
 
   /**
-   * 行高。放在视口里而不是当模块常量，是因为它是**视图参数**：
-   * 渲染、命中检测、左侧网格必须用同一个值，而它现在可以被用户改。
-   * 三处各自 import 一个常量的话，改起来必然漏掉一处。
+   * 行高。是视图参数而非模块常量：渲染、命中检测、左侧网格必须共用同一个值。
    */
   rowHeight = 32;
 
@@ -76,8 +68,8 @@ export class Viewport {
   }
 
   /**
-   * 滚轮缩放。x 是鼠标在画布内的横坐标 —— 缩放锚点必须是鼠标位置，
-   * 不是视口中心也不是左边缘（DESIGN.md §6.4）。
+   * 滚轮缩放。x 是鼠标在画布内的横坐标：缩放锚点必须是鼠标位置，
+   * 不是视口中心。
    */
   zoomAt(x: number, factor: number) {
     this.reanchor(x);
@@ -85,20 +77,20 @@ export class Viewport {
     this.zoom.target = clampZoom(this.zoom.target * factor);
   }
 
-  /** 预设按钮：用较柔和的 spring 平滑推到目标档位，锚点取视口中心。 */
+  /** 预设按钮：用较柔和的 spring 推到目标档位，锚点取视口中心。 */
   zoomToPreset(preset: ZoomPreset) {
     this.reanchor(this.width / 2);
     this.zoom.config = SPRING.smooth;
     this.zoom.target = ZOOM_PRESETS[preset];
   }
 
-  /** 把锚点重设到画布上的某个 x，且不改变当前画面（originDay 保持不变）。 */
+  /** 把锚点移到画布上的某个 x，且不改变当前画面。 */
   private reanchor(x: number) {
     this.anchorDay = this.dayAt(x);
     this.anchorX = x;
   }
 
-  /** 水平平移：dx > 0 表示画面内容向左移（即时间轴往后看）。 */
+  /** 水平平移：dx > 0 表示画面内容左移（时间轴往后看）。 */
   panBy(dx: number) {
     this.anchorX -= dx;
   }

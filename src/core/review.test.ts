@@ -65,9 +65,7 @@ describe("逐条偏差", () => {
     expect(d.endDelta).toBe(0);
   });
 
-  /**
-   * 父任务的日期是子任务汇总出来的，把它也算进偏差表等于把同一份延期数两遍。
-   */
+  /** 父任务是汇总值，算进偏差表等于延期数两遍 */
   it("父任务不进偏差表", () => {
     const out = deviations(resolve([task(1), task(2, { parentId: 1 })]));
     expect(out).toHaveLength(1);

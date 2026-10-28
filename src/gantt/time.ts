@@ -1,16 +1,11 @@
 /**
- * 时间坐标系。
- *
- * 甘特图内部一律用「天序号」(dayIndex) 表示时间，而不是 Date 对象：
- *   - 整数部分 = 从纪元起的第几天
- *   - 小数部分 = 当天内的位置（缩放/平移时是连续量，必须允许浮点）
- *
- * 全部走 UTC，避免夏令时导致「某天只有 23 小时」而让像素换算出现半天偏移。
+ * 时间坐标：一律用「天序号」(dayIndex) 而非 Date。整数部分是从纪元起的天数，
+ * 小数部分是当天内的位置。全部走 UTC，避免夏令时让像素换算偏移半天。
  */
 
 export const MS_PER_DAY = 86_400_000;
 
-/** 纪元：2000-01-01 (UTC)。取足够早的日期，让所有实际项目的 dayIndex 为正。 */
+/** 纪元 2000-01-01 (UTC)，取得够早，让实际项目的 dayIndex 为正。 */
 const EPOCH_MS = Date.UTC(2000, 0, 1);
 
 export function dateToDay(date: Date): number {
@@ -48,14 +43,14 @@ export function isWeekend(day: number): boolean {
   return wd === 0 || wd === 6;
 }
 
-/** 落在非工作日时，吸附到之后最近的工作日（DESIGN.md §1.5）。 */
+/** 落在非工作日时，吸附到之后最近的工作日。 */
 export function snapToWorkday(day: number): number {
   let d = Math.floor(day);
   while (isWeekend(d)) d += 1;
   return d;
 }
 
-/** 自然日工期换算出的工作日数，用于详情面板的「自然日 7 天 / 工作日 5 天」。 */
+/** 自然日区间换算成工作日数，用于详情面板的「自然日 7 天 / 工作日 5 天」。 */
 export function workdaysBetween(startDay: number, endDay: number): number {
   let count = 0;
   for (let d = Math.floor(startDay); d <= Math.floor(endDay); d++) {

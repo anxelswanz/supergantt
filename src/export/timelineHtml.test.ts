@@ -1,11 +1,4 @@
-/**
- * 时间线导出件的结构测试。
- *
- * 断言的同样是**收件人打开文件后能看到什么**：那天在不在、正文有没有被
- * HTML 吃掉、顺序是不是最近在前、有没有偷偷引一个打不开的外部资源。
- * 这几条错一条，导出件就是错的，而错法都很安静 —— 尤其是转义：
- * 一句「压力 < 0.3MPa」能让它后面的所有内容从页面上消失。
- */
+/** 时间线导出件的结构测试：断言收件人打开后看到的内容（转义、顺序、无外部资源）。 */
 
 import { describe, expect, it } from "vitest";
 import { buildTimelineHtml, timelineFileName, type TimelineHtmlInput } from "./timelineHtml";
@@ -84,7 +77,7 @@ describe("buildTimelineHtml", () => {
     expect(html).toContain("维修完成，恢复生产");
     expect(html).toContain("08-05");
     expect(html).toContain("08-07");
-    // 最近的一天在前 —— 时间线是用来回顾的
+    // 最近的一天在前
     expect(html.indexOf("维修完成")).toBeLessThan(html.indexOf("三号机主轴异响"));
   });
 
@@ -188,7 +181,7 @@ describe("buildTimelineHtml", () => {
   it("空项目也给得出一份说得清的文件", () => {
     const html = buildTimelineHtml(input({ tasks: [], notes: [], risks: [] }));
     expect(html).toContain("还没有任何记录");
-    // 一个筛选按钮都不该出现：点了什么也不会发生的按钮比没有更让人困惑
+    // 一个筛选按钮都不该出现
     expect(html).not.toContain('data-kind="note"');
     expect(html).toContain("</html>");
   });

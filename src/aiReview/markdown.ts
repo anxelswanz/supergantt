@@ -1,15 +1,8 @@
 /**
- * Markdown → 一棵很小的块树。
+ * Markdown → 一棵很小的块树。屏幕（MarkdownView.tsx）和 Word（export/aiReview.ts）
+ * 读同一棵树，各自解析迟早会出现「屏幕上是表格、Word 里是一行竖线」。
  *
- * 复盘文档有两个去处：屏幕（aiReview/MarkdownView.tsx）和 Word（export/aiReview.ts）。
- * 两边**读同一棵树** —— 各自解析一遍 Markdown 的话，迟早出现「屏幕上是表格、
- * Word 里是一行竖线」。这和 core/review.ts 对数字的要求是同一条：看到的和
- * 发出去的必须是同一个东西。
- *
- * 语法分析交给 marked（只用它的词法器，不用它出 HTML —— 界面上不出现
- * dangerouslySetInnerHTML）。这里做的只是把它几十种 token 收成七种块：
- * 模型写的、用户手改的 Markdown 什么都可能出现，认不得的一律按纯文本留下，
- * 不丢内容。
+ * 只用 marked 的词法器、不出 HTML。认不得的 token 一律按纯文本留下，不丢内容。
  */
 
 import { marked, type Token, type Tokens } from "marked";
@@ -77,7 +70,7 @@ function inlines(tokens: Token[] | undefined, style: Style = {}): Inline[] {
         out.push({ text: "", br: true });
         break;
       case "checkbox":
-        // 任务列表的勾选框。勾没勾记在列表项上（ListItem.checked），这里不重复出
+        // 勾没勾记在 ListItem.checked 上，这里不重复出
         break;
       case "image":
         // 文档里放不了图，留下替代文字
@@ -102,8 +95,8 @@ function blocks(tokens: Token[]): Block[] {
   for (const t of tokens) {
     switch (t.type) {
       case "space":
-      // 紧凑写法的任务列表里，勾选框是列表项下的一个块级 token（松散写法时它在
-      // 段落的行内 token 里）。两处都不出：勾没勾记在 ListItem.checked 上
+      // 紧凑写法的任务列表里勾选框是列表项下的块级 token（松散写法时在段落行内），
+      // 两处都不出，勾没勾记在 ListItem.checked 上
       case "checkbox":
         break;
       case "heading": {
@@ -147,7 +140,7 @@ function blocks(tokens: Token[]): Block[] {
         out.push({ type: "rule" });
         break;
       default: {
-        // html、def 之类：当成一段原样的文字。宁可难看，不丢内容
+        // html、def 之类：当成原样文字。宁可难看，不丢内容
         const raw = (t.raw ?? "").trim();
         if (raw) out.push({ type: "paragraph", inlines: [{ text: raw }] });
       }

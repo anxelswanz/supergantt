@@ -125,7 +125,7 @@ export function BlockedDetail({
               className="rounded-lg border px-2 py-1.5 text-[11px] transition-colors"
               style={
                 reason === r.key
-                  ? { borderColor: "#f43f5e", color: "#f43f5e" }
+                  ? { borderColor: "var(--danger)", color: "var(--danger)" }
                   : { borderColor: "var(--rule)", color: "var(--text-dim)" }
               }
             >
@@ -192,13 +192,13 @@ export function BlockedDetail({
           }}
           className="mt-3 flex w-full items-start gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-colors"
           style={{
-            borderColor: live ? "#f43f5e" : "var(--rule)",
-            background: live ? "rgba(244,63,94,0.06)" : "transparent",
+            borderColor: live ? "var(--danger)" : "var(--rule)",
+            background: live ? "color-mix(in srgb, var(--danger) 6%, transparent)" : "transparent",
           }}
         >
           <span
             className="mt-0.5 grid h-4 w-7 shrink-0 items-center rounded-full px-0.5 transition-colors"
-            style={{ background: live ? "#f43f5e" : "var(--rule)" }}
+            style={{ background: live ? "var(--danger)" : "var(--rule)" }}
           >
             <span
               className="block size-3 rounded-full bg-white transition-transform"
@@ -219,7 +219,7 @@ export function BlockedDetail({
         </button>
 
         {stretches && (
-          <div className="mt-2 rounded-lg bg-amber-500/10 px-2.5 py-1.5 text-[10px] leading-relaxed text-amber-600">
+          <div className="mt-2 rounded-lg bg-[var(--warn)]/10 px-2.5 py-1.5 text-[10px] leading-relaxed text-[var(--warn)]">
             这条阻碍已经卡过了任务原定的结束日（{dayToIso(task.endDay)}）——
             保存时会把计划结束日顺延到 {dayToIso(to)}。
             {live
@@ -273,7 +273,7 @@ export function BlockedDetail({
               removeBlocked(taskId, period.id);
               onClose();
             }}
-            className="rounded-lg px-2.5 py-1.5 text-[11px] text-[var(--text-dim)] transition-colors hover:text-rose-500"
+            className="rounded-lg px-2.5 py-1.5 text-[11px] text-[var(--text-dim)] transition-colors hover:text-[var(--danger)]"
           >
             删除
           </button>
@@ -286,7 +286,7 @@ export function BlockedDetail({
                 onClose();
               }}
               title="这件事已经解决：区间收到昨天，卡片当场离开受阻列"
-              className="rounded-lg border border-[var(--rule)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--text-dim)] transition-colors hover:border-emerald-500 hover:text-emerald-600"
+              className="rounded-lg border border-[var(--rule)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--text-dim)] transition-colors hover:border-[var(--ok)] hover:text-[var(--ok)]"
             >
               ✓ 标记为已解决
             </button>

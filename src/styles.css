@@ -1,43 +1,66 @@
 @import "tailwindcss";
+@import "@fontsource-variable/ibm-plex-sans";
 
-/**
- * 设计 token 层。
- * DOM 用这些 CSS 变量，Canvas 用 src/gantt/theme.ts 里语义同名的 JS 常量 ——
- * 两边必须同步修改。
+/*
+ * 设计 token。Canvas 侧的同名常量在 src/gantt/theme.ts，改色时两边一起改。
+ * 色系取自工程制图：冷灰白的图纸、墨绿蓝的线、赭石标注、朱砂批红。
  */
 
 :root {
-  --surface: #ffffff;
-  --surface-alt: #fafafa;
-  --rule: rgba(15, 23, 42, 0.1);
-  --text: #0f172a;
-  --text-dim: #64748b;
-  --row-hover: rgba(15, 23, 42, 0.035);
-  --row-stripe: rgba(15, 23, 42, 0.018);
-  --accent: #6366f1;
-  --milestone: #f59e0b;
+  --surface: #fbfcfc;
+  --surface-alt: #f1f4f3;
+  --surface-sunk: #e8ecea;
+  --rule: rgba(23, 41, 45, 0.11);
+  --rule-strong: rgba(23, 41, 45, 0.2);
+  --text: #17292d;
+  --text-dim: #6a7a7d;
+  --row-hover: rgba(23, 41, 45, 0.04);
+  --row-stripe: rgba(23, 41, 45, 0.016);
+  --accent: #2f6d5e;
+  --on-accent: #fbfcfc;
+  --milestone: #b0752a;
+  --danger: #a83e3e;
+  --ok: #366f5a;
+  --warn: #9a6a1f;
+  --today: #b4442f;
 
-  color-scheme: light dark;
+  --r-s: 3px;
+  --r-m: 5px;
+  --r-l: 9px;
+  --shadow-pop: 0 1px 0 rgba(23, 41, 45, 0.04), 0 12px 32px -12px rgba(23, 41, 45, 0.28);
+
+  --font-ui: "IBM Plex Sans Variable", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+
+  color-scheme: light;
 }
 
-/*
- * 深色变量只在 data-theme="dark" 下生效（属性由 core/themeMode.ts 写入）。
- *
- * 以前这里是 @media (prefers-color-scheme: dark)，纯跟随系统。改成属性驱动是为了
- * 支持设置里的手动开关：JS 把「跟随系统 / 浅色 / 深色」解析成最终的 light/dark
- * 再写到 <html data-theme> 上，CSS 只认这个属性。首帧脚本在 index.html 里，
- * 保证刷新时不闪。
- */
+/* 深色只认 data-theme（由 core/themeMode.ts 写入，首帧脚本在 index.html） */
 :root[data-theme="dark"] {
-  --surface: #0b1020;
-  --surface-alt: #0f1629;
-  --rule: rgba(255, 255, 255, 0.1);
-  --text: #e2e8f0;
-  --text-dim: #7c8aa5;
-  --row-hover: rgba(255, 255, 255, 0.05);
-  --row-stripe: rgba(255, 255, 255, 0.022);
-  --accent: #818cf8;
-  --milestone: #fbbf24;
+  --surface: #0c1416;
+  --surface-alt: #111d20;
+  --surface-sunk: #081012;
+  --rule: rgba(233, 240, 236, 0.1);
+  --rule-strong: rgba(233, 240, 236, 0.2);
+  --text: #e9f0ec;
+  --text-dim: #8a9b9c;
+  --row-hover: rgba(233, 240, 236, 0.05);
+  --row-stripe: rgba(233, 240, 236, 0.02);
+  --accent: #4e9b86;
+  --on-accent: #0c1416;
+  --milestone: #d8a24a;
+  --danger: #d97a69;
+  --ok: #7aad96;
+  --warn: #d8a24a;
+  --today: #d97a69;
+  --shadow-pop: 0 0 0 1px rgba(233, 240, 236, 0.06), 0 16px 40px -12px rgba(0, 0, 0, 0.6);
+
+  color-scheme: dark;
+}
+
+@theme {
+  --font-sans: var(--font-ui);
+  --font-mono: var(--font-ui);
 }
 
 html,
@@ -49,25 +72,25 @@ body,
 }
 
 body {
-  font-family:
-    -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-    "Microsoft YaHei", sans-serif;
+  font-family: var(--font-ui);
+  font-feature-settings: "tnum" 1, "ss02" 1;
   background: var(--surface);
   color: var(--text);
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
-/*
- * Windows 上 WebView2 默认是经典滚动条：又宽又灰，常驻不隐藏，放在这种
- * 紧凑的桌面界面里很扎眼。macOS 本来就是悬浮滚动条，不受影响 ——
- * data-platform 由 main.tsx 在启动时标记。
- */
+/* 数字一律等宽对齐，日期、工期、进度在列里上下对得齐 */
+.font-mono {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+
 :root[data-platform="other"] * {
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--text-dim) 45%, transparent) transparent;
 }
 
-/* 桌面应用不该有网页那种文本选中拖影，但输入框要保留 */
 * {
   -webkit-user-select: none;
   user-select: none;
@@ -80,7 +103,97 @@ textarea,
   user-select: text;
 }
 
-/* DESIGN.md §9 铁律：尊重系统的减弱动效偏好 */
+::selection {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: 1px;
+}
+
+input:focus-visible,
+textarea:focus-visible {
+  outline: none;
+}
+
+/* 工具条上的分段切换：一条沉下去的槽，选中项浮起来 */
+.seg {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 2px;
+  border-radius: var(--r-m);
+  background: var(--surface-sunk);
+}
+
+.seg > button {
+  border-radius: var(--r-s);
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-dim);
+  transition: color 0.12s, background-color 0.12s;
+}
+
+.seg > button:hover {
+  color: var(--text);
+}
+
+.seg > button[aria-pressed="true"] {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 0 0 1px var(--rule), 0 1px 2px rgba(23, 41, 45, 0.08);
+}
+
+/* 次级按钮：细描边 */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-m);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--surface);
+  transition: border-color 0.12s, background-color 0.12s;
+}
+
+.btn:hover {
+  border-color: var(--rule-strong);
+  background: var(--row-hover);
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.btn[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* 主按钮：实心项目色 */
+.btn-primary {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.btn-primary:hover {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--accent) 88%, var(--text));
+}
+
+kbd {
+  font-family: var(--font-ui);
+  font-variant-numeric: tabular-nums;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

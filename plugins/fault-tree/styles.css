@@ -1,7 +1,6 @@
 /*
- * 故障树。气质是工程制图：点阵底纸、细线、等宽的小标签。
- * 颜色全部从宿主变量混出来，深浅色主题不用各写一套。
- * 宿主会给每条规则加上 [data-plugin="fault-tree"] 前缀（registry.ts 的 scopeCss）。
+ * 颜色全从宿主变量混出，深浅主题共用一套。
+ * 宿主会给每条规则加 [data-plugin="fault-tree"] 前缀（scopeCss）。
  */
 
 .ft-root {
@@ -423,7 +422,7 @@
   background: var(--row-hover);
   color: var(--text);
 }
-/* 「从事项」是个下拉，长得和旁边的按钮一样 */
+/* 「从事项」是 select，伪装成按钮 */
 .ft-tools select {
   appearance: none;
   -webkit-appearance: none;
@@ -487,9 +486,7 @@
   pointer-events: none;
 }
 
-/* ---------------- 右栏 ----------------
- * 属性表的写法：左边一列小标签，右边控件，段与段之间一道细线。
- * 不套卡片、不写说明 —— 解释只留在最底下的图例里。 */
+/* ---------------- 右栏 ---------------- */
 
 .ft-side {
   display: flex;
@@ -551,7 +548,7 @@
   background: var(--ft-hot-soft);
 }
 
-/* 名称：像标题一样大，平时没有框，悬停 / 聚焦才露出来 */
+/* 名称：平时无框，悬停 / 聚焦才露出 */
 .ft-title-input {
   box-sizing: border-box;
   margin: -2px -8px 2px;
@@ -886,7 +883,7 @@
   font-weight: 700;
 }
 
-/* 图例：整栏唯一写解释的地方 */
+/* 图例 */
 .ft-legend {
   gap: 6px;
   margin-top: auto;

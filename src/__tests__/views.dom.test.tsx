@@ -164,7 +164,7 @@ describe("顶层视图", () => {
     // 实施 08-20 收尾 vs 计划 08-14 —— 晚 6 天
     expect(await screen.findByText("整体比计划晚 6 天")).toBeTruthy();
     expect(screen.getByText("时间丢在哪")).toBeTruthy();
-    expect(screen.getByText(/4 天 · 1 条/)).toBeTruthy();
+    expect(screen.getByText(/4 天（1 条）/)).toBeTruthy();
   });
 
   it("甘特上右键记一笔会切到时间线，并把草稿带过去", async () => {

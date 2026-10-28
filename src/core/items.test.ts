@@ -22,14 +22,8 @@ import type { ItemKind, ItemNote, Risk } from "../db/api";
 import { isoToDay } from "../gantt/time";
 
 /**
- * 事项合并层。
- *
- * 这里要钉死的不是「列表长什么样」，而是三件会静默出错、而且出错之后
- * 用户只会觉得「这软件在骗我」的事：
- *
- *   1. 不是从事项分拣来的实体也必须出现（否则甘特上标的阻碍在这看不到）
- *   2. 已分拣的事项**不出自己那一行**（否则一件事两行，而且立刻不同步）
- *   3. 悬挂引用要显形，不能静默消失（实体被删了，那句话还得留着）
+ * 合并层钉死三件会静默出错的事：非分拣来的实体也要出现；
+ * 已分拣事项不出自己那行；悬挂引用要显形。
  */
 
 const TODAY = isoToDay("2026-10-05");
@@ -88,11 +82,7 @@ describe("mergeItems：三个来源", () => {
     expect(rows[0].source).toBe("note");
   });
 
-  /**
-   * 第 3 点：⌥ 在甘特条上拖出来的阻碍、任务详情里直接建的风险，
-   * 都没有事项来源。它们**必须**出现在事项视图里 —— 不然同一个东西
-   * 在两个地方说法不同，而这正是设计稿反复在防的那件事。
-   */
+  /** 第 3 点：没有事项来源的实体（⌥ 拖的阻碍、详情里建的风险）也必须出现 */
   it("没有事项来源的阻碍和风险也要出现，且不带 ⤴", () => {
     const rows = mergeItems({
       notes: [],
@@ -145,7 +135,7 @@ describe("mergeItems：三个来源", () => {
     });
     const dangling = rows.filter((r) => r.dangling);
     expect(dangling.map((r) => r.title).sort()).toEqual(["可能缺料", "电机交付延期"]);
-    // 原始那句话必须还在 —— 它记录的「谁在什么时候说的」是不可再生的
+    // 原始那句话必须还在
     expect(dangling.every((r) => r.note != null)).toBe(true);
   });
 
@@ -203,10 +193,7 @@ describe("sortItems", () => {
     expect(keys(sortItems(rows))).toEqual(["note:3", "note:1", "note:2"]);
   });
 
-  /**
-   * 「分拣不改变行的位置」是按时间倒序这个选择买到的东西：
-   * 记完抬头一看那条还在原地。按类型分组的话，每点一次分拣那行就跳走了。
-   */
+  /** 按时间倒序：分拣不改变行的位置 */
   it("同一时刻上实体在事项之前", () => {
     const sameDay = unix("2026-10-01");
     const rows = mergeItems({
@@ -468,10 +455,7 @@ describe("frequentKinds", () => {
     expect(out.map((k) => k.key)).toEqual(["z", "a"]);
   });
 
-  /**
-   * 判据和导出那边一致（export/itemKinds.countByKind）：未分拣的不属于
-   * 任何一类，已晋升成实体的身份由实体表达。
-   */
+  /** 判据同 export/itemKinds.countByKind：未分拣和已晋升的不计 */
   it("未分拣的和已晋升的都不计入", () => {
     expect(
       frequentKinds(kinds, [

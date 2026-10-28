@@ -1,10 +1,4 @@
-/**
- * 未关闭的阻碍：自动延长、手动关闭、以及它对任务日期的影响。
- *
- * 这一段是整个功能里最危险的部分 —— 它是**系统自己改用户的排期**。
- * 错一天，用户看到的工期就是错的，而且他不会知道是谁改的。所以这里逐条钉死：
- * 幂等（同一天跑两次不能推两天）、多段不叠加、已关闭的一天也不动。
- */
+/** 系统自动改排期的部分：逐条钉死幂等、多段不叠加、已关闭的不动。 */
 
 import { describe, expect, it } from "vitest";
 import {
@@ -68,9 +62,8 @@ describe("自动延长", () => {
     const patch = extendOpenBlocks(t, TODAY)!;
 
     expect(patch.blocked![0].to).toBe(TODAY);
-    // 计划结束日往后推 3 天 —— 这 3 天没能干活
     expect(patch.endDay).toBe(t.endDay + 3);
-    // 顺延过多少留在记录里，事后能解释「这条活为什么比原计划长」
+    // 顺延天数留在记录里，事后可解释
     expect(patch.blocked![0].pushed).toBe(3);
   });
 
@@ -104,7 +97,7 @@ describe("自动延长", () => {
   });
 
   it("已关闭的阻碍一天也不动", () => {
-    // ⌥ 在甘特条上拖出来的历史标注就是这种，它不该有任何排期后果
+    // ⌥ 拖出来的历史标注没有排期后果
     const t = task({
       blocked: [{ id: "h1", from: TODAY - 9, to: TODAY - 7, reason: "quality" }],
     });
@@ -173,7 +166,6 @@ describe("手动关闭", () => {
     });
     const next = closeOpenBlocks(t.blocked, TODAY);
     expect(next.every((b) => b.open !== true)).toBe(true);
-    // 历史标注原样保留
     expect(next.find((b) => b.id === "h")!.to).toBe(TODAY - 8);
   });
 });
@@ -198,8 +190,7 @@ describe("准入：只能挂在进行中的任务上", () => {
 
 describe("归列", () => {
   it("有未关闭的阻碍就落在受阻列", () => {
-    // 跨天延长是每分钟查一次的，刚过零点那会儿 to 还停在昨天 ——
-    // 只认区间的话卡片会短暂地跳出受阻列
+    // 刚过零点 to 还停在昨天，只认区间会让卡片跳出受阻列
     const t = task({ blocked: [openBlock(TODAY - 2, TODAY - 1)] });
     expect(columnOf(t, TODAY)).toBe("blocked");
   });
@@ -222,8 +213,7 @@ describe("存取", () => {
     const back = parseBlocked(serializeBlocked(rows));
 
     expect(back[0]).toMatchObject({ open: true, reason: "material", note: "等钢筋" });
-    // 历史数据没有 open 字段，读回来一律当已关闭 —— 一个新字段的默认值
-    // 绝不能去改写既有项目的排期
+    // 历史数据没有 open 字段，一律当已关闭
     expect(back[1].open).toBeUndefined();
   });
 
@@ -262,7 +252,7 @@ describe("开阻碍时把区间拉到今天", () => {
 
 describe("调整一条阻碍（详情面板背后的规则）", () => {
   it("天数调长到任务尾部之外，任务跟着变长 —— 而不是把这段裁回去", () => {
-    // 裁回去的表现是「调了没反应」，用户不会知道是被规则挡了还是软件坏了
+    // 裁回去会表现为「调了没反应」
     const t = task({ endDay: TODAY, blocked: [openBlock(TODAY - 2, TODAY - 2, { open: false })] });
     const out = fitBlocked(t, { ...t.blocked[0], to: TODAY + 5 }, TODAY)!;
 
@@ -283,7 +273,6 @@ describe("调整一条阻碍（详情面板背后的规则）", () => {
   });
 
   it("打开「持续中」会把结束日顶到今天", () => {
-    // 「一直持续到我手动关掉」的起码含义就是「到此刻为止都还卡着」
     const t = task({ endDay: TODAY + 3, blocked: [openBlock(TODAY - 4, TODAY - 4, { open: false })] });
     const out = fitBlocked(t, { ...t.blocked[0], open: true }, TODAY)!;
     expect(out.blocked[0].to).toBe(TODAY);
@@ -359,7 +348,7 @@ describe("阻碍清单的排序", () => {
       TODAY,
     );
 
-    // 还开着的那条起始日最早，但它要人今天去处理，所以排最前
+    // 持续中的排最前，即使起始日最早
     expect(rows.map((r) => r.period.id)).toEqual(["live", "recent", "old"]);
   });
 
@@ -378,13 +367,7 @@ describe("阻碍清单的排序", () => {
   });
 });
 
-/**
- * 补记：一段已经过去的受阻，往往是在活做完之后的复盘会上才被想起来。
- *
- * 这条路和「此刻卡着」共用一个入口，但两者的后果完全相反：前者一天日期都
- * 不该动，后者要把区间拉到今天并顺延工期。混在一起写，迟早有一条会跟着
- * 另一条变 —— 所以两种都在这里逐条钉死。
- */
+/** 补记与「此刻卡着」共用入口但后果相反：前者不动日期，后者拉到今天并顺延。 */
 describe("能不能给这条活记阻碍", () => {
   it("已完成的活也能记 —— 挡住它等于逼用户把进度调回 99% 记完再调回去", () => {
     expect(canRecordBlocker(task({ progress: 1, blocked: [] }), TODAY)).toBe(true);
@@ -434,7 +417,6 @@ describe("补记一段过去的阻碍", () => {
     const out = openBlockerOn(t, TODAY, "material", undefined, { from: TODAY - 6, to: TODAY - 5 }, true);
     const p = out.blocked!.at(-1)!;
 
-    // 「一直卡到我手动关掉」的起码含义就是「到此刻为止都还卡着」
     expect(p).toMatchObject({ from: TODAY - 6, to: TODAY, open: true });
     expect(out.endDay).toBe(TODAY);
   });
@@ -449,10 +431,7 @@ describe("补记一段过去的阻碍", () => {
   });
 });
 
-/**
- * 结论：一句「最后是怎么过去的」。可不填 —— 和风险那边强制写处置说明刻意相反，
- * 理由见 blocked.BlockedPeriod.resolution。
- */
+/** 结论可不填，和风险强制处置说明刻意相反。 */
 describe("阻碍的结论", () => {
   it("写了就存得住，序列化往返之后还在", () => {
     const json = serializeBlocked([
@@ -474,7 +453,7 @@ describe("阻碍的结论", () => {
   });
 
   it("关掉一条阻碍不会把已经写好的结论抹掉", () => {
-    // 关闭只该改「还卡不卡着」，顺手清掉用户写过的话是最招人恨的那类 bug
+    // 关闭不该清掉用户写过的结论
     const periods: BlockedPeriod[] = [
       { id: "b1", from: TODAY - 3, to: TODAY, reason: "material", open: true, resolution: "到料了" },
     ];

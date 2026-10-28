@@ -1,22 +1,10 @@
-/**
- * Rust 命令的类型化包装。
- *
- * 渲染层永远不写 SQL —— schema 只有 src-tauri/src/db.rs 一个知情方。
- * 这样加一列、改一次迁移，编译器会在这里报错，而不是等到运行时某条
- * 手写 SQL 静默地查不到字段。
- */
+/** Rust 命令的类型化包装。渲染层不写 SQL，schema 只有 src-tauri/src/db.rs 知道。 */
 
 import { invoke } from "@tauri-apps/api/core";
 
 export interface Project {
   id: number;
-  /**
-   * 跨机器的项目身份，见 migrations/007_project_identity.sql。
-   *
-   * `id` 只在本机这一个库里有意义，导出到 .ganttproj、在另一台电脑上导入
-   * 之后就换了一个值；`uuid` 跟着项目本身走，导入时靠它认出「这是同一个
-   * 项目的新版本」，哪怕它在那边被改过名。
-   */
+  /** 跨机器的项目身份：`id` 只在本库有效，导入时靠 uuid 认出同一项目。 */
   uuid: string;
   name: string;
   color: string;
@@ -59,9 +47,9 @@ export interface TaskRow {
   pinned: boolean;
   note: string;
   sortOrder: number;
-  /** 受阻时段的 JSON 数组，见 migrations/004_blocked.sql */
+  /** 受阻时段的 JSON 数组 */
   blocked: string;
-  /** 实施逾期时自动顺延计划结束日。见 migrations/009_auto_rollover.sql */
+  /** 实施逾期时自动顺延计划结束日 */
   autoRollover: boolean;
 }
 
@@ -86,15 +74,9 @@ export interface Risk {
   createdAt: number;
   /** 关闭的时刻。null = 还开着，或是没有这一列的历史记录 */
   resolvedAt: number | null;
-  /** 怎么关掉的。复盘时有价值的是这一句，不是那个勾 */
+  /** 怎么关掉的 */
   resolution: string | null;
-  /**
-   * 「先做哪个」（P0–P3）。和 `level`（多严重）是两个轴 ——
-   * 见 migrations/012_risk_priority.sql。
-   *
-   * null = 没填过。历史风险确实没有这一项，界面显示一个空的优先级槽，
-   * 不伪造一个「中」。
-   */
+  /** P0–P3，和 `level`（严重度）是两个轴；null = 没填过，不伪造「中」 */
   priority: number | null;
 }
 
@@ -110,13 +92,7 @@ export interface TaskNotes {
   comments: Comment[];
 }
 
-/**
- * 一条逐日记录。时间线视图的原子单位。
- *
- * `day` 和 `createdAt` 是两个不同的时间：前者是「说的是哪一天」（时间线按它排），
- * 后者是「什么时候写的」。周五补记周三的事，两者相差两天 —— 混成一个字段的话，
- * 时间线从第一天起就是错的（见 migrations/006_daily_notes.sql）。
- */
+/** 逐日记录。`day` 是说的哪天（时间线按它排），`createdAt` 是什么时候写的，补记时两者不同。 */
 export interface DailyNote {
   id: number;
   projectId: number;
@@ -130,21 +106,12 @@ export interface DailyNote {
   updatedAt: number;
 }
 
-/**
- * 一条事项（QuickNote）—— 系统里唯一一种**不需要日期就能存在**的东西。
- *
- * 四个计划视图都要求「任务 + 日期 + 负责人」齐备才接得住，而现实里最先出现的
- * 东西只有一句话：会上的一句话、邮件里的一个隐患。要求它们当场完成那次翻译，
- * 就是它们最后没被记下来的原因。见 migrations/010_item_notes.sql。
- */
+/** 一条事项（QuickNote）：不需要日期就能存在的记录。 */
 export interface ItemNote {
   id: number;
   projectId: number;
   name: string;
-  /**
-   * 类型 key（见 ItemKind）。**null = 未分拣**，不是「其他」——
-   * 「我还没决定这是什么」是一个真实且重要的状态。
-   */
+  /** 类型 key（见 ItemKind）；null = 未分拣，不是「其他」 */
   kind: string | null;
   /** P0–P3，和任务的紧急度同一把刻度 */
   priority: number;
@@ -153,25 +120,16 @@ export interface ItemNote {
   taskId: number | null;
   /** 非 null = 已经分拣成一个真实实体 */
   promotedKind: "blocker" | "risk" | null;
-  /**
-   * 阻碍是 `"<taskId>/<periodId>"`，风险是 `"<riskId>"`。
-   * **可能指向一个已经不存在的东西** —— 那是预期状态，不是损坏：
-   * 阻碍能删、风险能删，界面上对此有专门的出路（core/items.ts）。
-   */
+  /** 阻碍 `"<taskId>/<periodId>"`，风险 `"<riskId>"`；可能悬挂（实体已删），属预期状态 */
   promotedRef: string | null;
-  /** Unix 秒。null = 还开着。**没有单独的 closed 布尔** */
+  /** Unix 秒；null = 还开着（没有单独的 closed 布尔） */
   closedAt: number | null;
   resolution: string | null;
   createdAt: number;
   updatedAt: number;
 }
 
-/**
- * 一个事项类型。全局表，所有项目共用。
- *
- * **阻碍和风险不在这张清单里**：它们是实体不是分类，身份由
- * ItemNote.promotedKind + promotedRef 表达（见 migrations/011_item_kinds.sql）。
- */
+/** 事项类型，全局共用。阻碍和风险不在此表，由 promotedKind + promotedRef 表达。 */
 export interface ItemKind {
   /** 'todo' | 'issue' | 'custom:<uuid>' */
   key: string;
@@ -184,12 +142,7 @@ export interface ItemKind {
   sortOrder: number;
 }
 
-/**
- * 一个用户自设的里程碑，见 migrations/014_milestones.sql。
- *
- * 和 `TaskRow.milestone` 不是一回事：那个是「这条任务本身是个节点」，
- * 依附在任务上；这个能脱离任务存在、能挂多条任务、有自己的名称和说明。
- */
+/** 独立的里程碑，可挂多条任务；和 `TaskRow.milestone`（任务本身是节点）不是一回事。 */
 export interface Milestone {
   id: number;
   projectId: number;
@@ -206,12 +159,7 @@ export interface Milestone {
   updatedAt: number;
 }
 
-/**
- * 一次 AI 复盘在库里的样子，见 migrations/013_ai_reviews.sql。
- *
- * `background` / `snapshot` / `questions` 是 JSON 字符串，这里**不解析** ——
- * 形状由 aiReview/types.ts 定义并负责读写（parseReview）。
- */
+/** AI 复盘行。background/snapshot/questions 是 JSON 串，由 aiReview/types.ts 解析。 */
 export interface AiReviewRow {
   id: number;
   projectId: number;
@@ -261,13 +209,7 @@ export interface ProjectData {
   nextTaskId: number;
 }
 
-/**
- * 插件目录里一个子目录的原始内容，未校验。
- *
- * 字段全是文件原文而不是解析后的结构：manifest 的校验逻辑在 TS 侧
- * （plugins/manifest.ts），它需要拿到原始 JSON 文本才能报出「第几个字符
- * 不对」。这里解析一次再交给它，等于把错误现场洗掉了。
- */
+/** 插件子目录的文件原文，未校验 —— manifest.ts 要原文才能报出错误位置。 */
 export interface RawPlugin {
   /** 目录名。插件身份就是它 —— manifest 里的 id 必须与之一致 */
   dir_name: string;
@@ -304,10 +246,7 @@ export const api = {
 
   loadProject: (id: number) => invoke<ProjectData>("load_project", { id }),
 
-  /**
-   * 整项目事务性替换。调用方必须防抖 —— 见 persistence.ts。
-   * 之所以不是增量写入，理由见 src-tauri/src/db.rs 的 save_project 注释。
-   */
+  /** 整项目事务性替换，调用方必须防抖（persistence.ts）。 */
   saveProject: (id: number, tasks: TaskRow[], dependencies: DependencyRow[]) =>
     invoke<void>("save_project", { id, tasks, dependencies }),
 
@@ -335,21 +274,11 @@ export const api = {
 
   loadTaskNotes: (taskId: number) => invoke<TaskNotes>("load_task_notes", { taskId }),
 
-  /**
-   * [taskId, 未解决风险数][]。
-   *
-   * 角标现在不走它了 —— 全局风险清单本来就要查全项目明细，角标从同一份
-   * 结果里算（store.refreshRisks），少一次往返，也不会出现「清单里三条、
-   * 角标显示两条」的错位。留着这条是因为它是纯计数，将来做跨项目概览时
-   * 不必为了一个数字把所有风险正文拉过来。
-   */
+  /** [taskId, 未解决风险数][]。角标已改从 refreshRisks 结果算，这里留作纯计数接口。 */
   countOpenRisks: (projectId: number) =>
     invoke<[number, number][]>("count_open_risks", { projectId }),
 
-  /**
-   * 整个项目的风险点，一次查完 —— 导出用。
-   * 库层已排好序（未解决在前 → 等级高在前 → 记录早在前），前端不再排。
-   */
+  /** 整项目风险，库层已排序（未解决 → 等级高 → 记录早）。 */
   loadProjectRisks: (projectId: number) =>
     invoke<Risk[]>("load_project_risks", { projectId }),
 
@@ -368,27 +297,19 @@ export const api = {
   addRisk: (taskId: number, content: string, level: number) =>
     invoke<Risk>("add_risk", { taskId, content, level }),
 
-  /** 改措辞或等级。**不碰开关状态** —— 关闭必须走 resolveRisk */
+  /** 改措辞或等级，不碰开关状态（关闭走 resolveRisk） */
   updateRisk: (id: number, content: string, level: number) =>
     invoke<void>("update_risk", { id, content, level }),
 
-  /**
-   * 关闭一条风险。返回关闭时刻（Unix 秒）。
-   * 处置说明是必填的，库层也拦一道 —— 一旦允许空说明，它就会变成默认路径。
-   */
+  /** 关闭风险，返回关闭时刻（Unix 秒）；处置说明必填，库层也拦。 */
   resolveRisk: (id: number, resolution: string) =>
     invoke<number>("resolve_risk", { id, resolution }),
 
-  /** 重新打开：问题又回来了，或者上次那个「已解决」下早了 */
   reopenRisk: (id: number) => invoke<void>("reopen_risk", { id }),
 
   deleteRisk: (id: number) => invoke<void>("delete_risk", { id }),
 
-  /**
-   * 只改优先级。单独一个命令而不是走 updateRisk ——
-   * 事项视图里点一下标签就生效，为了一个小整数把整条正文回传一遍，
-   * 中间任何一次并发编辑都会被这次回传盖掉。
-   */
+  /** 只改优先级；不走 updateRisk 是为了不回传正文、盖掉并发编辑。 */
   setRiskPriority: (id: number, priority: number | null) =>
     invoke<void>("set_risk_priority", { id, priority }),
 
@@ -398,7 +319,7 @@ export const api = {
   loadItemNotes: (projectId: number) =>
     invoke<ItemNote[]>("load_item_notes", { projectId }),
 
-  /** 记一条。**不收类型** —— 分拣是分开的动作，见 core/items.ts */
+  /** 记一条。不收类型，分拣是单独的动作 */
   addItemNote: (
     projectId: number,
     name: string,
@@ -407,11 +328,7 @@ export const api = {
     taskId: number | null,
   ) => invoke<ItemNote>("add_item_note", { projectId, name, priority, personId, taskId }),
 
-  /**
-   * 改字段：标题、类型、优先级、负责人、关联任务。
-   * **不碰关闭状态，也不碰晋升去向** —— 那两件事各有自己的入口。
-   * `kind` 传 null = 改回「未分拣」，那是一个合法的目标状态。
-   */
+  /** 改字段，不碰关闭状态和晋升去向；`kind` 传 null = 改回未分拣。 */
   updateItemNote: (
     id: number,
     name: string,
@@ -429,10 +346,7 @@ export const api = {
 
   deleteItemNote: (id: number) => invoke<void>("delete_item_note", { id }),
 
-  /**
-   * 分拣成风险：**一个事务里**建风险行 + 写回晋升去向。
-   * 不可能留下「风险建好了但事项还显示未分拣」。
-   */
+  /** 分拣成风险：同一事务里建风险行并写回晋升去向。 */
   promoteNoteToRisk: (
     noteId: number,
     taskId: number,
@@ -441,17 +355,11 @@ export const api = {
     priority: number | null,
   ) => invoke<Risk>("promote_note_to_risk", { noteId, taskId, content, level, priority }),
 
-  /**
-   * 分拣成阻碍：只记下引用。阻碍实体本身住在 tasks.blocked 里，
-   * 由命令栈 + 整项目保存写出，不在这个连接的事务边界内。
-   */
+  /** 分拣成阻碍：只记引用；阻碍实体在 tasks.blocked，由命令栈 + 整项目保存写出，不在本事务内。 */
   promoteNoteToBlocker: (noteId: number, promotedRef: string) =>
     invoke<void>("promote_note_to_blocker", { noteId, promotedRef }),
 
-  /**
-   * 撤销分拣：退回「未分拣」，并删掉当初创建的实体。
-   * 返回原来的引用 —— 调用方据此摘掉对应的阻碍区间（风险已在库层删掉）。
-   */
+  /** 撤销分拣并删实体；返回原引用，调用方据此摘掉阻碍区间（风险已在库层删）。 */
   unpromoteNote: (noteId: number) =>
     invoke<string | null>("unpromote_note", { noteId }),
 
@@ -531,11 +439,7 @@ export const api = {
   /** 本机有没有装 claude */
   aiReviewAvailable: () => invoke<boolean>("ai_review_available"),
 
-  /**
-   * 问 Claude 一次，返回 run id。**程序和参数都由 Rust 写死**（零工具），
-   * 这里只给得了提示词和输出 schema —— 见 src-tauri/src/ai_review.rs。
-   * 输出走 db/proc.ts 的分发，取消用 pluginKill。
-   */
+  /** 问 Claude 一次，返回 run id。程序与参数由 Rust 写死，这里只给提示词和 schema。 */
   aiReviewRun: (prompt: string, schema: string | null) =>
     invoke<number>("ai_review_run", { prompt, schema }),
 
@@ -554,11 +458,10 @@ export const api = {
   listBundledPlugins: () => invoke<BundledPlugin[]>("list_bundled_plugins"),
   /** 安装或更新一个附带插件。更新时保留插件的 data/ */
   installBundledPlugin: (id: string) => invoke<void>("install_bundled_plugin", { id }),
-  /** 删掉插件代码，保留 data/（重新安装后数据还在）。调用前先停用 */
+  /** 删掉插件代码，保留 data/（重装后数据还在）。调用前先停用 */
   uninstallPlugin: (id: string) => invoke<void>("uninstall_plugin", { id }),
 
-  /* 下面这些只给 plugins/registry.ts 用 —— 插件拿到的是包过一层、
-     自动带上插件 id 的版本，见那里的 makeApi */
+  /* 下面这些只给 plugins/registry.ts 用，插件拿到的是自动带 id 的包装版 */
   pluginStorageRead: (id: string, name: string) =>
     invoke<string | null>("plugin_storage_read", { id, name }),
   pluginStorageWrite: (id: string, name: string, content: string) =>
@@ -578,10 +481,7 @@ export const api = {
 
   backupNow: () => invoke<string>("backup_now"),
 
-  /**
-   * 把导出好的文件写到 path。内容用 base64 传 ——
-   * JSON 数字数组要 4 倍体积，raw IPC body 又装不下同一次调用里的 path。
-   */
+  /** 内容用 base64 传：JSON 数字数组要 4 倍体积，raw IPC body 又带不了 path。 */
   writeExport: (path: string, base64: string) =>
     invoke<string>("write_export", { path, base64 }),
 
@@ -590,14 +490,7 @@ export const api = {
 
   /* ---------------- 项目文件（.ganttproj）---------------- */
 
-  /**
-   * 把一个项目导出成 .ganttproj。
-   *
-   * 和上面那个 writeExport 不是一回事：writeExport 是「前端拼好字节，Rust
-   * 只管落盘」，服务于 Excel / 时间线 HTML 那种依赖渲染层的排版件。
-   * 项目文件的数据全在库里，前端插不上手也不需要插手 —— 整件事在 Rust 侧
-   * 完成，这里只传一个路径过去（见 src-tauri/src/transfer.rs）。
-   */
+  /** 导出 .ganttproj。数据全在库里，整件事在 Rust 侧完成，与前端拼字节的 writeExport 不同。 */
   exportProjectFile: (projectId: number, path: string) =>
     invoke<string>("export_project", { projectId, path }),
 
@@ -605,11 +498,8 @@ export const api = {
   inspectImport: (path: string) => invoke<ImportPreview>("inspect_import", { path }),
 
   /**
-   * 真正落库。文件会被重新读、重新校验一遍 —— 预检和确认之间隔着用户的
-   * 思考时间，那期间文件可能被云盘换掉或者随 U 盘被拔走。
-   *
-   * `backupStamp` 由这边给：本机时区只有渲染层知道，Rust 的 std 拿不到，
-   * 自己拼会拼出 UTC —— 下午两点做的备份文件名写着 06:02 没人看得懂。
+   * 落库时重新读文件重校验 —— 预检和确认之间文件可能被换掉。
+   * `backupStamp` 由渲染层给：Rust 的 std 拿不到本机时区。
    */
   commitImport: (
     path: string,
@@ -620,17 +510,14 @@ export const api = {
 
   /* ---------------- 整库（.db）---------------- */
 
-  /**
-   * 把整个库导出成一个独立的 .db —— 换台电脑时一次搬走全部项目。
-   * 见 src-tauri/src/dbfile.rs。
-   */
+  /** 整库导出成独立 .db，换机器时一次搬走全部项目。 */
   exportDatabase: (path: string) => invoke<string>("export_database", { path }),
 
   /** 读另一台电脑的 .db、校验、和本机项目逐个对号，但一个字都不写库 */
   inspectDbImport: (path: string) =>
     invoke<DbImportPreview>("inspect_db_import", { path }),
 
-  /** 真正落库：先给本机整库拍快照，再把所有项目放进同一个事务写进来 */
+  /** 真正落库：先整库拍快照，再把所有项目放进同一个事务写入 */
   commitDbImport: (path: string, backupStamp: string) =>
     invoke<DbImportOutcome>("commit_db_import", { path, backupStamp }),
 

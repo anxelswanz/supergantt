@@ -162,7 +162,7 @@ describe("看板 · 阻碍", () => {
     expect(blocked).toHaveLength(1);
     // 未关闭 —— 它会一直跟着往后长，直到有人来关
     expect(blocked[0]).toMatchObject({ open: true, reason: "equipment", note: "三号机主轴异响" });
-    expect(await screen.findByText(/三号机主轴异响 · 已 1 天/)).toBeTruthy();
+    expect(await screen.findByText(/三号机主轴异响，已 1 天/)).toBeTruthy();
   });
 
   it("关闭之后卡片离开受阻列，标识跟着消失", async () => {
@@ -287,7 +287,7 @@ describe("看板 · 风险清单", () => {
       level: 0,
     });
     // 风险和受阻是两个独立标识：这条活没被卡住，只有风险标
-    expect(await screen.findByText(/1 条风险未关闭 · 最高高/)).toBeTruthy();
+    expect(await screen.findByText(/1 条风险未关闭（最高：高）/)).toBeTruthy();
     expect(screen.queryByText(/已 1 天/)).toBeNull();
     expect(store.getState().openRisks.get(1)).toEqual({ count: 1, top: 0 });
   });

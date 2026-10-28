@@ -5,12 +5,7 @@ import { buildItemsDocx, buildItemsWorkbook, itemsFileName } from "./items";
 import type { ItemRow } from "../core/items";
 import { BUILTIN_KINDS } from "../core/items";
 
-/**
- * 事项清单的导出。钉死两件事：
- *
- *   1. 导出的就是传进来的那些行、按传进来的顺序 —— 屏幕上筛出几条就是几条
- *   2. 表头写明筛了什么，否则收到的人分不清「全部」和「筛出来的」
- */
+/** 事项清单导出：行与顺序原样照传；表头写明筛了什么。 */
 
 const row = (over: Partial<ItemRow> & { key: string }): ItemRow => ({
   source: "note",
@@ -71,7 +66,7 @@ describe("buildItemsWorkbook", () => {
 });
 
 describe("buildItemsDocx", () => {
-  /** 和 Excel 同一张表（itemsTable）—— 两份文件的内容不能对不上 */
+  /** 和 Excel 同一张表（itemsTable） */
   it("生成的 docx 里有标题、筛选说明和每一行", async () => {
     const doc = buildItemsDocx(
       input(

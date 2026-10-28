@@ -1,25 +1,8 @@
 /**
- * 项目导出 → 单张 Excel 工作表。
+ * 项目导出 → 单张 Excel 工作表：任务信息列 + 一列一个时间桶的甘特条，下方接风险表、受阻表。
  *
- * 版面从上到下就是屏幕上那张图的顺序：
- *
- *   项目名 / 导出时间
- *   ┌ 任务信息（A–H）┬ 甘特条（I 起，一列一个时间桶）┐
- *   └ 每行一个任务，层级用 Excel 原生大纲分组 + 缩进 ┘
- *   （空两行）
- *   风险点表
- *
- * 三个关键取舍：
- *
- *  1. **甘特条用单元格边框画成线，不填底色，也不插图片。**
- *     图片在 Excel 里不跟着行走，筛选或调行高之后条子就和任务对不上；
- *     整格填色则会把表变成一片色块，行一多就糊。边框是单元格的属性，
- *     怎么动都不错位，而且相邻格的边框会自然连成一条不断的线。
- *     代价是线只能落在格子的边上（这里取下边缘），做不到垂直居中 ——
- *     这是 Excel 的单元格模型决定的，除非改用浮动图形，而那又会脱离行。
- *  2. **折叠状态一律展开**。折叠是看屏幕时的浏览状态，不是项目内容 ——
- *     发给别人的文件静默少掉一半任务是个真 bug。
- *  3. **透明度提前压平**（见 timeAxis.flatten）。Excel 忽略 ARGB 的 A 通道。
+ * 甘特条用单元格边框画线而不用图片或填色：图片不跟着行走，行高或筛选一变就错位；
+ * 整格填色行一多就糊。代价是线只能落在格子边上（取上下边缘），做不到居中。
  */
 
 import ExcelJS from "exceljs";
@@ -42,7 +25,7 @@ import {
 export interface ExportInput {
   projectName: string;
   projectColor: string;
-  /** 已经 resolve 过、且**全部展开**的任务，顺序即导出行序 */
+  /** 已 resolve 且全部展开的任务，顺序即导出行序 */
   tasks: ResolvedTask[];
   people: Person[];
   calendar: WorkCalendar;
@@ -81,17 +64,13 @@ const INK_DIM = "6B7280";
 const RULE = "D6DAE1";
 const HEADER_BG = "F3F4F6";
 const REST_BG = "E7E9EE";
-/** 正文里的非工作日竖带。比表头那档淡得多 —— 它是背景，不能和线抢注意力 */
+/** 正文里的非工作日竖带，比表头那档淡得多，背景不能抢线的注意力 */
 const REST_BAND = "F6F7F9";
 const TODAY_BG = "FDE68A";
 const TODAY_LINE = "F59E0B";
 const RESOLVED_INK = "9CA3AF";
 
-/**
- * 受阻段的线色。红 + 虚线，和屏幕上那条红斜纹是同一个信号
- * （见 gantt/render.ts 的 hatchPattern）—— 导出件和屏幕对同一件事
- * 用两种颜色，收件人会以为它们说的不是一回事。
- */
+/** 受阻段线色，与屏幕上那条红斜纹同一信号（见 gantt/render.ts 的 hatchPattern） */
 const BLOCKED_INK = "E11D48";
 
 const RISK_LEVELS = ["高", "中", "低"];
@@ -99,7 +78,7 @@ const RISK_COLORS = ["#EF4444", "#F59E0B", "#64748B"];
 
 const thin = (color = RULE) => ({ style: "thin" as const, color: { argb: color } });
 
-/** 空项目也要能导出成一份说得清的文件，所以给一个从今天起的默认窗口 */
+/** 空项目也要能导出一份说得清的文件，给一个从今天起的默认窗口 */
 const FALLBACK_SPAN = 30;
 
 export function buildWorkbook(input: ExportInput): ExcelJS.Workbook {
@@ -111,7 +90,7 @@ export function buildWorkbook(input: ExportInput): ExcelJS.Workbook {
 
   const sheet = wb.addWorksheet(sanitizeSheetName(projectName), {
     views: [
-      // 冻结在任务信息列与表头之下：横向翻到明年时，左边还知道这行是谁的活
+      // 冻结列与表头：横向翻到明年时左边仍知道这行是谁的活
       { state: "frozen", xSplit: FIXED_COLS, ySplit: HEADER_ROW },
     ],
     properties: { defaultRowHeight: 18 },
@@ -143,9 +122,7 @@ function layoutTimeAxis({ tasks, calendar }: ExportInput): Bucket[] {
   for (const t of tasks) {
     from = Math.min(from, t.startDay);
     to = Math.max(to, t.endDay);
-    // 实施日期也要算进去 —— 只按计划定范围的话，
-    // 「计划 8/17 交、实际干到 8/22」那一截会被直接截在纸外，
-    // 而那恰恰是最需要被看到的部分
+    // 实施日期也算进范围，否则「计划 8/17 交、实际干到 8/22」那一截被截在纸外
     if (t.actualStartDay != null) from = Math.min(from, t.actualStartDay);
     if (t.actualEndDay != null) to = Math.max(to, t.actualEndDay);
   }
@@ -154,7 +131,7 @@ function layoutTimeAxis({ tasks, calendar }: ExportInput): Bucket[] {
     to = from + FALLBACK_SPAN;
   }
 
-  // 两端各留两天，让最早/最晚的条子不贴着纸边 —— 贴边会让人怀疑是不是被截断了
+  // 两端各留两天，免得条子贴着纸边像被截断
   from -= 2;
   to += 2;
 
@@ -270,8 +247,7 @@ function writeTaskRows(
 ) {
   const { tasks, people, calendar, colorBy, projectColor, risks } = input;
 
-  // 导出件落在白纸上，所以强制浅色主题取色 —— 深色主题那套提亮过的颜色
-  // 印在白底上会淡得看不清
+  // 导出件落在白纸上，强制浅色主题取色，深色主题提亮过的颜色印白底看不清
   const paintOf = makeBarPainter(tasks, colorBy, false, projectColor, people);
   const personName = new Map(people.map((p) => [p.id, p.name]));
 
@@ -294,8 +270,7 @@ function writeTaskRows(
     const rowNumber = FIRST_TASK_ROW + index;
     const row = sheet.getRow(rowNumber);
     row.height = 17;
-    // Excel 原生大纲：导出件里也能一键折叠到只看一级阶段。
-    // outlineLevel 从 0 起，depth 同样从 0 起，可以直接用
+    // Excel 原生大纲：outlineLevel 与 depth 都从 0 起，可直接用
     if (task.depth > 0) row.outlineLevel = task.depth;
 
     const paint = paintOf(task);
@@ -324,9 +299,8 @@ function writeTaskRows(
     };
     priority.alignment = { vertical: "middle", horizontal: "center" };
 
-    // 日期写成 ISO 文本而不是 Excel 日期序列号：序列号会被收件人的区域设置
-    // 重新格式化（美式 8/1/2026 vs 欧式 1/8/2026），而 ISO 串既无歧义，
-    // 字典序又恰好等于日期序，排序筛选照样好用
+    // 日期写 ISO 文本而非 Excel 日期序列号：序列号会被区域设置重排格式（8/1 vs 1/8），
+    // ISO 串无歧义且字典序即日期序
     for (const [col, day] of [
       [4, task.startDay],
       [5, task.endDay],
@@ -337,8 +311,7 @@ function writeTaskRows(
       cell.alignment = { vertical: "middle", horizontal: "center" };
     }
 
-    // 实际起止。为空表示还没开工 —— 写「—」而不是留空白单元格，
-    // 否则收件人分不清「没开工」和「忘了填」
+    // 没开工写「—」而非空单元格，否则分不清「没开工」和「忘了填」
     const hasActual = task.actualStartDay != null && task.actualEndDay != null;
     for (const [col, day] of [
       [6, task.actualStartDay],
@@ -396,13 +369,8 @@ function writeTaskRows(
       row.getCell(c).border = { bottom: thin() };
     }
 
-    // —— 甘特条 ——
-    //
-    // 一根条子 = 一串相邻单元格的下边框。Excel 会把相邻格的同色边框接成
-    // 一条连续的线，所以不会出现「一节一节」的断口。
-    //
-    // 甘特区**不画行分隔线**：横线一多，条子就淹没在网格里了。
-    // 行的归属靠左侧信息列的分隔线和冻结窗格来交代。
+    // —— 甘特条：一根条子 = 一串相邻单元格的下边框，Excel 会把相邻同色边框连成一条线。
+    // 甘特区不画行分隔线，免得条子淹没在网格里。
     const kinds = barCells(task, buckets);
     const blockedRanges = mergeRanges(task.blocked);
     // 有实际日期时，甘特条画实际；没有就画计划，且画成虚线表示「还没开工」
@@ -410,9 +378,7 @@ function writeTaskRows(
       ? { startDay: task.actualStartDay!, endDay: task.actualEndDay!, progress: task.progress, milestone: task.milestone }
       : task;
     const actualKinds = barCells(barSpan, buckets);
-    // —— 计划线画在格子的**上**边框，实施线画在下边框 ——
-    // 一行里天然出现两条线，不用另起一行就完成了对照。
-    // 只在实际和计划不一致时才画计划线，否则一模一样的两条线纯属噪音
+    // 计划线画上边框、实施线画下边框，一行里两条线天然对照；只在实际与计划不一致时画计划线
     if (hasActual) {
       kinds.forEach((kind, i) => {
         if (kind === "none" || kind === "milestone") return;
@@ -428,8 +394,7 @@ function writeTaskRows(
       const bucket = buckets[i];
       const cell = row.getCell(FIXED_COLS + 1 + i);
 
-      // 非工作日的竖向浅色带。它是背景不是条子，所以做得极淡，
-      // 只用来帮眼睛数格子，不能和线抢注意力
+      // 非工作日竖带：背景不是条子，做得极淡，只帮眼睛数格子
       if (bucket.rest) {
         cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: REST_BAND } };
       }
@@ -447,13 +412,9 @@ function writeTaskRows(
         return;
       }
 
-      // 进度靠**线的粗细**表达，不再靠深浅色块：
-      // 已完成那段粗实线，未完成那段细线 —— 一眼能看出做到哪，
-      // 而整根条子的长度仍然是完整工期。
-      // 父任务是子任务的并集、不表达自己的进度，所以整根用同一档中等粗细，
-      // 免得它那根又长又满的条子盖过真正在做的叶子任务。
-      // 受阻的那几格换成虚线并改色 —— 屏幕上用斜纹，这里用虚线，
-      // 同样是「图案」这个通道，不去抢已经被归属和进度占满的颜色
+      // 进度靠线的粗细而不是色块深浅：已完成段粗实线、未完成段细线，条长仍是完整工期。
+      // 父任务是子任务并集、不表达自己的进度，整根用中等粗细免得盖过叶子。
+      // 受阻格换虚线并改色，和屏幕上的斜纹同一「图案」通道，不抢颜色。
       const isBlocked = blockedRanges.some(
         ([from, to]) => from <= bucket.endDay && bucket.startDay <= to,
       );
@@ -487,15 +448,9 @@ function writeTaskRows(
 /* ------------------------------------------------------------------ */
 
 /**
- * 风险表挤在同一张 sheet 上，只能借用甘特图那套列宽。
- *
- * ⚠️ 整张表必须**完全落在 A–H 之内**，一列都不能越到甘特区。
- *
- * 表格顶上冻结了窗格（xSplit = 8）。跨越冻结线的合并单元格在 Excel 里是坏的：
- * 左半边钉在固定窗格、右半边跟着横向滚动，于是内容看上去从格子里"支棱"出去，
- * 一滚更是直接错位。之前「记录时间」合并 H–L，正好骑在分割线上。
- *
- * 所以列宽只能从这 8 列里分，长文本靠合并相邻列凑宽度。
+ * 风险表挤在同一张 sheet 上，整张表必须落在 A–H 之内：表格冻结了 xSplit = 8，
+ * 跨冻结线的合并单元格在 Excel 里会左半钉住右半跟滚，看上去支棱出去。
+ * 所以长文本只能合并 A–H 内的相邻列凑宽度。
  */
 function writeRiskTable(
   sheet: ExcelJS.Worksheet,
@@ -565,9 +520,8 @@ function writeRiskTable(
     level.alignment = { vertical: "top", horizontal: "center" };
 
     const content = row.getCell(CONTENT_FROM);
-    // 处置说明跟在风险正文下面，不另开一列：A–H 已经排满，硬挤会把正文压成
-    // 一条竖缝。富文本让它换行、变小、变绿 —— 一眼分得出哪句是问题、
-    // 哪句是「我们做了什么」，而后者才是复盘时真正要抄的东西
+    // 处置说明跟在风险正文下面而不另开一列：A–H 已排满，挤会把正文压成竖缝。
+    // 富文本换行、变小、变绿，一眼分得出哪句是问题、哪句是处置。
     content.value =
       risk.resolved && risk.resolution
         ? {
@@ -599,8 +553,7 @@ function writeRiskTable(
     status.alignment = { vertical: "top", horizontal: "center" };
 
     const time = row.getCell(TIME_FROM);
-    // 关闭时刻和记录时刻是两个不同的事实，两个都要写出来 ——
-    // 「这条风险挂了多久才解决」是复盘会上真会被问到的问题
+    // 关闭时刻和记录时刻都要写：「这条风险挂了多久」是复盘会真会问的问题
     time.value =
       risk.resolvedAt != null
         ? `记录 ${formatDateTime(new Date(risk.createdAt * 1000))}\n关闭 ${formatDateTime(
@@ -624,10 +577,8 @@ function writeRiskTable(
 /* ------------------------------------------------------------------ */
 
 /**
- * 图上的虚线只说明「哪几天卡了」，说不出为什么。原因是这份记录存在的意义，
- * 所以必须另给一张表，否则收件人只能回来问你。
- *
- * 和风险表同样的约束：整张表落在 A–H 之内，不越过冻结线。
+ * 图上的虚线只说「哪几天卡了」，说不出为什么，所以另给一张表。
+ * 和风险表同样须落在 A–H 之内。
  */
 function writeBlockedTable(
   sheet: ExcelJS.Worksheet,
@@ -714,8 +665,8 @@ function writeBlockedTable(
 /* ------------------------------------------------------------------ */
 
 /**
- * Excel 的工作表名不能含 : \ / ? * [ ]，也不能超过 31 个字符。
- * 违规不会报错，而是**存出一个打不开的文件**，所以这一步不能省。
+ * Excel 工作表名不能含 : \ / ? * [ ]，且不超 31 字符。违规不报错，
+ * 而是存出一个打不开的文件。
  */
 export function sanitizeSheetName(name: string): string {
   const cleaned = (name || "").replace(/[:\\/?*[\]]/g, " ").trim();

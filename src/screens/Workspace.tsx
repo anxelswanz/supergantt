@@ -14,7 +14,7 @@ import { FIXED_COLS_WIDTH, MIN_PANEL_WIDTH, TaskGrid } from "./TaskGrid";
 import { ZOOM_PRESETS, type ZoomPreset, type Viewport } from "../gantt/viewport";
 import { today } from "../gantt/time";
 import { useAppStore } from "../store/useAppStore";
-import { isMod } from "../core/keys";
+import { isMod, shortcut } from "../core/keys";
 import { canEdit, VIEW_LABELS, type ViewMode } from "../core/viewMode";
 import { APP_VIEWS, applyViewOrder, moveView, type BuiltinView } from "../core/views";
 import { useViews, ViewRenderer, type ViewEntry } from "../plugins/usePlugins";
@@ -395,53 +395,53 @@ export function Workspace() {
       style={{ "--accent": accent } as React.CSSProperties}
     >
       {/* 工具条 */}
-      <div className="flex shrink-0 items-center gap-3 border-b border-[var(--rule)] px-3 py-2">
+      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--rule)] py-1.5 pr-2 pl-2">
         <button
           onClick={() => void closeProject()}
-          className="rounded-lg px-2 py-1 text-xs font-medium text-[var(--text-dim)] transition-colors hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
+          title="返回项目列表"
+          className="grid size-7 place-items-center rounded-[var(--r-m)] text-[var(--text-dim)] transition-colors hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
         >
-          ← 项目
+          <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+            <path d="M8.5 3 4.5 7l4 4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
         </button>
 
-        <span className="size-2.5 rounded-full" style={{ background: accent }} />
-        <span className="text-sm font-semibold text-[var(--text)]">{project.name}</span>
+        {/* 项目身份：色条 + 名字，色条是这条工具栏唯一的彩色 */}
+        <span className="h-4 w-[3px] shrink-0 rounded-full" style={{ background: accent }} />
+        <span className="max-w-[240px] truncate text-[13px] font-semibold tracking-[-0.01em] text-[var(--text)]">
+          {project.name}
+        </span>
 
-        {/* 顶层视图。同一批任务的几种问法，切换它不改任何数据。
-            内置的在前，插件注册的接在后面（各带一个分隔点） */}
-        <div className="ml-1 flex items-center gap-1 rounded-full bg-[var(--surface-alt)] p-1">
+        <span className="mx-1 h-4 w-px bg-[var(--rule)]" />
+
+        {/* 顶层视图。同一批任务的几种问法，切换它不改任何数据 */}
+        <div className="seg" role="group" aria-label="视图">
           {views.map((v, i) => (
             <Fragment key={v.key}>
-              {/* 插件的分界点跟着清单走，不写死在内置视图的个数上 ——
-                  用户可以把插件视图拖到内置视图前面，那时这条分隔线也该跟着挪 */}
+              {/* 插件视图与内置视图之间的分界，跟着清单顺序走 */}
               {i > 0 &&
                 v.pluginId !== "builtin" &&
                 views[i - 1]?.pluginId === "builtin" && (
-                  <span className="mx-0.5 h-3 w-px bg-[var(--rule)]" />
+                  <span className="mx-0.5 h-3.5 w-px bg-[var(--rule)]" />
                 )}
               <button
                 ref={tabDrag.tabRef(v.key)}
+                aria-selected={active.key === v.key}
+                aria-pressed={active.key === v.key}
                 onPointerDown={(e) => tabDrag.start(v.key, e)}
                 onClick={() => {
-                  // 拖完松手会再触发一次 click，别在松手时顺手切了视图
+                  // 拖完松手会补发一次 click，跳过它
                   if (tabDrag.consumeJustDragged()) return;
                   setActiveView(v.key);
                 }}
                 title={
-                  // 超出 ⌘9 的视图没有快捷键，别在提示里写一个按不出来的键
                   i < VIEW_HOTKEY_MAX
-                    ? `${v.hint}　⌘${i + 1}　（拖动可调整顺序）`
-                    : `${v.hint}　（拖动可调整顺序）`
+                    ? `${v.hint}　${shortcut("mod", String(i + 1))}`
+                    : v.hint
                 }
-                className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-                  tabDrag.over?.key === v.key
-                    ? "outline outline-1 outline-offset-1 outline-[var(--accent)]"
-                    : ""
-                } ${tabDrag.dragKey === v.key ? "opacity-50" : ""}`}
-                style={
-                  active.key === v.key
-                    ? { background: accent, color: "#fff" }
-                    : { color: "var(--text-dim)" }
-                }
+                className={`${tabDrag.over?.key === v.key ? "outline outline-1 outline-[var(--accent)]" : ""} ${
+                  tabDrag.dragKey === v.key ? "opacity-50" : ""
+                }`}
               >
                 {v.label}
               </button>
@@ -449,21 +449,15 @@ export function Workspace() {
           ))}
         </div>
 
-        {/* 计划 / 实施是**甘特内部**的开关：切的是读哪一组日期。
-            别的视图各有固定的数据归属，给它们一个不起作用的开关只会误导 */}
+        {/* 计划 / 实施只在甘特内部有意义：切的是读哪一组日期 */}
         {activeView === "gantt" && (
-          <div className="flex items-center gap-1 rounded-full border border-[var(--rule)] p-1">
+          <div className="seg" role="group" aria-label="日期口径">
             {(["plan", "actual"] as ViewMode[]).map((m) => (
               <button
                 key={m}
+                aria-pressed={viewMode === m}
                 onClick={() => setViewMode(m)}
-                title={m === "plan" ? "拖拽改的是计划日期" : "拖拽改的是实施日期，并可拖进度"}
-                className="rounded-full px-2.5 py-0.5 text-[11px] font-medium transition-colors"
-                style={
-                  viewMode === m
-                    ? { background: "var(--row-hover)", color: "var(--text)" }
-                    : { color: "var(--text-dim)" }
-                }
+                title={m === "plan" ? "拖动条子改计划日期" : "拖动条子改实施日期，拖右端改进度"}
               >
                 {VIEW_LABELS[m]}
               </button>
@@ -471,101 +465,91 @@ export function Workspace() {
           </div>
         )}
 
-        {/* 对照只在实施侧有意义 —— 它是把计划条叠回来，不是第三张表 */}
         {activeView === "gantt" && viewMode === "actual" && (
           <button
             onClick={() => setCompareOn(!compareOn)}
-            title="叠加显示计划条与偏差天数"
-            className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
-              compareOn
-                ? "border-[var(--accent)] text-[var(--accent)]"
-                : "border-[var(--rule)] text-[var(--text-dim)] hover:text-[var(--text)]"
-            }`}
+            aria-pressed={compareOn}
+            title="叠一层计划条，并标出偏差天数"
+            className="btn"
           >
             对照
           </button>
         )}
 
-        <div className="ml-2 flex items-center gap-1">
+        <div className="ml-1 flex items-center gap-0.5">
           <ToolButton
             disabled={!stack?.canUndo}
             title={stack?.undoLabel ? `撤销「${stack.undoLabel}」` : "撤销"}
             onClick={() => useAppStore.getState().undo()}
           >
-            ↩
+            <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+              <path d="M5 3.5 2.5 6 5 8.5M2.5 6h5.2A3.3 3.3 0 0 1 11 9.3v1.2" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
           </ToolButton>
           <ToolButton
             disabled={!stack?.canRedo}
             title={stack?.redoLabel ? `重做「${stack.redoLabel}」` : "重做"}
             onClick={() => useAppStore.getState().redo()}
           >
-            ↪
+            <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+              <path d="M9 3.5 11.5 6 9 8.5M11.5 6H6.3A3.3 3.3 0 0 0 3 9.3v1.2" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
           </ToolButton>
         </div>
 
-        {/* 事项视图不给「+ 任务」：那一页记的是还没变成任务的东西，
-            新建任务的入口摆在那里只会让人把一句话直接建成一条活 */}
+        {/* 事项视图不给「+ 任务」：那一页记的还没变成任务 */}
         {canEdit("structure", viewMode) && hasTaskOps(activeView) && (
           <NewTaskButton selectedId={selectedId} />
         )}
 
-        <div className="ml-auto flex items-center gap-1">
+        <div className="ml-auto flex items-center gap-1.5">
           {activeView === "gantt" && (
             <>
-              <div className="flex items-center gap-1 rounded-full bg-[var(--surface-alt)] p-1">
+              <div className="seg" role="group" aria-label="缩放">
                 {(Object.keys(ZOOM_PRESETS) as ZoomPreset[]).map((p) => (
                   <button
                     key={p}
+                    aria-pressed={preset === p}
                     onClick={() => jump(p)}
-                    className="rounded-full px-3 py-1 text-xs font-medium transition-colors"
-                    style={
-                      preset === p
-                        ? { background: accent, color: "#fff" }
-                        : { color: "var(--text-dim)" }
-                    }
+                    title={`按${PRESET_LABELS[p]}显示`}
                   >
                     {PRESET_LABELS[p]}
                   </button>
                 ))}
               </div>
 
-              <button
-                onClick={goToday}
-                className="rounded-full border border-[var(--rule)] px-3 py-1 text-xs font-medium text-[var(--text-dim)] transition-colors hover:text-[var(--text)]"
-              >
+              <button onClick={goToday} className="btn" title={`回到今天（T）`}>
                 今天
               </button>
             </>
           )}
         </div>
 
-        {/* 放在工具条而不是设置面板里：导出是面向产出的动作，不是配置。
-            埋进设置里等于没有 —— 需要它的人正准备开周会，不会想到去齿轮图标下面翻。
-            时间线自己那份 HTML 导出在 TimelineView 里，跟着它的内容走。
-            只在甘特视图出现：它导的是甘特图，在事项页点它得到的却是一张排期表，
-            而事项页自己有一颗导出按钮 —— 两颗「导出」并排，没人知道该点哪个 */}
+        {/* 导出是面向产出的动作，不进设置面板；只在甘特出现，因为导的是甘特图 */}
         {activeView === "gantt" && (
           <ExportButton
-            label="⤓ 导出"
-            title="把整个项目导出成 Excel：甘特图 + 风险点记录"
+            label="导出"
+            title="导出 Excel：甘特图与风险点"
             run={async () => (await import("../export/run")).exportProjectToExcel()}
           />
         )}
 
         <button
           onClick={() => openSettings("appearance")}
-          title="设置：着色、负责人、工作日历、数据"
-          className="grid size-9 place-items-center rounded-lg text-[19px] leading-none text-[var(--text-dim)] transition-colors hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
+          title="设置"
+          className="grid size-7 place-items-center rounded-[var(--r-m)] text-[var(--text-dim)] transition-colors hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
         >
-          ⚙
+          <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.3">
+            <circle cx="8" cy="8" r="2.2" />
+            <path d="M8 1.6v1.6M8 12.8v1.6M1.6 8h1.6M12.8 8h1.6M3.5 3.5l1.1 1.1M11.4 11.4l1.1 1.1M12.5 3.5l-1.1 1.1M4.6 11.4l-1.1 1.1" strokeLinecap="round" />
+          </svg>
         </button>
 
         <SaveIndicator error={saveError} />
       </div>
 
       <div ref={bodyRef} className="flex min-h-0 flex-1">
-        {/* 甘特：左网格 + 右画布。别的视图各自占满，不带网格 ——
-            网格是甘特的一部分（行必须逐行对齐），不是全局的侧栏 */}
+        {/* 甘特：左网格 + 右画布，两边逐行对齐 */}
         {active.key === "gantt" && (
           <>
             <TaskGrid
@@ -575,7 +559,7 @@ export function Workspace() {
               onScroll={setScrollY}
             />
 
-            {/* 分隔条：命中区 9px，视觉 1px —— 抓得住又不抢视觉 */}
+            {/* 命中区 9px，视觉 1px */}
             <div
               onPointerDown={startResize}
               onDoubleClick={() => {
@@ -597,8 +581,6 @@ export function Workspace() {
           </>
         )}
 
-        {/* 其余视图：内置的各自占满，插件的由注册表提供组件。
-            插件的走 PluginBoundary + data-plugin 作用域（见 usePlugins） */}
         {active.key !== "gantt" && (
           <ViewRenderer view={active} fallback={BUILTIN_BODIES[active.key]} />
         )}
@@ -612,107 +594,71 @@ export function Workspace() {
         )}
       </AnimatePresence>
 
-      {/* 快速记录。挂在工作区根层而不是事项视图里 —— ⌘K 在五个视图下都能按，
-          而事项视图多半没开着 */}
+      {/* ⌘K 在所有视图下都能用，所以挂在根层 */}
       <QuickNote />
 
-      {/* 状态栏：把快捷键摆在明面上，否则没人会发现它们 */}
-      <div className="flex shrink-0 items-center gap-4 border-t border-[var(--rule)] px-3 py-1.5 text-[10px] text-[var(--text-dim)]">
-        <span className="font-medium text-[var(--text)]">
-          ⌘1–{Math.min(views.length, VIEW_HOTKEY_MAX)} 切视图
-        </span>
+      {/* 状态栏：只列当前视图用得上的快捷键 */}
+      <div className="flex h-7 shrink-0 items-center gap-3.5 overflow-hidden border-t border-[var(--rule)] bg-[var(--surface-alt)] px-3 text-[11px] whitespace-nowrap text-[var(--text-dim)]">
+        <Key k={shortcut("mod", "K")}>记一条</Key>
         {hasTaskOps(activeView) && (
           <>
-            <span>Enter 新建</span>
-            <span>⇧Enter 子任务</span>
-            <span>⌘] / ⌘[ 缩进</span>
+            <Key k={shortcut("↵")}>新建</Key>
+            <Key k={shortcut("shift", "↵")}>子任务</Key>
+            <Key k={`${shortcut("mod", "]")} ${shortcut("mod", "[")}`}>缩进</Key>
           </>
         )}
-        <span>⌘Z 撤销</span>
-        {hasTaskOps(activeView) && <span>⌫ 删除</span>}
-        <span className="font-medium text-[var(--text)]">⌘K 记一条</span>
         <HintsFor view={active} viewMode={viewMode} />
       </div>
     </motion.div>
   );
 }
 
-/**
- * 状态栏里随视图变的那一段。
- *
- * 快捷键摆在明面上，否则没人会发现它们；但把每个视图的提示全列出来
- * 又会让这一行长到看不完 —— 只显示当前视图用得上的。
- *
- * 参数是视图**元信息**而不是 key：插件视图的提示只有注册表知道，本组件
- * 不该再去查一次。
- */
+/** 一条快捷键提示：键帽 + 动作 */
+function Key({ k, children }: { k: string; children: React.ReactNode }) {
+  return (
+    <span className="flex items-center gap-1.5">
+      <kbd className="rounded-[var(--r-s)] border border-[var(--rule)] bg-[var(--surface)] px-1 text-[10px] leading-[16px] font-medium text-[var(--text)]">
+        {k}
+      </kbd>
+      {children}
+    </span>
+  );
+}
+
+/** 状态栏里随视图变的那一段 */
 function HintsFor({ view, viewMode }: { view: ViewEntry; viewMode: ViewMode }) {
   switch (view.key) {
     case "gantt":
       return (
         <>
-          <span>⌘滚轮 缩放</span>
-          <span>1–4 缩放档位</span>
-          <span>T 今天</span>
-          <span>⌥↑↓ 移动</span>
-          <span>⌥拖 标受阻</span>
-          <span>右键某天 记一笔</span>
-          <span>双击行看详情</span>
-          <span className="ml-auto">
-            {viewMode === "plan" ? "拖拽改计划日期" : "拖拽改实施日期 · 可拖进度"}
+          <Key k={`${shortcut("mod")}滚轮`}>缩放</Key>
+          <Key k="T">今天</Key>
+          <Key k={shortcut("alt", "↑↓")}>移动</Key>
+          <Key k={`${shortcut("alt")}拖`}>标受阻</Key>
+          <span>右键某天记一笔</span>
+          <span className="ml-auto text-[var(--text)]">
+            {viewMode === "plan" ? "拖动改计划日期" : "拖动改实施日期和进度"}
           </span>
         </>
       );
     case "board":
-      return (
-        <>
-          <span>拖卡片改状态</span>
-          <span>双击卡片看详情</span>
-          <span className="ml-auto">列是算出来的，没有单独的状态字段</span>
-        </>
-      );
-    case "timeline":
-      return (
-        <>
-          <span>按天倒序</span>
-          <span className="ml-auto">受阻、风险、当日记录都落在它们发生的那天</span>
-        </>
-      );
+      return <span>拖卡片改状态，双击看详情</span>;
     case "review":
-      return <span className="ml-auto">只读 · 数据来自计划与实施两组日期的差</span>;
+      return <span className="ml-auto">只读，按计划与实施的差值统计</span>;
     case "ai-review":
-      return (
-        <>
-          <span>每答一题即存，可随时离开</span>
-          <span className="ml-auto">数据表由程序按快照生成 · 叙述与归因由 Claude 撰写</span>
-        </>
-      );
+      return <span>每答一题即存，可随时离开</span>;
     case "items":
-      return (
-        <>
-          <span>点类型标签分拣</span>
-          <span>点圆圈关闭</span>
-          <span>拖 ⋮⋮ 调整顺序</span>
-          <span className="ml-auto">
-            阻碍和风险是实体，在这里改会同步到看板和复盘
-          </span>
-        </>
-      );
+      return <span>点类型标签分拣，点圆圈关闭，拖动调整顺序</span>;
     case "milestone":
-      return (
-        <>
-          <span>点名称编辑</span>
-          <span>拖 ⋮⋮ 调整顺序</span>
-          <span className="ml-auto">设好日期的里程碑会画在甘特图顶部</span>
-        </>
-      );
+      return <span className="ml-auto">设了日期的里程碑会画在甘特图顶部</span>;
+    case "timeline":
+      return null;
     default:
-      // 插件视图：宿主猜不出它的快捷键，就显示它自己写的那句提示，
-      // 并标明它来自插件 —— 出了问题用户要知道该去找谁
+      // 插件视图：标明来源，出了问题用户知道该找谁
       return (
         <span className="ml-auto">
           {view.hint}
-          <span className="ml-2 opacity-60">· 插件</span>
+          <span className="ml-2 opacity-60">插件</span>
         </span>
       );
   }
@@ -737,64 +683,52 @@ function ToolButton({
       disabled={disabled}
       title={title}
       onClick={onClick}
-      className="grid size-7 place-items-center rounded-lg text-sm text-[var(--text-dim)] transition-colors hover:bg-[var(--row-hover)] hover:text-[var(--text)] disabled:pointer-events-none disabled:opacity-30"
+      className="grid size-7 place-items-center rounded-[var(--r-m)] text-[var(--text-dim)] transition-colors hover:bg-[var(--row-hover)] hover:text-[var(--text)] disabled:pointer-events-none disabled:opacity-30"
     >
       {children}
     </button>
   );
 }
 
-/**
- * 只在**保存失败**时出现。
- *
- * 常态下的「已保存 / 保存中」是纯噪音 —— 它每隔几秒闪一次，却从不传递
- * 需要用户行动的信息。但失败必须明说：假装已保存是本地应用最不能犯的错，
- * 用户会在毫不知情的情况下关掉窗口。
- */
+/** 只在保存失败时出现：常态的「已保存」是噪音，失败必须明说 */
 function SaveIndicator({ error }: { error: unknown }) {
   if (!error) return null;
   return (
     <span
-      className="rounded-full bg-rose-500/12 px-2.5 py-1 text-xs font-medium text-rose-500"
-      title={`${error}\n数据仍在内存中，⌘S 可重试`}
+      className="flex items-center gap-1.5 rounded-[var(--r-m)] bg-[var(--danger)]/10 px-2 py-1 text-xs font-medium text-[var(--danger)]"
+      title={`${error}\n改动还在内存里，按 ${shortcut("mod", "S")} 重试`}
     >
-      ● 未保存
+      <span className="size-1.5 rounded-full bg-[var(--danger)]" />
+      未保存
     </span>
   );
 }
 
-/**
- * 新建任务：一个分体式按钮。
- *
- * 之前工具条上并排摆着「+ 任务 / + 子任务 / 删除」三个同等重量的按钮，
- * 既占地方，也把一个破坏性操作和两个建设性操作放在了同一排 ——
- * 手滑的代价不对等。
- *
- * 现在：主按钮承担最高频的「新建同级」，箭头折叠掉低频的变体；
- * 删除下沉到每一行自己的 ⋯ 菜单里 —— 那里它作用于哪个对象是明确的，
- * 而不是含糊的「当前选中项」。
- */
+/** 分体按钮：主按钮新建同级，箭头里是子任务。删除放在每行的 ⋯ 菜单 */
 function NewTaskButton({ selectedId }: { selectedId: number | null }) {
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
 
   return (
-    <div className="flex items-stretch overflow-hidden rounded-lg border border-[var(--rule)]">
+    <div className="flex h-[26px] items-stretch overflow-hidden rounded-[var(--r-m)] bg-[var(--accent)] text-[var(--on-accent)]">
       <button
         onClick={() => useAppStore.getState().addTaskAfter(selectedId)}
-        title="在选中行紧后面新建同级任务（Enter）"
-        className="px-2.5 py-1 text-xs font-medium text-[var(--text-dim)] transition-colors hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
+        title="在选中行后新建同级任务（Enter）"
+        className="px-2.5 text-xs font-semibold transition-colors hover:bg-black/10"
       >
         + 任务
       </button>
-      <span className="w-px bg-[var(--rule)]" />
+      <span className="my-1.5 w-px bg-current opacity-25" />
       <button
         ref={setAnchor}
         onClick={() => setOpen((v) => !v)}
-        title="更多新建方式"
-        className="px-1.5 text-[9px] text-[var(--text-dim)] transition-colors hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
+        title="新建子任务"
+        aria-label="更多新建方式"
+        className="grid w-6 place-items-center transition-colors hover:bg-black/10"
       >
-        ▼
+        <svg width="8" height="8" viewBox="0 0 8 8" aria-hidden="true">
+          <path d="M1.5 3 4 5.5 6.5 3" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
       </button>
 
       <Popover anchor={anchor} open={open} onClose={() => setOpen(false)} width={176}>
@@ -830,16 +764,7 @@ function NewTaskButton({ selectedId }: { selectedId: number | null }) {
 /** 起手阈值，和事项页的行拖拽一致 —— 手抖不算拖 */
 const TAB_DRAG_THRESHOLD = 4;
 
-/**
- * 顶部视图标签的拖拽排序。
- *
- * 为什么自己写而不是引一个库：这里要的只有「按住、横向挪、松手落在哪两个
- * 标签之间」，而库会带进一套 DOM 结构和 CSS，还可能和现有 tabular 布局打架。
- * 三个标签的状态、二十行指针事件，比一个新依赖便宜。
- *
- * 指针事件而不是 HTML5 draggable：Tauri 在 Windows 上接管了窗口拖放，
- * HTML5 那套在那里失效（和事项页、看板卡片同一条理由）。
- */
+/** 视图标签的拖拽排序。用指针事件：Tauri 在 Windows 上接管了 HTML5 拖放 */
 function useTabDrag(onDrop: (from: string, to: string, place: "before" | "after") => void) {
   const tabs = useRef(new Map<string, HTMLElement>());
   const dropRef = useRef(onDrop);
@@ -860,12 +785,7 @@ function useTabDrag(onDrop: (from: string, to: string, place: "before" | "after"
     else tabs.current.delete(key);
   };
 
-  /**
-   * 只按横轴判落点。
-   *
-   * 标签是一行排开的，纵轴没有意义 —— 用 y 判断会把「拖到稍高一点的按钮上」
-   * 算成没命中。用 x 的中点决定插在前面还是后面。
-   */
+  /** 只按横轴判落点，中点决定插前还是插后 */
   const targetAt = (x: number, self: string) => {
     for (const [key, el] of tabs.current) {
       if (key === self) continue;

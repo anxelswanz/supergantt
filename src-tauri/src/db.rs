@@ -1,45 +1,20 @@
-//! Tauri 命令薄层。
-//!
-//! 真正的逻辑全在 `gantt-core` 里 —— schema、查询、写入、日期助手。
-//! 这里只剩下三件 Tauri 侧才有意义的事：
-//!
-//! 1. **把 `State<Db>` 里的 Mutex 锁起来**（core 只知道 `&Connection`）
-//! 2. **保持前端看到的命令签名一字不变**（前端一行都不用改）
-//! 3. **把错误收成 `Result<T, String>`**（core 已经是这个约定）
-//!
-//! 为什么值得这层包装而不是让前端直接调 core：core 不该知道 Tauri 的存在。
-//! 它同时被 CLI 和桌面应用链接，一旦 import 了 `tauri::State`，
-//! 「离线 CLI」就再也编不出来了。
-//!
-//! ⚠️ 下面的 `pub use` 不是装饰。`dbfile.rs` / `transfer.rs` / `backup.rs`
-//! 里写的是 `crate::db::open`、`crate::db::Project`、`use crate::db::{Db, MIGRATIONS}`，
-//! 靠这几行重导出才继续有效 —— 所以它们搬去 core 之后，那些文件一个字都不用改。
+//! Tauri 命令薄层：只锁 Mutex、保持命令签名、把错误收成 `Result<T, String>`，逻辑在 `gantt-core`。
+//! `pub use` 不能删：dbfile/transfer/backup 走的是 `crate::db::open` 这些路径。
 
 use gantt_core::model::*;
 use gantt_core::query;
 use rusqlite::Connection;
 use std::sync::Mutex;
 
-// —— 把 core 的公开面按原路径再导出一遍 ——
 pub use gantt_core::model::Result;
 pub use gantt_core::query::name_taken;
-// `repair` 不在这里露出来：它由 `migrate` 内部调用，crate 里没人单独点名它。
+// `repair` 由 `migrate` 内部调用，不导出
 pub use gantt_core::schema::{migrate, open, MIGRATIONS};
 
-/// 前端拿到的是「一个连接 + 一把锁」，不是任意 SQL 的能力。
-///
-/// 用 Mutex 而不是连接池：桌面应用是单用户单窗口，所有写都从命令线程来，
-/// 争用为零；而 SQLite 的单写者模型本来就串行，多开连接只是把排队挪个地方。
+/// 一个连接 + 一把锁。单用户单窗口，不需要连接池。
 pub struct Db(pub Mutex<Connection>);
 
-// —— 命令实现的公共前缀 ——
-//
-// 每个命令的第一句都是「拿到锁」。写成一个宏，省得 33 个函数里
-// 复制 33 遍同样的 `.map_err(|e| e.to_string())`，也让「锁中毒怎么办」
-// 只有一处需要想。
-
-/// 锁住连接并执行。Mutex 中毒（某个命令 panic 时发生）不当作致命错误：
-/// 数据库文件本身是完好的，重建连接即可，没必要让整个应用报废。
+/// 锁住连接并执行。Mutex 中毒不当作致命错误：库文件完好，重建连接即可。
 macro_rules! with_conn {
     ($db:expr, $conn:ident => $body:expr) => {{
         let $conn = $db.0.lock().map_err(|e| e.to_string())?;
@@ -259,7 +234,7 @@ pub fn delete_item_note(db: tauri::State<Db>, id: i64) -> Result<()> {
     with_conn!(db, conn => query::delete_item_note(&conn, id))
 }
 
-/// 分拣成风险。开事务，所以要 `&mut Connection` —— 不走宏。
+/// 分拣成风险。要开事务，需 `&mut Connection`，不走宏。
 #[tauri::command]
 pub fn promote_note_to_risk(
     db: tauri::State<Db>,
@@ -282,7 +257,7 @@ pub fn promote_note_to_blocker(
     with_conn!(db, conn => query::promote_note_to_blocker(&conn, note_id, promoted_ref))
 }
 
-/// 撤销分拣。返回原来的引用，前端据此摘掉对应的阻碍区间。
+/// 撤销分拣。返回原引用，前端据此摘掉对应阻碍区间。
 #[tauri::command]
 pub fn unpromote_note(db: tauri::State<Db>, note_id: i64) -> Result<Option<String>> {
     let mut conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -318,7 +293,7 @@ pub fn save_item_kind(
     with_conn!(db, conn => query::save_item_kind(&conn, key, label, color, requires_note))
 }
 
-/// 删一个自定义类型。返回被退回「未分拣」的事项条数。
+/// 删自定义类型。返回被退回「未分拣」的事项条数。
 #[tauri::command]
 pub fn delete_item_kind(db: tauri::State<Db>, key: String) -> Result<i64> {
     let mut conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -329,10 +304,7 @@ pub fn delete_item_kind(db: tauri::State<Db>, key: String) -> Result<i64> {
 /* 整项目保存                                                          */
 /* ------------------------------------------------------------------ */
 
-/// 前端唯一的重活。防抖 400ms 一次，把内存里那份完整任务表发过来。
-///
-/// 这里是全项目唯一需要 `&mut Connection` 的写路径（core 里要开事务），
-/// 所以宏的 `$conn` 得是 mut 绑定 —— 见下面的显式写法，不用宏。
+/// 全项目保存，前端防抖 400ms 发来完整任务表。要开事务，需 `&mut Connection`，不走宏。
 #[tauri::command]
 pub fn save_project(
     db: tauri::State<Db>,

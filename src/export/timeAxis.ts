@@ -1,16 +1,6 @@
 /**
- * 导出用的时间轴分桶。
- *
- * 屏幕上的时间轴是**连续**的：pxPerDay 是浮点数，刻度层随缩放淡入淡出，
- * 一根条子可以从某天的 37% 处开始。Excel 给不了这些 —— 单元格是离散的格子，
- * 一个格子要么属于这根条子要么不属于。
- *
- * 所以导出不能复用 viewport/scale，得先把时间**分桶**：一列 = 一个桶。
- * 桶的粒度按项目总跨度选，让列数永远落在一屏能看完的范围内 ——
- * 一个三年的项目摊成 1095 列，横向拉到天荒地老，等于没导出。
- *
- * 这个文件是纯函数，不碰 exceljs 也不碰 DOM，因为分桶和填充判定正是最容易
- * 出差一天错误的地方，必须能单测。
+ * 导出用的时间轴分桶：Excel 单元格是离散的，不能复用连续的 viewport/scale，一列 = 一个桶。
+ * 粒度按项目总跨度选，保证列数一屏看得完。纯函数，便于单测差一天的错误。
  */
 
 import { dayToDate } from "../gantt/time";
@@ -30,7 +20,7 @@ export interface Bucket {
   rest: boolean;
 }
 
-/** 列数的上限。超过这个数就降一档粒度 —— 见文件头的理由。 */
+/** 列数上限，超过就降一档粒度 */
 const MAX_DAY_COLUMNS = 120;
 const MAX_WEEK_COLUMNS = 90;
 
@@ -58,11 +48,7 @@ function daysInMonth(day: number): number {
 }
 
 /**
- * 把 [fromDay, toDay] 切成桶。
- *
- * 两端会**外扩到桶边界**：周粒度下项目从周三开始，那一列仍然是完整的一周，
- * 否则第一列的宽度含义和其他列不一样，条子的长度就不可比了。
- *
+ * 把 [fromDay, toDay] 切成桶。两端外扩到桶边界，保证每列宽度含义一致。
  * @param isRest 判断某天是否不干活；只在日粒度下会被调用
  */
 export function buildBuckets(
@@ -122,13 +108,8 @@ export function buildBuckets(
 export type CellKind = "none" | "track" | "fill" | "milestone";
 
 /**
- * 求一根条子在每个桶里占什么。
- *
- * 进度用「已完成边界日」表达：边界 = 开始 + 工期 × 进度。落在边界之前的桶画实心，
- * 之后的画轨道 —— 和屏幕上「实心比例 = 进度」是同一个语义，只是量化到了格子。
- *
- * 判定用的是**桶与条子交集**的中点，不是桶自己的中点：月粒度下条子只占某月
- * 最后三天时，拿整月中点去比会把它判成未开始，条子会整根变成轨道色。
+ * 求一根条子在每个桶里占什么。边界 = 开始 + 工期 × 进度，之前画实心、之后画轨道。
+ * 判定用桶与条子交集的中点，不是桶中点：否则月粒度下只占月末三天的条子会被判成未开始。
  */
 export function barCells(
   task: { startDay: number; endDay: number; progress: number; milestone: boolean },
@@ -160,13 +141,7 @@ export function barCells(
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
-/**
- * 把带透明度的颜色压平成实色。
- *
- * Excel 的填充色是 ARGB，但绝大多数渲染器（含 Excel 自己）忽略 A 通道 ——
- * 直接把 rgba 塞进去，18% 的淡色轨道会变成 100% 的实色，整张图糊成一片。
- * 所以透明度必须在这里就与白纸合成掉。
- */
+/** 把带透明度的颜色与白纸合成为实色：Excel 等渲染器忽略 ARGB 的 A 通道。 */
 export function flatten(hex: string, alpha: number, over = [255, 255, 255]): string {
   const n = parseInt(hex.slice(1), 16);
   const rgb = [(n >> 16) & 255, (n >> 8) & 255, n & 255];

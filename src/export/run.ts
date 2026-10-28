@@ -1,15 +1,4 @@
-/**
- * 导出的编排层：取数据 → 生成文件内容 → 让用户选路径 → 落盘。
- *
- * 内容全部在前端生成，Rust 只负责写字节（见 src-tauri/src/export.rs 的说明）。
- *
- * 四个出口，对应四种问法：
- *   · Excel     —— 按任务排的排期表，给人核计划用
- *   · 时间线    —— 按日期排的流水，给人看「那几天到底发生了什么」
- *   · 事项类型  —— 这个团队把事情分成哪几类，给人对口径用
- *   · 事项清单  —— 事项视图里筛出来的那些，Excel 或 Word，发给相关的人
- *   · AI 复盘   —— 那份问出来、写出来的复盘文档，Markdown 或 Word
- */
+// 导出的编排层：取数据 → 生成内容 → 选路径 → 落盘。内容全在前端生成，Rust 只负责写字节。
 
 import { save } from "@tauri-apps/plugin-dialog";
 import { api } from "../db/api";
@@ -24,16 +13,14 @@ export interface ExportResult {
 }
 
 export async function exportProjectToExcel(): Promise<ExportResult> {
-  // exceljs 有 900KB，只在真的要导 Excel 时才拉进来 ——
-  // 否则导一份 HTML 时间线也得先把它下载解析一遍
+  // exceljs 有 900KB，只在真要导 Excel 时才动态加载
   const { buildWorkbook, safeFileName } = await import("./excel");
 
   const state = useAppStore.getState();
   const { project, tasks: taskMap, people, calendar, colorBy } = state;
   if (!project) throw new Error("没有打开的项目");
 
-  // 折叠是看屏幕时的浏览状态，不是项目内容 —— 导出一律展开，
-  // 否则发出去的文件会静默少掉一整棵子树（resolve() 会过滤掉折叠分支）
+  // 折叠是浏览状态不是内容，导出一律展开 —— resolve() 会过滤掉折叠分支
   const tasks = resolve(
     [...taskMap.values()].map((t) => ({ ...t, collapsed: false })),
   );
@@ -52,8 +39,7 @@ export async function exportProjectToExcel(): Promise<ExportResult> {
     exportedAt,
   });
 
-  // 先生成再弹对话框：生成失败时用户还没做任何选择，不会出现
-  // 「选完路径才告诉你导不出来」
+  // 先生成再弹对话框，避免用户选完路径才知道导不出来
   const buffer = await workbook.xlsx.writeBuffer();
 
   const path = await save({
@@ -67,11 +53,8 @@ export async function exportProjectToExcel(): Promise<ExportResult> {
 }
 
 /**
- * 时间线 → 单文件 HTML。
- *
- * 逐日记录这里重新从库里查一遍，不用 store 里那份：导出前刚 flush 过，
- * 库是当下唯一确定的口径；而风险本来就只有库里有。两边取同一个源头，
- * 导出件里不会出现「记录里提到的事，风险表里查无此项」。
+ * 时间线 → 单文件 HTML。逐日记录与风险都现查库（导出前刚 flush），
+ * 不用 store 里那份，保证导出件内部口径一致。
  */
 export async function exportTimelineToHtml(
   /** 时间线上正筛着的那段日期；不筛就是 null，导出全部 */
@@ -81,7 +64,7 @@ export async function exportTimelineToHtml(
   const { project, tasks: taskMap, people } = state;
   if (!project) throw new Error("没有打开的项目");
 
-  // 同 Excel：折叠是浏览状态，不是内容 —— 导出一律展开
+  // 同 Excel：导出一律展开
   const tasks = resolve(
     [...taskMap.values()].map((t) => ({ ...t, collapsed: false })),
   );
@@ -115,10 +98,8 @@ export async function exportTimelineToHtml(
 }
 
 /**
- * ArrayBuffer → base64。
- *
- * 必须分块：`String.fromCharCode(...bytes)` 在几十万字节上会把参数一次性铺到
- * 调用栈里，直接 RangeError。8KB 一块远低于任何引擎的参数上限。
+ * ArrayBuffer → base64。必须分块：几十万字节一次性 spread 进
+ * String.fromCharCode 会撑爆调用栈（RangeError）。
  */
 function toBase64(buffer: ArrayBuffer | Uint8Array): string {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
@@ -131,13 +112,8 @@ function toBase64(buffer: ArrayBuffer | Uint8Array): string {
 }
 
 /**
- * 事项类型清单 → Excel。
- *
- * 入口在「设置 → 事项类型」那一页，不在工具条上：它是一份配置的快照，
- * 不是项目产出。会去导它的人正在那一页维护类型，手边就有按钮。
- *
- * 使用数只统计**当前项目**（`item_kinds` 是全局表，`item_notes` 按项目分，
- * 手里只有当前这一个项目的事项）。这件事写在列名和表头上 —— 见 itemKinds.ts。
+ * 事项类型清单 → Excel。使用数只统计当前项目：item_kinds 是全局表、
+ * item_notes 按项目分，范围写在列名和表头上（见 itemKinds.ts）。
  */
 export async function exportItemKindsToExcel(): Promise<ExportResult> {
   const { buildItemKindsWorkbook, itemKindsFileName } = await import("./itemKinds");
@@ -153,7 +129,7 @@ export async function exportItemKindsToExcel(): Promise<ExportResult> {
     exportedAt,
   });
 
-  // 同 Excel 那条路：先生成再弹对话框，不让用户选完路径才知道导不出来
+  // 先生成再弹对话框
   const buffer = await workbook.xlsx.writeBuffer();
 
   const path = await save({
@@ -167,15 +143,14 @@ export async function exportItemKindsToExcel(): Promise<ExportResult> {
 }
 
 /**
- * 事项清单 → Excel 或 Word。导出的是**屏幕上那张清单**（筛过、排过序的），
- * 所以行由调用方（事项视图）传进来，这里不再自己筛一遍 —— 两处各筛一次，
- * 迟早会出现「屏幕上 5 条、文件里 6 条」。
+ * 事项清单 → Excel 或 Word。导出屏幕上那张清单（已筛选排序），
+ * 行由调用方传入，这里不再筛一遍。
  */
 export async function exportItems(
   format: "xlsx" | "docx",
   input: Omit<import("./items").ItemsExportInput, "projectName" | "exportedAt">,
 ): Promise<ExportResult> {
-  // exceljs 和 docx 都在 items.ts 里，导出时才拉进来
+  // exceljs 和 docx 都在 items.ts 里，导出时才动态加载
   const { buildItemsWorkbook, buildItemsDocx, itemsFileName } = await import("./items");
 
   const { project } = useAppStore.getState();
@@ -183,7 +158,7 @@ export async function exportItems(
   const exportedAt = new Date();
   const full = { ...input, projectName: project.name, exportedAt };
 
-  // 同另外几条路：先生成再弹对话框，不让用户选完路径才知道导不出来
+  // 同另外几条路：先生成再弹对话框
   let bytes: ArrayBuffer;
   if (format === "xlsx") {
     bytes = (await buildItemsWorkbook(full).xlsx.writeBuffer()) as ArrayBuffer;
@@ -207,10 +182,8 @@ export async function exportItems(
 }
 
 /**
- * AI 复盘文档 → Markdown 或 Word。
- *
- * 内容由调用方给，不从 store 里取：用户可能正在编辑框里改到一半，导出的
- * 必须是他眼前那一版，而不是上一次存下来的那一版。
+ * AI 复盘文档 → Markdown 或 Word。内容由调用方传入，不从 store 取：
+ * 用户可能正改到一半，导出的必须是他眼前那一版。
  */
 export async function exportAiReview(
   format: "md" | "docx",

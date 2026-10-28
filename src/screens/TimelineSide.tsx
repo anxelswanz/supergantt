@@ -1,16 +1,10 @@
-/**
- * 时间线右栏：任务履历。
- *
- * 左边的流水按天排，一件活的「开工」和「完成」可能隔着几十行。这一栏把它们
- * 配成一对 —— 数据来自 core/timeline.buildCareers，这里只管摆。
- * 一件活一张卡：起止、耗时、中间卡了几天。
- */
+/** 时间线右栏：任务履历，数据来自 core/timeline.buildCareers */
 
 import type { Career } from "../core/timeline";
 import { dayToIso } from "../gantt/time";
 
 const DONE = "#10b981";
-const STUCK = "#f43f5e";
+const STUCK = "var(--danger)";
 const LIVE = "var(--accent)";
 
 const md = (day: number) => dayToIso(day).slice(5);
@@ -20,33 +14,32 @@ const tint = (color: string, pct: number) =>
 
 interface Props {
   careers: Career[];
-  /** 点日期：左边流水滚到那天 */
+  /** 点日期，左边流水滚到那天 */
   onJump: (day: number) => void;
   onOpen: (taskId: number) => void;
 }
 
 export function TimelineSide({ careers, onJump, onOpen }: Props) {
   const live = careers.filter((c) => c.end == null).length;
-  // 各件活的受阻天数直接相加：这里问的是「一共耽误了多少人天」，不是日历上废了几天
+  // 各任务受阻天数相加，即人天，不是日历天数
   const stuck = careers.reduce((sum, c) => sum + c.blockedDays, 0);
 
   return (
     <div className="px-7 pb-16 pt-7">
-      {/* 标题和下面那条概览，尺寸跟左边流水的一模一样：
-          两栏的横线得落在同一条水平线上，否则并排看是歪的 */}
+      {/* 尺寸与左边流水一致，两栏横线水平对齐 */}
       <div className="mb-4">
         <h3 className="text-[19px] font-semibold leading-tight tracking-tight text-[var(--text)]">
           任务履历
         </h3>
         <p className="mt-1 text-[11px] text-[var(--text-dim)]">
-          每件活从开工到完成，中间卡了几天
+          每条任务从开工到完成，中间受阻几天
         </p>
       </div>
 
       <div className="mb-6 flex min-h-9 items-center gap-x-3 border-y border-[var(--rule)] py-1.5 font-mono text-[11px] tabular-nums text-[var(--text-dim)]">
         <span className="flex items-center gap-1.5">
           <span className="size-[6px] rounded-full" style={{ background: LIVE }} />
-          在干
+          进行中
           <b className="font-semibold text-[var(--text)]">{live}</b>
         </span>
         <span className="flex items-center gap-1.5">
@@ -63,9 +56,9 @@ export function TimelineSide({ careers, onJump, onOpen }: Props) {
 
       {careers.length === 0 ? (
         <div className="rounded-xl border border-dashed border-[var(--rule)] px-3 py-8 text-center text-[11px] leading-relaxed text-[var(--text-dim)]">
-          还没有开工的活。
+          还没有开工的任务。
           <br />
-          填了实施开始日的任务会出现在这里。
+          填写实施开始日后会出现在这里。
         </div>
       ) : (
         <Cards careers={careers} onJump={onJump} onOpen={onOpen} />
@@ -104,13 +97,13 @@ function Cards({ careers, onJump, onOpen }: Props) {
               </span>
             </div>
 
-            {/* 这条是时间，不是进度：左端开工，右端完成（或今天），红的是卡住的那几天 */}
+            {/* 时间轴：左端开工，右端完成或今天，红色是受阻的那几天 */}
             <div
               className="relative mt-2.5 h-[5px] overflow-hidden rounded-full"
               style={{
                 background: done
                   ? color
-                  : // 还在干的右端渐隐：它没有终点，画成实心的会被读成「到此为止」
+                  : // 未完成的右端渐隐，避免被读成终点
                     `linear-gradient(90deg, ${color} 55%, ${tint(color, 25)})`,
               }}
             >

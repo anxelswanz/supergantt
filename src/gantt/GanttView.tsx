@@ -21,12 +21,7 @@ import { useAppStore } from "../store/useAppStore";
 import { activeSpan } from "../core/viewMode";
 import { resolveDark } from "../core/themeMode";
 
-/**
- * 甘特图画布。
- *
- * 三层 Canvas 叠加，各自独立判断是否重绘。拖拽过程中静态层和内容层完全不动，
- * 只有交互层每帧刷新 —— 这是「不掉帧」的结构保证（DESIGN.md §6.2）。
- */
+/** 甘特图画布：三层 Canvas 各自判脏重绘，拖拽时只刷交互层。 */
 
 export interface GanttHandle {
   zoomToPreset: (p: ZoomPreset) => void;
@@ -35,14 +30,7 @@ export interface GanttHandle {
   currentPreset: () => ZoomPreset;
 }
 
-/**
- * 按下到松手之间挪多少像素才算「拖动」而不是「单击」。
- *
- * 取 4px：比人手最轻微的抖动大一点，又比「一个整列都挪不到」小得多。
- * 用日期差值去判是错的 —— 缩到「月」时 20px 都不足一天，一次明显的拖动
- * 会因为 deltaDays === 0 被误判成单击，于是「拖一下」变成「照原样采用计划」，
- * 两者结果一样但标签不同，撤销栈里会多出一条莫名其妙的记录。
- */
+/** 拖动/单击判定阈值（px）。不能按日期差判：月视图下 20px 不足一天，拖动会被误判成单击。 */
 const CLICK_SLOP = 4;
 
 interface Props {
@@ -60,7 +48,7 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
   const openDetail = useAppStore((s) => s.openDetail);
   const viewMode = useAppStore((s) => s.viewMode);
   const compareOn = useAppStore((s) => s.compareOn);
-  const projectColor = useAppStore((s) => s.project?.color ?? "#6366f1");
+  const projectColor = useAppStore((s) => s.project?.color ?? "#2f6d5e");
   const selectedId = useAppStore((s) => s.selectedId);
   const select = useAppStore((s) => s.select);
   const run = useAppStore((s) => s.run);
@@ -70,18 +58,12 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
 
   const tasks = useMemo(
     () => resolve([...taskMap.values()]),
-    // revision 是就地修改的 Map 的变化信号，见 useAppStore 的说明
+    // revision 是就地修改的 Map 的变化信号
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [taskMap, revision],
   );
 
-  /**
-   * 项目级里程碑 → 画布要的形状。
-   *
-   * 日期读不懂的条目直接丢掉：它本来就不该被写进库（库层校验过），
-   * 但导入的旧库或者手工改过的库可能带着坏值 —— 为一条坏日期让整个
-   * 画布抛异常，用户会看到一个空白的甘特图，且完全不知道原因。
-   */
+  /** 项目级里程碑 → 画布形状。导入的旧库可能带坏日期，直接丢掉，免得整个画布抛异常。 */
   const milestones = useAppStore((s) => s.milestones);
   const ganttMilestones = useMemo<GanttMilestone[]>(
     () =>
@@ -100,8 +82,7 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
   const interactRef = useRef<HTMLCanvasElement>(null);
   const vpRef = useRef(new Viewport());
 
-  // 两个独立的 selector，不写成返回数组的一个 —— zustand v5 没有默认的浅比较，
-  // 每次返回新数组会让快照恒不等，React 19 下会持续重渲染
+  // 拆成两个 selector：zustand v5 无默认浅比较，返回新数组会在 React 19 下持续重渲染
   const themeMode = useAppStore((s) => s.themeMode);
   const systemDark = useAppStore((s) => s.systemDark);
   const isDark = resolveDark(themeMode, systemDark);
@@ -123,19 +104,13 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
     dirty.current.interact = true;
   };
 
-  // 取色器只在任务集合、着色依据或主题变化时重建 —— 它内部要扫两遍任务表，
-  // 不能每帧算一次
+  // 取色器要扫任务表，只在依赖变化时重建
   const painter = useMemo(
     () => makeBarPainter(tasks, colorBy, isDark, projectColor),
     [tasks, colorBy, isDark, projectColor],
   );
 
-  /**
-   * 每一行要画的受阻区间。
-   *
-   * 折叠起来的父任务要**汇总后代的**区间 —— 否则一折叠，所有问题就整个藏起来了。
-   * 展开时父条不画，因为子任务自己那几行已经画过，重复画只会满屏斜纹。
-   */
+  /** 每行要画的受阻区间：折叠的父任务汇总后代区间；展开的父任务不画（子行已画）。 */
   const blockedOf = useMemo(() => {
     const all = [...taskMap.values()];
     const cache = new Map<number, BlockedPeriod[]>();
@@ -350,36 +325,19 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
       /** 按下那一刻这条任务在当前视图下的区间 —— 拖动的基准 */
       span: { startDay: number; endDay: number };
       startX: number;
-      /**
-       * 按下时鼠标相对**真实进度位置**的偏移。
-       *
-       * 手柄的绘制位置被钳进了两端手柄之间的安全区（见 hitTest.progressGripX），
-       * 所以 0% 时它并不在条子最左边。不记这个偏移的话，一按下去进度就会
-       * 从 0 跳到「手柄所在位置对应的值」—— 用户会以为自己手抖了。
-       */
+      /** 按下时鼠标相对真实进度位置的偏移。手柄被钳进安全区（hitTest.progressGripX），不记偏移进度会跳。 */
       grabOffset: number;
       /** 拖动父任务时要一起平移的整棵子树 */
       subtree: number[];
-      /**
-       * 指针有没有真的移动过。
-       *
-       * 「单击采用计划日期」和「拖动落笔即变成实施条」用的是同一个按下手势，
-       * 区别只在松手时指针动没动。按距离而不是「有没有触发过 onMove」来判 ——
-       * onMove 在按下后哪怕挪 1px 也会来，那样单击会被当成拖动。
-       */
+      /** 指针是否移动超过 CLICK_SLOP；区分单击采用计划与拖动落笔。不能看 onMove 是否触发过（挪 1px 也会来）。 */
       moved: boolean;
-      /** 抓到的这条是不是「还没动过」的虚线影子（hitTest 判定，见那里的说明） */
+      /** 抓到的是否是未动过的虚线影子（hitTest 判定） */
       ghost: boolean;
     } | null = null;
     let panning = false;
     let lastPanX = 0;
 
-    /**
-     * ⌥ 拖出受阻区间。
-     *
-     * 条子上的裸拖拽已经被占满了：中间=移动、两端=改工期、进度边界=调进度。
-     * 加修饰键是唯一不冲突的做法，而且和「⌥↑↓ 移动任务」的修饰键语义一致。
-     */
+    /** ⌥ 拖出受阻区间（裸拖拽已被移动/改工期/调进度占满） */
     let marking: { task: ResolvedTask; index: number; fromDay: number; toDay: number } | null = null;
 
     const localX = (e: PointerEvent) => e.clientX - el.getBoundingClientRect().left;
@@ -403,8 +361,7 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
       const vp = vpRef.current;
       const hit = hitTest(vp, live.current.tasks, localX(e), localY(e), live.current.viewMode);
 
-      // ⌥ 按住：标受阻区间。父任务日期是汇总值、里程碑没有区间，
-      // 两者都不该直接标 —— 受阻要记在真正在做的那条任务上
+      // ⌥ 标受阻：父任务（汇总值）和里程碑（无区间）不接
       if (e.altKey && hit && !hit.task.hasChildren && !hit.task.milestone) {
         const day = Math.floor(vp.dayAt(localX(e)));
         marking = { task: hit.task, index: hit.index, fromDay: day, toDay: day };
@@ -471,7 +428,7 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
       if (!drag) {
         const hit = hitTest(vp, live.current.tasks, localX(e), localY(e), live.current.viewMode);
         el.style.cursor = cursorFor(hit?.mode ?? null);
-        // 时间游标和同期高亮都只画在交互层，所以移动鼠标不会触发条子重绘
+        // 游标和同期高亮只在交互层，移动鼠标不重绘条子
         live.current.cursorX = localX(e);
         live.current.hoverId = hit?.mode ? hit.task.id : null;
         dirty.current.interact = true;
@@ -482,7 +439,6 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
       const fresh = current.find((t) => t.id === drag!.task.id);
       if (!fresh) return;
 
-      // 松手时要拿它区分「单击采用计划」和「拖动落笔」
       if (Math.abs(localX(e) - drag.startX) >= CLICK_SLOP) drag.moved = true;
 
       const store = useAppStore.getState();
@@ -493,7 +449,6 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
         const cur = activeSpan(fresh, live.current.viewMode).span;
         const x1 = vp.xOf(cur.startDay);
         const width = vp.xOf(cur.endDay + 1) - x1;
-        // 减掉抓取偏移，按下的那一刻进度才不会跳
         const { value, snapped } = snapProgress(
           (localX(e) - drag.grabOffset - x1) / width,
         );
@@ -515,8 +470,7 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
         let label: string;
 
         const cal = live.current.calendar;
-        // 拖动时同时报自然日和工作日 —— 「5 天的活跨了周末只剩 3 天工时」
-        // 这件事必须在做决定的当下就看见，事后再发现已经晚了
+        // 同时报自然日和工作日，跨周末的工时缩水拖动当下就能看见
         const span2 = (s: { startDay: number; endDay: number }) =>
           `${cal.countCalendarDays(s.startDay, s.endDay)} 天 · ${cal.countWorkdays(
             s.startDay,
@@ -547,7 +501,7 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
               ? "调整实施工期"
               : "调整工期";
 
-        // 父任务的日期是汇总值，改不了它本身 —— 要动就整组平移子任务
+        // 父任务日期是汇总值，只能整组平移子任务
         const targets =
           drag.subtree.length > 0
             ? drag.subtree.map((id) => {
@@ -565,8 +519,7 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
           makeCommand(
             commandLabel,
             store.tasks,
-            // 实施视图下写的是另一组字段。拖一条还没动过的虚线，
-            // 落笔即把它变成真正的实施条 —— 这就是「在计划基础上拖拽变动」
+            // 实施视图写 actual* 字段；拖未动过的虚线即落笔成实施条
             targets.map(({ id, changes }) =>
               isActual
                 ? {
@@ -592,7 +545,7 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
         const { task } = marking;
         const from = Math.min(marking.fromDay, marking.toDay);
         const to = Math.max(marking.fromDay, marking.toDay);
-        // 裁到任务区间内 —— 飘在条子外的一段没有视觉锚点，也说不清属于谁
+        // 裁到任务区间内
         const clipped = clampToTask(
           { id: newBlockId(), from, to, reason: "other" },
           task,
@@ -604,7 +557,7 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
         el.releasePointerCapture(e.pointerId);
 
         if (clipped) {
-          // 松手处就地弹菜单选原因。默认成「其他」等于没记 —— 人不会回头补
+          // 松手处就地选原因，不默认「其他」
           setPendingBlock({
             taskId: task.id,
             period: clipped,
@@ -615,13 +568,7 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
         return;
       }
 
-      // 单击（没拖动）落在一条虚线上 = 采用计划日期，把它变成实施条。
-      //
-      // 这补的是左网格那句提示（「到甘特图上拖那条虚线，或点它采用计划日期」）
-      // 一直没兑现的另一半：拖动会落笔成实施，单击却什么都不做。
-      //
-      // 实施日期在松手这一刻从 store 重取，不用 drag 里那份快照 —— 中间可能
-      // 已经被 ⌥ 标受阻之类的操作改过。规则见 tapAdoptsPlanDates。
+      // 单击虚线 = 采用计划日期。实施日期在松手时从 store 重取，不用 drag 快照（中途可能被改过）。
       if (drag?.ghost) {
         const latest = useAppStore.getState().tasks.get(drag.task.id);
         if (
@@ -645,25 +592,14 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
       el.style.cursor = "default";
     };
 
-    // 双击条子开详情，和左侧网格双击行同一个效果。
-    // 用双击而不是单击：单击已经是「选中 + 起手拖拽」，单击就弹面板的话
-    // 每次想拖动都会误开
+    // 双击开详情（单击已是选中 + 起手拖拽）
     const onDouble = (e: PointerEvent) => {
       const hit = hitTest(vpRef.current, live.current.tasks, localX(e), localY(e), live.current.viewMode);
       if (hit?.mode) openDetail(hit.task.id);
     };
     el.addEventListener("dblclick", onDouble as EventListener);
 
-    /**
-     * 右键某一天：给那天记一笔。
-     *
-     * 条子上的裸手势已经占满了（中间移动、两端改工期、进度手柄、⌥ 标受阻），
-     * 右键是这里唯一还空着的入口，而且语义天然 —— 指着某一天说"这天怎么了"。
-     *
-     * 落点带着两个信息：**哪一天**（横坐标换算）和**哪条活**（命中检测）。
-     * 点在空白处就只带日期，写成项目级记录 —— 「今天下雨全场停工」不属于
-     * 任何一条任务，硬塞给某条活会让它在复盘里被算到那条活头上。
-     */
+    /** 右键某一天记一笔：命中任务则挂到该任务，点空白写成项目级记录。 */
     const onContext = (e: MouseEvent) => {
       e.preventDefault();
       const vp = vpRef.current;
@@ -675,7 +611,7 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
         localY(e as unknown as PointerEvent),
         live.current.viewMode,
       );
-      // 父任务不接记录：它没有自己的工作内容，记在它上面等于记在一个汇总值上
+      // 父任务不接记录（汇总值）
       const taskId = hit?.mode && !hit.task.hasChildren ? hit.task.id : null;
       if (taskId != null) select(taskId);
       useAppStore.getState().startNoteAt(taskId, day);
@@ -750,12 +686,7 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
 export { ZOOM_PRESETS };
 export type { ZoomPreset };
 
-/**
- * 松手处的原因菜单。
- *
- * 不用通用 Popover：那个要一个 DOM 锚点，而这里的锚点是一个转瞬即逝的
- * 鼠标位置。Esc 或点外面都算取消**整次创建**，不会留下一条「其他」。
- */
+/** 松手处的原因菜单（锚点是鼠标位置，不用 Popover）。Esc/点外面取消整次创建。 */
 function BlockReasonMenu({
   x,
   y,

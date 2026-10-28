@@ -1,17 +1,6 @@
 /**
- * 时间线：把散落在四处的记录，按「发生在哪一天」并成一条流水。
- *
- * 甘特图按**任务**组织（一行一件活），时间线按**日期**组织（一天一段）。
- * 同一批数据，问法不同：甘特问"这件活排在哪"，时间线问"那天到底怎么了"。
- *
- * 四个来源：
- *   · daily_notes  —— 手写的当日记录，可挂任务也可不挂（项目级）
- *   · 实施日期      —— 开工、完工这两个事件
- *   · 受阻时段      —— 只在**起始日**产生一条事件，带上持续天数
- *   · 风险          —— 按记下的那天落位
- *
- * 受阻为什么不逐天铺开：一段等料 5 天会变成 5 条一模一样的记录，把真正
- * 发生了什么的那几天淹掉。持续时间写在事件里（"等料 · 5 天"），信息不丢。
+ * 时间线：把记录按「发生在哪一天」并成流水。来源有 daily_notes、开工/完工、
+ * 受阻段、风险。受阻只在起始日产出一条（带天数），不逐天铺开。
  */
 
 import { blockedDays, describeBlocked, type BlockedPeriod } from "./blocked";
@@ -30,9 +19,9 @@ export interface TimelineEvent {
   text: string;
   /** 受阻事件的持续天数 */
   days?: number;
-  /** 只有 carriedBlocks 捞出来的受阻才有：它是从哪天开始卡的 */
+  /** 只有 carriedBlocks 产出的受阻才有：卡住的起始日 */
   since?: number;
-  /** 受阻事件：这条阻碍到现在还没关掉，天数每天还在长 */
+  /** 阻碍还没关，天数还会涨 */
   unresolved?: boolean;
   /** 风险等级 0 高 / 1 中 / 2 低 */
   level?: number;
@@ -49,10 +38,8 @@ export interface TimelineDay {
 }
 
 /**
- * 同一天内的先后：**先说发生了什么事，再说人写了什么**。
- *
- * 开工/完工是客观事件，受阻和风险是问题，手写记录是解释。按这个顺序读下来
- * 才是一段能讲的话；按写入时间排的话，一段解释会飘在它解释的那件事前面。
+ * 同一天内的先后：先事实（开工/完工），再问题（受阻/风险），最后解释（手记）。
+ * 按写入时间排会让解释飘在它解释的事前面。
  */
 const ORDER: Record<EventKind, number> = {
   start: 0,
@@ -80,8 +67,7 @@ export function buildTimeline(
   };
 
   for (const task of tasks) {
-    // 父任务的日期是汇总值，它的"开工/完工"是派生的，记进时间线等于
-    // 把同一件事说两遍
+    // 父任务日期是汇总值，记进时间线等于同一件事说两遍
     if (task.hasChildren) continue;
 
     if (task.actualStartDay != null) {
@@ -92,8 +78,7 @@ export function buildTimeline(
         text: "开工",
       });
     }
-    // 只有真做完了才算完工事件。实施结束日到了但进度没满，那是"排到这天"，
-    // 不是"这天完成了" —— 后者是个会被写进汇报的事实，不能靠日期猜
+    // 进度未满不算完工：那天只是排到这儿，不是干完了
     if (task.actualEndDay != null && task.progress >= 1) {
       push(task.actualEndDay, {
         kind: "finish",
@@ -110,8 +95,7 @@ export function buildTimeline(
         task,
         text: describeBlocked(b),
         days: b.to - b.from + 1,
-        // 没关掉的那条要标出来：它的天数明天还会变，读的人得知道
-        // 自己看到的是一个还在走的数，不是最终结果
+        // 没关掉要标出来：天数还会涨，不是最终结果
         ...(b.open === true ? { unresolved: true } : {}),
       });
     }
@@ -137,8 +121,7 @@ export function buildTimeline(
       task: n.taskId != null ? (byId.get(n.taskId) ?? null) : null,
       text: n.content,
       note: n,
-      // 写下的那天晚于它说的那天 = 事后补记。复盘时这件事要看得见：
-      // 当时的判断和事后的追认，分量不一样
+      // 写下日 > 记录日 = 事后补记，复盘时要看得见
       backdated: unixToDay(n.createdAt) > day,
     });
   }
@@ -149,31 +132,27 @@ export function buildTimeline(
       iso: dayToIso(day),
       events: events.sort((a, b) => ORDER[a.kind] - ORDER[b.kind] || a.key.localeCompare(b.key)),
     }))
-    // 倒序：最近的一天在最上面。时间线是用来回顾的，而"最近"永远是
-    // 被问得最多的那一段
+    // 倒序：最近的一天在最上面
     .sort((a, b) => b.day - a.day);
 }
 
-/** 日期筛选的区间，首尾都含。单日就是 from === to */
+/** 日期筛选区间，首尾都含 */
 export interface DayRange {
   from: number;
   to: number;
 }
 
-/** 两次点选不保证先早后晚，这里统一摆正 */
+/** 两次点选不保证先后，这里摆正 */
 export const normalizeRange = (a: number, b: number): DayRange =>
   a <= b ? { from: a, to: b } : { from: b, to: a };
 
-/** 只留下落在区间里的那些天。不传区间就是原样 */
+/** 只留区间内的天；不传区间原样返回 */
 export const clipTimeline = (days: TimelineDay[], range: DayRange | null): TimelineDay[] =>
   range ? days.filter((d) => d.day >= range.from && d.day <= range.to) : days;
 
 /**
- * 区间开始之前就卡住、到区间里还没放开的那些受阻。
- *
- * 受阻只在起始日落一条（见文件头），于是按日期裁剪会把它们整条裁掉 ——
- * 而筛「10 月 6 日那天怎么了」时，最要紧的答案恰恰可能是「那天正卡着」。
- * 所以单独捞出来，由界面置顶显示，不混进任何一天里：它确实不是那天发生的事。
+ * 区间开始前就卡住、区间内仍未解除的受阻。按日期裁剪会把它们整条裁掉，
+ * 于是单独捞出：界面置顶显示，不混进具体某天。
  */
 export function carriedBlocks(tasks: ResolvedTask[], range: DayRange | null): TimelineEvent[] {
   if (!range) return [];
@@ -197,22 +176,17 @@ export function carriedBlocks(tasks: ResolvedTask[], range: DayRange | null): Ti
   return out.sort((a, b) => a.since - b.since || a.key.localeCompare(b.key));
 }
 
-/**
- * 一件活的履历：把流水里隔着几十行的「开工」和「完成」配成一对。
- *
- * 流水按天排，答得了「那天怎么了」，答不了「这件活从哪天干到哪天」——
- * 这两个事件之间可能隔着整整一个月的别的记录。
- */
+/** 一件活的履历：把流水里的「开工」和「完成」配成一对。 */
 export interface Career {
   task: ResolvedTask;
   start: number;
-  /** 完成日。还在干就是 null —— 判据和时间线上的「完成」事件是同一条 */
+  /** 完成日，还在干为 null。判据与「完成」事件一致 */
   end: number | null;
-  /** 画到哪天为止：完成日，或者今天 */
+  /** 画到哪天为止：完成日或今天 */
   until: number;
   /** 从开工到 until 的自然日数，含首尾 */
   days: number;
-  /** 落在 [start, until] 里的受阻段，已经夹到这个区间内 */
+  /** 落在 [start, until] 内的受阻段，已夹到区间内 */
   blocked: { from: number; to: number }[];
   /** 去重后的受阻天数 */
   blockedDays: number;
@@ -225,7 +199,7 @@ export function buildCareers(
 ): Career[] {
   const out: Career[] = [];
   for (const task of tasks) {
-    // 父任务的日期是汇总值，同 buildTimeline
+    // 同 buildTimeline：父任务日期是汇总值
     if (task.hasChildren || task.actualStartDay == null) continue;
 
     const start = task.actualStartDay;
@@ -247,7 +221,7 @@ export function buildCareers(
       blockedDays: blockedDays(clipped),
     });
   }
-  // 还在干的排前面（最近开工的在最上），然后是做完的（最近完成的在最上）
+  // 还在干的在前（最近开工在上），然后是做完的（最近完成在上）
   return out.sort(
     (a, b) =>
       Number(a.end != null) - Number(b.end != null) ||
@@ -256,6 +230,6 @@ export function buildCareers(
   );
 }
 
-/** 某一天有没有内容 —— 甘特上要据此在日期轴上打点 */
+/** 有内容的日子 —— 甘特据此在日期轴上打点 */
 export const daysWithEvents = (days: TimelineDay[]): Set<number> =>
   new Set(days.map((d) => d.day));

@@ -23,10 +23,8 @@ pub fn run() {
 
             let conn = db::open(&dir.join(DB_FILE))?;
 
-            // 备份走 SQLite 在线备份 API，所以必须在连接建立之后 ——
-            // 直接复制文件会漏掉还留在 WAL 里的提交（见 backup.rs 顶部说明）。
-            // 迁移已经跑完，这份备份即包含上次会话的全部数据。
-            // 失败只记日志，不能挡住应用启动。
+            // 备份必须走在线备份 API 且在连接建立后：直接拷文件会漏掉 WAL 里的提交。
+            // 失败只记日志，不能挡住启动。
             if let Err(err) = backup::rotate(&conn, &dir, "gantt", backup::KEEP) {
                 eprintln!("[backup] 备份失败：{err}");
             }
@@ -34,15 +32,9 @@ pub fn run() {
             app.manage(db::Db(Mutex::new(conn)));
             app.manage(plugin_host::Procs::default());
 
-            // 留一个 PID 文件，告诉离线 CLI「应用正开着，别写」。见 gantt-core/src/locate.rs。
-            //
-            // 为什么必须有：前端是「整项目 400ms 防抖全量替换」，CLI 这会儿插进去的任务，
-            // 下一帧就被界面上那份陈旧快照抹掉 —— 而且是静默抹掉。WAL 只保证读写不互相
-            // 阻塞，不保证两个写入者不互相覆盖。单机单人场景下正确的做法不是搞冲突合并，
-            // 而是根本不让两边同时写。
-            //
-            // 失败只记日志：拿不到锁文件顶多是 CLI 少了一道保护，
-            // 不该因此让应用起不来。
+            // 留 PID 锁文件，告诉离线 CLI「应用正开着，别写」（gantt-core/src/locate.rs）。
+            // 两边同时写会静默互相覆盖：前端是整项目防抖全量替换，
+            // CLI 插入的任务会被下一帧的陈旧快照抹掉。失败只记日志，不挡启动。
             if let Err(err) = gantt_core::locate::write_lock(&dir) {
                 eprintln!("[lock] 写入 gantt.lock 失败：{err}");
             }
@@ -136,11 +128,8 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            // 退出时把锁摘掉。不摘也「能用」—— CLI 会去问那个 PID 还活着没，
-            // 死了照样放行 —— 但让用户看见一个 gantt.lock 躺在数据目录里总归是噪声。
-            //
-            // 走 RunEvent::Exit 而不是窗口关闭事件：关窗口只是隐藏（托盘常驻），
-            // 那时应用还活着、还该继续挡着 CLI。
+            // 退出时摘锁。用 RunEvent::Exit 而非窗口关闭：关窗口只是隐藏（托盘常驻），
+            // 那时应用还活着，仍该挡着 CLI。
             if let tauri::RunEvent::Exit = event {
                 if let Ok(dir) = app.path().app_config_dir() {
                     gantt_core::locate::clear_lock(&dir);

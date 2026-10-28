@@ -1,11 +1,6 @@
 /**
- * 文档里的数据表 —— **由程序按快照直接写出来，不经过模型**。
- *
- * 模型转述数字是会出错的：把 6 天抄成 5 天，把两条任务的偏差加在一起。
- * 而这份文档是要发给别人的，数字和「复盘」视图对不上的那一刻它就没人信了。
- * 所以分工是：表格在这里生成，模型只写叙述和归因，并且只许引用快照里有的数。
- *
- * 纯函数，输出 Markdown。
+ * 文档里的数据表由程序按快照直接写出来，不经过模型 —— 模型转述数字会出错，
+ * 而数字和「复盘」视图对不上，这份要发给别人的文档就没人信了。
  */
 
 import { answerText, REVIEW_KIND_LABEL, type Question, type Review, type Snapshot } from "./types";
@@ -14,7 +9,7 @@ import { omittedNote } from "./snapshot";
 /** 模型在「目标与结果」一章末尾留下的占位行，拼文档时换成数据表 */
 export const FACTS_PLACEHOLDER = "{{数据概览}}";
 
-/** 「偏差最大的任务」那张表列几行。再多就不是概览了，全量在「复盘」视图里 */
+/** 「偏差最大的任务」那张表列几行，再多就不是概览了 */
 const TOP_TASKS = 8;
 
 /** 表格单元格里不能有竖线和换行 */
@@ -125,19 +120,15 @@ export function appendixMarkdown(questions: Question[]): string {
   const oneLine = (t: string) => t.replace(/\s*\n\s*/g, " ");
   const lines = questions.map((q, i) => {
     const mark = `${i + 1}. `;
-    // 回答写成题目下面的子项，单独占一行。缩进要和序号等宽：到第 10 题序号多一位，
-    // 少缩一格它就不再是子项，而是并进了题目那一段
+  // 回答缩进必须和序号等宽：到第 10 题序号多一位，少缩一格它就不再是子项
     return `${mark}**${oneLine(q.title)}**\n${" ".repeat(mark.length)}- ${oneLine(answerText(q))}`;
   });
   return ["## 附录：问答记录", lines.join("\n")].join("\n\n");
 }
 
 /**
- * 把数据表放进模型写的正文。
- *
- * 正常情况模型会留下占位行。没留的话（它不是每次都听话）退而求其次：插在
- * 第二个二级标题之前，也就是第一章的末尾；连二级标题都不够两个，就放最前面。
- * 无论哪种，**数据表一定在文档里** —— 它是这份文档里唯一能直接对账的部分。
+ * 把数据表放进模型写的正文。模型没留占位行时就插在第二个二级标题前，
+ * 连两个标题都没有就放最前 —— 数据表一定在文档里，它是唯一能直接对账的部分。
  */
 export function insertFacts(body: string, facts: string): string {
   if (body.includes(FACTS_PLACEHOLDER)) {
@@ -155,9 +146,7 @@ export function insertFacts(body: string, facts: string): string {
 
 /**
  * 模型写的正文 → 完整文档：标题、说明行、正文（含数据表）、问答附录。
- *
- * 模型被要求不写一级标题、不写开场白，但这里还是清理一遍：它偶尔会把整篇
- * 包进 ```markdown 代码块，或者自己加一个一级标题。
+ * 模型偶尔会把整篇包进 ```markdown 代码块或自带一级标题，这里清理一遍。
  */
 export function assembleDocument(review: Review, body: string, generatedOn: string): string {
   let text = body.trim();

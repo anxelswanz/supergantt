@@ -1,16 +1,6 @@
 /**
- * 时间线的日期筛选：一个日历同时管「单日」和「一段日期」。
- *
- * 不分模式 —— 点一下就是只看那一天（当场生效），接着再点另一天，
- * 两次点选之间就成了一段。先选「我要单日还是区间」是在逼人回答一个
- * 他还没想好的问题：多数时候是先看了某一天，才决定往前再多看几天。
- *
- * 和 DatePicker 一样不用原生 <input type="date">（WKWebView 上是分段步进器），
- * 月历网格直接复用它的 monthGrid。
- *
- * 传了 `granular` 就多出「月 / 年」两档（事项视图要）：同样的点法，
- * 点一个月就是整月，再点另一个月就连成几个月。选出来的仍然只是一个
- * DayRange —— 按月、按年不过是首尾恰好落在月初月末的一段，筛选那头不用知道。
+ * 时间线的日期筛选：点一天看单日，再点一天成一段，不先选模式。
+ * 传 `granular` 多出「月 / 年」两档，选出来仍是 DayRange，筛选端无需区分。
  */
 
 import { useCallback, useMemo, useState } from "react";
@@ -24,13 +14,13 @@ const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "�
 
 const pad = (n: number) => String(n).padStart(2, "0");
 
-/** 今年的日期省掉年份，跨年的才写全 —— 筛选条上每个字都占地方 */
+/** 今年的日期省掉年份，跨年的才写全 */
 const short = (day: number, withYear: boolean) =>
   withYear ? dayToIso(day) : dayToIso(day).slice(5);
 
 export function formatRange(range: DayRange): string {
   const thisYear = dayToDate(today()).getUTCFullYear();
-  // 整年、整月就说成「2026 年」「10 月」，比 01-01 – 12-31 好认得多
+  // 整年、整月说成「2026 年」「10 月」，比 01-01 – 12-31 好认
   const years = wholeYears(range);
   if (years) {
     return years.from === years.to ? `${years.from} 年` : `${years.from}–${years.to} 年`;
@@ -56,7 +46,7 @@ export function formatRange(range: DayRange): string {
 export const sameRange = (a: DayRange | null, b: DayRange | null) =>
   a === b || (a != null && b != null && a.from === b.from && a.to === b.to);
 
-/** 快捷项。「全部」就是不筛，用 null 表示 */
+/** 快捷项：「全部」用 null 表示不筛 */
 export function rangePresets(now: number): { label: string; range: DayRange | null }[] {
   const { y, m } = monthOf(now);
   return [
@@ -81,7 +71,7 @@ const YEARS_PER_PAGE = 12;
 interface Props {
   value: DayRange | null;
   onChange: (range: DayRange | null) => void;
-  /** 有记录的那些天，日历上打个点 —— 不然只能靠猜去点 */
+  /** 有记录的日期，日历上打点 */
   marked: Set<number>;
   /** 多给「月 / 年」两档粒度 */
   granular?: boolean;
@@ -156,7 +146,7 @@ export function RangeFilter({ value, onChange, marked, granular = false, align =
     <>
       <div
         ref={setAnchor}
-        className="flex items-center rounded-full border transition-colors"
+        className="flex items-center rounded-[var(--r-m)] border transition-colors"
         style={{
           borderColor: active
             ? "color-mix(in srgb, var(--accent) 55%, transparent)"
@@ -170,7 +160,7 @@ export function RangeFilter({ value, onChange, marked, granular = false, align =
           onClick={toggle}
           title={
             granular
-              ? "按日期筛选：可按年、按月，或点两天选一段"
+              ? "按日期筛选：按年、按月，或点两天选一段"
               : "按日期筛选：点一天看单日，再点一天选一段"
           }
           className="flex items-center gap-1.5 py-1 pl-2.5 pr-2 font-mono text-[11px] tabular-nums transition-colors"
@@ -262,7 +252,7 @@ export function RangeFilter({ value, onChange, marked, granular = false, align =
                 ))}
               </div>
 
-              {/* 横向不留缝：区间的底色要连成一条带子，断开就读不出「一段」 */}
+              {/* 横向不留缝：区间底色要连成一条带子 */}
               <div
                 className="grid grid-cols-7 gap-y-0.5"
                 onPointerLeave={() => setHover(null)}
@@ -293,7 +283,7 @@ export function RangeFilter({ value, onChange, marked, granular = false, align =
                           : inRange
                             ? "color-mix(in srgb, var(--accent) 16%, transparent)"
                             : undefined,
-                        // 今天用描边，免得和「选中」抢视觉（同 DatePicker）
+                        // 今天用描边，免得和「选中」抢视觉
                         boxShadow:
                           day === now && !isEdge
                             ? "inset 0 0 0 1.5px var(--today, #f43f5e)"
@@ -367,7 +357,7 @@ export function RangeFilter({ value, onChange, marked, granular = false, align =
             <span className="text-[9px] text-[var(--text-dim)]">
               {pending != null
                 ? `再点一${UNIT_NOUN[unit]}，选成一段`
-                : `点一${UNIT_NOUN[unit]}看单${unit === "day" ? "日" : UNIT_NOUN[unit]} · 再点一${UNIT_NOUN[unit]}选一段`}
+                : `点一${UNIT_NOUN[unit]}看单${unit === "day" ? "日" : UNIT_NOUN[unit]}，再点一${UNIT_NOUN[unit]}选一段`}
             </span>
             <span className="flex items-center gap-1 text-[9px] text-[var(--text-dim)]">
               <span className="size-[3px] rounded-full bg-[var(--accent)]" />
@@ -422,7 +412,7 @@ const monthStart = (y: number, m: number): number => isoToDay(`${y}-${pad(m + 1)
 const monthEnd = (y: number, m: number): number =>
   monthStart(y, m) + new Date(Date.UTC(y, m + 1, 0)).getUTCDate() - 1;
 
-/** 两段合成从更早的开头到更晚的结尾。两次点选不保证先早后晚 */
+/** 两段合成更早开头到更晚结尾：两次点选不保证先早后晚 */
 const span = (a: DayRange, b: DayRange): DayRange => ({
   from: Math.min(a.from, b.from),
   to: Math.max(a.to, b.to),

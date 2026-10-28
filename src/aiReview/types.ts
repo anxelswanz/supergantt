@@ -1,10 +1,6 @@
 /**
- * AI 复盘的数据形状。
- *
- * 库里那张表（migrations/013_ai_reviews.sql）有三列是 JSON 字符串，Rust 不解析 ——
- * 它们长什么样**只由这个文件说了算**。改这里的任何一个字段都要想清楚旧记录
- * 读出来会怎样：复盘是长期留存的，上个月存的那份下个月还得打得开
- * （见下面的 parseReview，读不懂的一律退回安全的空值而不是抛错）。
+ * AI 复盘的数据形状。库里三个 JSON 列长什么样只由这个文件说了算；
+ * 复盘长期留存，解析一律退回安全空值而不是抛错。
  */
 
 import type { AiReviewRow } from "../db/api";
@@ -18,11 +14,8 @@ export const REVIEW_KIND_LABEL: Record<ReviewKind, string> = {
 };
 
 /**
- * 开始前那张小表单。
- *
- * 它存在的原因：项目表里没有「目标」这回事，而「目标与结果」是复盘的第一章。
- * 甘特数据能告诉模型进度和偏差，但「原本想达成什么、算不算成功」它无从得知。
- * 在出题**之前**问，出的题才能围绕「目标达成了多少、差在哪」。
+ * 开始前的小表单：项目表里没有「目标」，而「目标与结果」是复盘的第一章。
+ * 必须在出题之前问，出的题才能围绕目标问。
  */
 export interface Background {
   kind: ReviewKind;
@@ -37,7 +30,7 @@ export interface Background {
 export const EMPTY_BACKGROUND: Background = { kind: "final", goal: "", outcome: "", extra: "" };
 
 /**
- * 走到了哪一步。**只记「下一步该做什么」，不记「有没有进程在跑」** ——
+ * 只记「下一步该做什么」，不记「有没有进程在跑」——
  * 理由见迁移文件里 stage 那一列的注释。
  */
 export type Stage = "ask1" | "answer1" | "ask2" | "answer2" | "write" | "done";
@@ -49,16 +42,16 @@ export const TOPICS = ["目标与结果", "过程回顾", "根因分析", "经�
 export type Topic = (typeof TOPICS)[number];
 
 export interface Answer {
-  /** 选中的选项下标。单选题最多一个 */
+  /** 选中的选项下标，单选题最多一个 */
   picked: number[];
-  /** 输入框里写的。可以单独写，也可以选完再补一句 */
+  /** 输入框内容，可与选项共存 */
   text: string;
-  /** 明确跳过。和「还没答」是两回事：跳过的题文档里要如实写「未回答」 */
+  /** 明确跳过。和「还没答」不同：文档里要如实写「未回答」 */
   skipped: boolean;
 }
 
 export interface Question {
-  /** 稳定标识，`r1-0` 这种形状。回答按它存，不按下标 —— 下标会随轮次变 */
+  /** 回答按它存，不按下标 —— 下标会随轮次变 */
   id: string;
   /** 1 = 首轮，2 = 追问 */
   round: 1 | 2;
@@ -164,9 +157,8 @@ export interface Omitted {
 /**
  * 点「开始复盘」那一刻的项目数据，之后不再变。
  *
- * 全是**名字和日期字符串**，没有 id、没有天序号：它要原样送给模型，也要在
- * 半年后被重新读出来渲染数据表 —— 那时候任务可能改名了、删掉了，id 指向的
- * 东西已经不是当时那个。快照必须自己说得清自己。
+ * 全是名字和日期字符串，没有 id：半年后读出来时任务可能已改名或删除，
+ * 快照必须自己说得清自己。
  */
 export interface Snapshot {
   version: 1;
@@ -295,11 +287,8 @@ export function parseBackground(raw: string): Background {
 }
 
 /**
- * 读快照。
- *
- * 只做「形状补齐」，不逐字段校验：快照是本程序自己写进去的，不是外来输入。
- * 补齐是为了将来加字段 —— 旧记录里没有的数组读出来是空数组，而不是让
- * 渲染数据表的代码在 undefined.map 上炸掉。
+ * 读快照。只补形状、不逐字段校验（数据是本程序自己写的）：
+ * 旧记录里缺的数组读成空数组，免得渲染侧在 undefined.map 上炸掉。
  */
 export function parseSnapshot(raw: string): Snapshot {
   const v = parseJson(raw);
@@ -350,8 +339,8 @@ export const questionsOf = (qs: Question[], round: 1 | 2): Question[] =>
   qs.filter((q) => q.round === round);
 
 /**
- * 一题的回答写成一句话。提示词和文档附录都用它，两边口径一致。
- * 没答和跳过都写成「未回答」—— 对读的人来说它们是一回事：这里没有信息。
+ * 一题的回答写成一句话，提示词和文档附录共用，口径一致。
+ * 没答和跳过都写成「未回答」：对读者来说都是没有信息。
  */
 export function answerText(q: Question): string {
   const a = q.answer;

@@ -53,7 +53,7 @@ beforeEach(() => {
 async function openList() {
   const { ProjectList } = await import("./ProjectList");
   render(<ProjectList />);
-  await screen.findByText("产线改造");
+  await screen.findAllByText("产线改造");
 }
 
 const deleteCalls = () => invoke.mock.calls.filter(([c]) => c === "delete_project");
@@ -64,7 +64,7 @@ describe("删项目的保险", () => {
     fireEvent.click(screen.getByTitle(/删除这个项目/));
 
     // 代价写成具体数字：「不可恢复」是套话，「37 个任务」才会让人停一下
-    expect(await screen.findByText(/37 个任务，连同它们的风险、评论/)).toBeTruthy();
+    expect(await screen.findByText(/37 个任务，连同风险、评论/)).toBeTruthy();
     expect(deleteCalls()).toHaveLength(0);
   });
 
@@ -139,7 +139,7 @@ describe("数据目录", () => {
   it("卡片上就能打开数据文件所在的目录", async () => {
     await openList();
     await act(async () => {
-      fireEvent.click(screen.getByTitle(/数据文件所在的目录/));
+      fireEvent.click(screen.getByTitle(/数据文件所在目录/));
     });
     expect(invoke.mock.calls.some(([c]) => c === "reveal_data_dir")).toBe(true);
   });
@@ -147,7 +147,7 @@ describe("数据目录", () => {
   it("点它不会顺手把项目打开 —— 卡片本身是个按钮，事件必须拦住", async () => {
     await openList();
     await act(async () => {
-      fireEvent.click(screen.getByTitle(/数据文件所在的目录/));
+      fireEvent.click(screen.getByTitle(/数据文件所在目录/));
     });
     expect(invoke.mock.calls.some(([c]) => c === "load_project")).toBe(false);
   });

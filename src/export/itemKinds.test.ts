@@ -3,13 +3,7 @@ import { buildItemKindsWorkbook, countByKind, itemKindsFileName } from "./itemKi
 import type { ItemKind, ItemNote } from "../db/api";
 
 /**
- * 事项类型的导出。
- *
- * 这里钉死的不是排版，而是两件会让收到文件的人得出**错误结论**的事：
- *
- *   1. 使用数只数「打了这个类型」的事项 —— 未分拣的和已晋升成实体的
- *      都不算，否则那个数字不等于「点这个类型筛出来有几条」
- *   2. 脚注必须在文件里，说明阻碍和风险为什么不在表上
+ * 事项类型导出：1. 使用数不算未分拣和已晋升的；2. 脚注说明阻碍和风险为何不在表上。
  */
 
 const kind = (over: Partial<ItemKind> & { key: string }): ItemKind => ({
@@ -52,11 +46,7 @@ describe("countByKind", () => {
     expect(countByKind([note({ id: 1 })]).size).toBe(0);
   });
 
-  /**
-   * 已晋升成实体的那些，身份由实体表达、kind 本就是空的。
-   * 万一库里留着一个旧 kind（手改过的数据），也不能算进去 ——
-   * 否则这一行的数字不等于「点这个类型筛出来有几条」。
-   */
+  /** 已晋升的即使库里残留旧 kind（手改过的数据）也不能算进去。 */
   it("已晋升成实体的不算，即使它身上还留着 kind", () => {
     const counts = countByKind([
       note({ id: 1, kind: "todo", promotedKind: "risk", promotedRef: "7" }),
@@ -96,7 +86,7 @@ describe("buildItemKindsWorkbook", () => {
     expect(text(sheet)).toContain("使用数统计范围：产线改造");
   });
 
-  /** 行序只由数据决定：内置在前，然后按 sortOrder —— 不依赖调用方传进来的顺序 */
+  /** 行序：内置在前，然后按 sortOrder，不依赖传入顺序 */
   it("内置的排在前面，和界面一致", () => {
     const sheet = wb().getWorksheet("事项类型")!;
     const labels = [5, 6, 7].map((r) => sheet.getRow(r).getCell(1).value);
@@ -125,10 +115,6 @@ describe("buildItemKindsWorkbook", () => {
     expect(sheet.getRow(7).getCell(5).value).toBe(1); // 待验收
   });
 
-  /**
-   * 一份静默省掉「阻碍」和「风险」的类型表，会让收到它的人以为这个系统
-   * 只有代办和问题两类。那句说明必须在文件里，不是在界面上。
-   */
   it("脚注说明阻碍和风险为什么不在表上", () => {
     const sheet = wb().getWorksheet("事项类型")!;
     const all = text(sheet);

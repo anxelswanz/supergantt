@@ -80,10 +80,7 @@ describe("时间线聚合", () => {
     expect(days.find((d) => d.day === D0 + 3)!.events[0].kind).toBe("finish");
   });
 
-  /**
-   * 「实施结束日到了」和「这天做完了」是两件事。前者只是排期，后者会被
-   * 写进汇报 —— 靠日期猜出来的完成事实，经不起追问。
-   */
+  /** 「实施结束日到了」不等于「这天做完了」，完工事件要求进度满 */
   it("进度没满就不产生完工事件", () => {
     const days = buildTimeline(
       resolve([task(1, { actualStartDay: D0, actualEndDay: D0 + 3, progress: 0.8 })]),
@@ -131,10 +128,7 @@ describe("时间线聚合", () => {
     expect(e.task).toBe(null);
   });
 
-  /**
-   * 周五补记周三的事：记录要落在**周三**，同时标出它是事后补的。
-   * 用 created_at 归位的话，时间线从第一天起就是错的。
-   */
+  /** 补记落在它说的那天（不按 created_at），并标出是事后补的 */
   it("按「说的哪天」归位，并标出事后补记", () => {
     const days = buildTimeline(
       resolve([task(1)]),

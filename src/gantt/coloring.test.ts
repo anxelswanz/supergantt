@@ -225,9 +225,9 @@ describe("进度与色相分走不同通道", () => {
   it("条内文字颜色按填充色亮度自动反转", () => {
     // 亮色填充配深色字，暗色填充配白字
     expect(makeBarPainter(resolve([task(1)]), "none", false, "#fbbf24")(resolve([task(1)])[0]).onFill)
-      .toBe("#0f172a");
+      .toBe("#17292d");
     expect(makeBarPainter(resolve([task(1)]), "none", false, "#4f46e5")(resolve([task(1)])[0]).onFill)
-      .toBe("#ffffff");
+      .toBe("#fbfcfc");
   });
 });
 

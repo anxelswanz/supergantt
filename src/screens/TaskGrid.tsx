@@ -23,32 +23,18 @@ import { Avatar } from "./Avatar";
 import { MenuDivider, MenuItem, Popover } from "./Popover";
 import { shortcut } from "../core/keys";
 
-/**
- * 左侧任务网格。
- *
- * 这是信息密集区，表现力主动克制（DESIGN.md §5）—— 大圆角和强动效放在这里
- * 只会让它更难用。生动的部分留给右侧甘特区和各种转场。
- *
- * 批量录入速度是甘特工具的生死线：表单式录 80 个任务要点 400 次鼠标，
- * 用户会直接退回 Excel。所以这里的一等公民是键盘。
- */
+/** 左侧任务网格。信息密集区，表现力克制，键盘录入优先。 */
 
 /* ------------------------------------------------------------------ */
 /* 列定义                                                              */
 /* ------------------------------------------------------------------ */
 
-/**
- * 列宽与对齐**只在这里定义一次**，表头和数据行都从这里取。
- *
- * 之前表头和数据行各写各的宽度与内边距，于是每一列的文字都错开几像素 ——
- * 表头写 `pl-3`、数据格写 `px-2`、负责人格子里还嵌了一个自带 padding 的按钮，
- * 越往右误差越大。单元格必须是同一个盒子，才不会再分叉。
- */
+/** 列宽与对齐只在这里定义一次，表头和数据行都从这里取，否则会逐列累积错位。 */
 const COLUMNS = [
   { key: "priority", label: "紧急", width: 52, align: "left", keep: 5 },
   { key: "start", label: "开始", width: 84, align: "left", keep: 2 },
   { key: "end", label: "结束", width: 84, align: "left", keep: 1 },
-  // 要放下「自然日 · 工作日」再追一个受阻天数，比单个数字宽不少
+  // 要放下自然日、工作日和受阻天数
   { key: "duration", label: "工期", width: 82, align: "right", keep: 6 },
   { key: "progress", label: "进度", width: 52, align: "right", keep: 3 },
   { key: "assignee", label: "负责人", width: 124, align: "left", keep: 4 },
@@ -56,21 +42,15 @@ const COLUMNS = [
 
 type ColumnKey = (typeof COLUMNS)[number]["key"];
 
-/** 单元格左右内边距。表头和数据行共用，是对齐的唯一保证。 */
+/** 单元格左右内边距，表头和数据行共用。 */
 const CELL_PAD = 8;
 
-/** 任务名列最窄到这里。再窄就连一个短任务名都放不下，面板失去意义 */
+/** 任务名列最窄宽度 */
 const NAME_MIN = 120;
 
 /**
- * 面板变窄时，按 keep 从小到大依次隐藏列。
- *
- * 顺序不是随便定的 —— 先丢的是**右边甘特图已经说过一遍**的信息：
- * 结束和开始日期看条子的位置就知道，进度条子上直接写着百分比，
- * 负责人可以靠「按负责人着色」认出来。工期和受阻天数图上读不出来，所以留到最后。
- *
- * 之前这里是一个写死的最小宽度（固定列总宽 + 150），加了紧急度列之后
- * 直接把下限顶到 628px，面板往左拉一点就拉不动了。
+ * 面板变窄时按 keep 从小到大隐藏列：先丢右侧甘特图已经表达过的信息
+ * （日期、进度、负责人），工期和受阻天数图上读不出，留到最后。
  */
 export function visibleColumns(width: number): typeof COLUMNS[number][] {
   const byKeep = [...COLUMNS].sort((a, b) => b.keep - a.keep);
@@ -83,11 +63,11 @@ export function visibleColumns(width: number): typeof COLUMNS[number][] {
     used += col.width;
   }
 
-  // 保持声明顺序，不能按 keep 的顺序排 —— 列的左右次序是固定的
+  // 保持声明顺序：列的左右次序固定，不能按 keep 排
   return COLUMNS.filter((c) => chosen.includes(c));
 }
 
-/** 任务名列的基础左内边距；层级缩进在此之上叠加 */
+/** 任务名列基础左内边距，层级缩进在此之上叠加 */
 const NAME_PAD = 10;
 const INDENT = 14;
 
@@ -96,10 +76,10 @@ const W = Object.fromEntries(COLUMNS.map((c) => [c.key, c.width])) as Record<
   number
 >;
 
-/** 所有列都显示时的固定列总宽，用作面板的默认宽度基准 */
+/** 所有列都显示时的固定列总宽 */
 export const FIXED_COLS_WIDTH = COLUMNS.reduce((sum, c) => sum + c.width, 0);
 
-/** 面板能缩到的最小宽度：只剩任务名，其余列全部隐藏 */
+/** 面板最小宽度：只剩任务名列 */
 export const MIN_PANEL_WIDTH = NAME_MIN + CELL_PAD * 2;
 
 type Field = "name" | "start" | "end" | "duration" | "progress";
@@ -107,7 +87,7 @@ type Field = "name" | "start" | "end" | "duration" | "progress";
 /** 对照模式下多出来的偏差列 */
 const DEVIATION_WIDTH = 56;
 
-/** 实施视图下把「开始 / 结束 / 工期」换成实施口径的说法 */
+/** 实施视图下改成实施口径的列名 */
 function headerLabel(key: string, mode: ViewMode): string {
   if (mode !== "actual") {
     return COLUMNS.find((c) => c.key === key)?.label ?? "";
@@ -159,7 +139,7 @@ export function TaskGrid({ width, height, scrollY, onScroll }: Props) {
   const setActualSpan = useAppStore((s) => s.setActualSpan);
   const rowHeight = ROW_HEIGHTS[useAppStore((s) => s.rowHeightKey)];
 
-  // 「此刻卡不卡着」是按今天判的。算一次传下去，别让每一行各自去取一遍
+  // 按今天算一次传下去，别让每行各取一遍
   const day = today();
 
   const tasks = useMemo(
@@ -171,8 +151,7 @@ export function TaskGrid({ width, height, scrollY, onScroll }: Props) {
   const [editing, setEditing] = useState<{ id: number; field: Field } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // 新建任务后直接进重命名。双击已经让位给「打开详情」，
-  // 没有这个自动跳转，连按 Enter 批量建任务就没法接着打字了。
+  // 新建后直接进重命名：双击已让位给「打开详情」，否则连按 Enter 建任务就断了
   useEffect(() => {
     if (pendingEditId == null) return;
     setEditing({ id: pendingEditId, field: "name" });
@@ -185,8 +164,7 @@ export function TaskGrid({ width, height, scrollY, onScroll }: Props) {
     if (el && Math.abs(el.scrollTop - scrollY) > 1) el.scrollTop = scrollY;
   }, [scrollY]);
 
-  // ResizeObserver 要到挂载后才给出高度。这一帧如果按 0 算，虚拟化窗口是空的，
-  // 用户会看到一闪而过的空列表；先按一屏估算，测量到真值后自然收敛。
+  // 挂载首帧 ResizeObserver 还给不出高度，按一屏估算，避免空列表闪一下
   const bodyHeight = height > 0 ? height - AXIS_HEIGHT : 900;
   const first = Math.max(0, Math.floor(scrollY / rowHeight) - 2);
   const last = Math.min(tasks.length, Math.ceil((scrollY + bodyHeight) / rowHeight) + 2);
@@ -226,7 +204,7 @@ export function TaskGrid({ width, height, scrollY, onScroll }: Props) {
             key={c.key}
             className={`shrink-0 truncate ${c.align === "right" ? "text-right" : ""}`}
             style={{ width: c.width, paddingLeft: CELL_PAD, paddingRight: CELL_PAD }}
-            title={c.key === "duration" ? "自然日 · 工作日" : undefined}
+            title={c.key === "duration" ? "工期天数：前面是自然日，后面的小字是工作日" : undefined}
           >
             {headerLabel(c.key, viewMode)}
           </div>
@@ -235,7 +213,7 @@ export function TaskGrid({ width, height, scrollY, onScroll }: Props) {
           <div
             className="shrink-0 truncate text-right"
             style={{ width: DEVIATION_WIDTH, paddingLeft: CELL_PAD, paddingRight: CELL_PAD }}
-            title="实施相对计划的偏移天数"
+            title="实际结束日期比计划结束日期多的天数"
           >
             偏差
           </div>
@@ -327,11 +305,8 @@ export function TaskGrid({ width, height, scrollY, onScroll }: Props) {
 }
 
 /**
- * 跟随光标的拖拽标签。
- *
- * portal 到 body：工作区外层是一个带 layoutId 的 motion.div，它会在转场时
- * 施加 transform，而 transform 会让 position:fixed 相对于它而不是视口定位 ——
- * 标签就会飘到离光标很远的地方。
+ * 跟随光标的拖拽标签。portal 到 body：外层 motion.div 转场时的 transform
+ * 会让 position:fixed 相对它定位，标签就会飘走。
  */
 function DragGhost({
   ghost,
@@ -347,7 +322,7 @@ function DragGhost({
       style={{
         left: ghost.x + 12,
         top: ghost.y + 10,
-        background: valid ? "var(--accent)" : "#f43f5e",
+        background: valid ? "var(--accent)" : "var(--danger)",
         color: "#fff",
       }}
     >
@@ -361,10 +336,7 @@ function DragGhost({
 /* 单元格外壳                                                          */
 /* ------------------------------------------------------------------ */
 
-/**
- * 所有数据单元格的统一外壳。宽度和内边距只来自 COLUMNS 与 CELL_PAD，
- * 内容组件不许自己再加横向 padding —— 否则又会和表头错开。
- */
+/** 数据单元格统一外壳。宽度和内边距只来自 COLUMNS 与 CELL_PAD，内容不许自带横向 padding。 */
 function Cell({
   w,
   align = "left",
@@ -406,7 +378,7 @@ type Patch = (id: number, changes: Partial<ResolvedTask>, label: string) => void
 function commitDay(task: ResolvedTask, field: Field, day: number, patch: Patch) {
   const span = { startDay: task.startDay, endDay: task.endDay };
   if (field === "start") {
-    // 改开始日期保持工期，结束日期跟着推（DESIGN.md §1.6）
+    // 改开始日期保持工期，结束日期跟着推
     patch(task.id, setStart(span, day), "改开始日期");
   } else if (field === "end") {
     patch(task.id, setEnd(span, day), "改结束日期");
@@ -496,7 +468,7 @@ function Row({
   active: boolean;
   /** 未关闭的风险：几条、最高一档。没有就是 null */
   risk: RiskFlag | null;
-  /** 此刻是不是卡着 —— 和风险是两件事，标识也必须是两个 */
+  /** 此刻是否受阻；与风险是两件事，标识也分开 */
   blockedNow: boolean;
   striped: boolean;
   editing: Field | null;
@@ -525,8 +497,7 @@ function Row({
   const natural = calendar.countCalendarDays(span.startDay, span.endDay);
   const working = calendar.countWorkdays(span.startDay, span.endDay);
   const blocked = blockedDays(task.blocked);
-  // 父任务的日期两个视图下都是汇总值；实施视图里还没动过的也不能直接改数字
-  // （要动就去甘特图上拖那条虚线，那样语义明确：一拖就变成实施）
+  // 父任务日期是汇总值；实施视图里没动过的也不能直接改数字，要去甘特图拖虚线
   const dateReadOnly = task.hasChildren || (viewMode === "actual" && ghost);
   const gap = compareOn ? deviation(task) : null;
 
@@ -605,20 +576,12 @@ function Row({
               {task.name || "未命名任务"}
             </span>
 
-            {/*
-              两个独立的标识，不再合并成一个含糊的「卡住」：
-
-                ⛔ 受阻 = 已经在发生，工期正在被吃掉，今天就得有人去处理
-                ⚠ 风险 = 可能会发生，要安排人盯着
-
-              颜色也分开：受阻恒为红，风险按等级取色。一个红点同时表示这两件事，
-              看的人分不出哪个该现在打电话。
-            */}
+            {/* ⛔ 受阻是已在发生，⚠ 是风险可能发生；颜色分开，免得混成一个「有问题」 */}
             {blockedNow && (
               <span
-                title="有一条还没关掉的阻碍"
-                className="shrink-0 rounded px-1 text-[9px] font-semibold leading-none text-[#f43f5e]"
-                style={{ background: "rgba(244,63,94,0.14)" }}
+                title="有未关闭的阻碍，今天正在受影响"
+                className="shrink-0 rounded px-1 text-[9px] font-semibold leading-none text-[var(--danger)]"
+                style={{ background: "color-mix(in srgb, var(--danger) 14%, transparent)" }}
               >
                 ⛔受阻
               </span>
@@ -636,9 +599,7 @@ function Row({
               </span>
             )}
 
-            {/* 行级操作收进一个悬停出现的 ⋯ 菜单。
-                任务名列要留给名字本身，摆两三个常驻按钮会把它挤掉；
-                而且这些操作都各自有快捷键，菜单主要承担「发现」而不是「高频使用」 */}
+            {/* 行级操作收进悬停出现的 ⋯ 菜单，给任务名让出宽度 */}
             <RowMenu
               task={task}
               onOpenDetail={onOpenDetail}
@@ -665,7 +626,7 @@ function Row({
       <DateCell
         w={W.start}
         editing={editing === "start"}
-        // 父任务日期是子任务汇总出来的，只读（DESIGN.md §1.3）
+        // 父任务日期由子任务汇总，只读
         readOnly={dateReadOnly}
         placeholder={ghost ? "未开始" : undefined}
         day={span.startDay}
@@ -691,8 +652,7 @@ function Row({
 
       {shown.has("duration") && (
       <>
-      {/* 工期：自然日为主，工作日为辅。两个数只在不同时才都显示 ——
-          没跨休息日时「7·7」纯属噪音，差异本身就是信号（DESIGN.md §1.5） */}
+      {/* 工作日与自然日只在不同时才并排显示，差异本身就是信号 */}
       {editing === "duration" ? (
         <Cell w={W.duration}>
           <EditInput
@@ -710,9 +670,9 @@ function Row({
           title={
             dateReadOnly
               ? "由子任务汇总"
-              : `自然日 ${natural} 天 / 工作日 ${working} 天` +
-                (blocked > 0 ? ` / 其中 ${blocked} 天受阻` : "") +
-                "（双击修改）"
+              : `自然日 ${natural} 天，工作日 ${working} 天` +
+                (blocked > 0 ? `，其中 ${blocked} 天受阻` : "") +
+                "。双击修改"
           }
           onDoubleClick={
             dateReadOnly || task.milestone ? undefined : () => onEdit("duration")
@@ -726,14 +686,12 @@ function Row({
               ·{working}
             </span>
           )}
-          {/* 受阻天数和工期是同一个问题的两面，放一起才能直接对比。
-              这里是**累计**天数（含已经关掉的），和名字旁那个「⛔受阻」不是
-              一回事 —— 那个说的是此刻还卡不卡着 */}
+          {/* 这里是累计受阻天数（含已关掉的），与名字旁「⛔受阻」不同 */}
           {blocked > 0 && (
             <span
               title={`累计 ${blocked} 天没能正常推进`}
-              className="ml-1.5 rounded px-1 font-mono text-[9px] font-semibold leading-none text-amber-600"
-              style={{ background: "rgba(245,158,11,0.16)" }}
+              className="ml-1.5 rounded px-1 font-mono text-[9px] font-semibold leading-none text-[var(--warn)]"
+              style={{ background: "color-mix(in srgb, var(--warn) 16%, transparent)" }}
             >
               阻{blocked}
             </span>
@@ -745,7 +703,7 @@ function Row({
 
       {shown.has("progress") && (
       <>
-      {/* 进度：父任务由子任务汇总，不可手填（DESIGN.md §1.2） */}
+      {/* 父任务进度由子任务汇总，不可手填 */}
       {editing === "progress" ? (
         <Cell w={W.progress}>
           <EditInput
@@ -769,7 +727,7 @@ function Row({
               ? "由子任务汇总"
               : canEdit("progress", viewMode)
                 ? "双击修改"
-                : "进度在「实施」视图里修改"
+                : "进度只能在「实施」视图里修改"
           }
           onDoubleClick={
             task.hasChildren || !canEdit("progress", viewMode)
@@ -803,9 +761,8 @@ function Row({
           {gap ? (
             <span
               className="font-mono text-[10px] font-semibold tabular-nums"
-              // 和甘特图上的计划条同一条规则：超出计划红、落在计划内绿。
-              // 三处用不同配色会让人以为它们说的是不同的事
-              style={{ color: gap.end > 0 ? "#dc2626" : "#059669" }}
+              // 与甘特图计划条同一规则：超出计划红、计划内绿
+              style={{ color: gap.end > 0 ? "var(--danger)" : "var(--ok)" }}
             >
               {gap.end > 0 ? `+${gap.end}` : gap.end}d
             </span>
@@ -853,7 +810,7 @@ function DateCell({
       className={readOnly ? "opacity-60" : "cursor-pointer"}
       title={
         placeholder
-          ? "还没开始 —— 到甘特图上拖那条虚线，或点它采用计划日期"
+          ? "还没开始。到甘特图上拖虚线设置实施日期，或点这里采用计划日期"
           : readOnly
             ? "由子任务汇总"
             : `${dayToIso(day)}（单击选择日期）`
@@ -876,12 +833,7 @@ function DateCell({
 /* 紧急程度                                                            */
 /* ------------------------------------------------------------------ */
 
-/**
- * 紧急程度列。
- *
- * 这个字段之前只能看不能改 —— 数据模型里有、甘特条上画了、却没有任何入口，
- * 等于是个装饰。现在是一个显式的列，点开就能改。
- */
+/** 紧急程度列：点开即改。 */
 function PriorityCell({
   priority,
   onPick,
@@ -901,7 +853,7 @@ function PriorityCell({
           e.stopPropagation();
           setOpen((v) => !v);
         }}
-        title={`${PRIORITY_LABELS[priority]}（点击修改）`}
+        title={`${PRIORITY_LABELS[priority]}，点击修改`}
         className="rounded px-1.5 py-0.5 text-[10px] font-semibold leading-none transition-transform active:scale-95"
         style={{ background: withAlpha(color, 0.16), color }}
       >
@@ -1092,7 +1044,7 @@ function RowMenu({
 /* 负责人                                                              */
 /* ------------------------------------------------------------------ */
 
-/** 头像 + 名字，点击从已有人员里选，不再手打文本。 */
+/** 头像 + 名字，点击从已有人员里选。 */
 function AssigneeCell({
   people,
   personId,
@@ -1110,8 +1062,7 @@ function AssigneeCell({
 
   return (
     <Cell w={W.assignee}>
-      {/* 按钮不带横向 padding —— 内边距一律由 Cell 提供，
-          否则头像会比表头「负责人」三个字偏出去几像素 */}
+      {/* 不带横向 padding：内边距由 Cell 提供，否则会与表头错开 */}
       <button
         ref={setAnchor}
         onClick={(e) => {
@@ -1172,9 +1123,7 @@ function AssigneeCell({
 
           {people.length === 0 && (
             <div className="px-2.5 py-2 text-[10px] leading-relaxed text-[var(--text-dim)]">
-              还没有负责人。
-              <br />
-              到「设置 → 负责人」里添加。
+              还没有负责人，到「设置 → 负责人」里添加。
             </div>
           )}
         </div>
@@ -1208,7 +1157,7 @@ function EditInput({
         align === "right" ? "text-right" : ""
       }`}
       onKeyDown={(e) => {
-        // 阻止冒泡，否则 Enter 会被工作区的「新建任务」快捷键接走
+        // 阻止冒泡，否则 Enter 会触发工作区的「新建任务」
         e.stopPropagation();
         if (e.key === "Enter") onCommit(e.currentTarget.value);
         if (e.key === "Escape") onCancel();
@@ -1228,11 +1177,11 @@ interface DropState {
   valid: boolean;
 }
 
-/** 落在行的上下 28% 判定为「插到前/后」，中间 44% 判定为「变成子任务」 */
+/** 行的上下 28% 判为插到前/后，中间 44% 判为变成子任务 */
 const EDGE = 0.28;
-/** 起手要移动这么多像素才算拖拽，否则单击选中和双击开详情都会被误判 */
+/** 移动超过这个距离才算拖拽，否则会误伤单击和双击 */
 const DRAG_THRESHOLD = 5;
-/** 拖到距容器上下边缘这么近时自动滚动 */
+/** 距容器上下边缘小于这个距离时自动滚动 */
 const AUTOSCROLL_ZONE = 28;
 
 function useRowDrag({
@@ -1256,7 +1205,7 @@ function useRowDrag({
   const active = useRef(false);
   const autoScroll = useRef(0);
 
-  // 自动滚动。拖到边缘时列表自己往下走，否则长列表根本没法把任务拖到远处
+  // 拖到边缘时自动滚动，否则长列表拖不到远处
   useEffect(() => {
     if (autoScroll.current === 0) return;
     let raf = 0;
@@ -1270,7 +1219,7 @@ function useRowDrag({
   }, [drop, scrollRef]);
 
   const onPointerDown = (id: number, e: React.PointerEvent) => {
-    // 从按钮、输入框上起手的不算拖拽 —— 那些是它们自己的交互
+    // 从按钮、输入框上起手不算拖拽
     if ((e.target as HTMLElement).closest("button, input, textarea")) return;
     armed.current = { id, x: e.clientX, y: e.clientY };
     active.current = false;
@@ -1298,8 +1247,7 @@ function useRowDrag({
           ? "after"
           : "inside";
 
-    // 里程碑不接受子任务，中间区退化成「插到它后面」而不是直接判非法 ——
-    // 拖到一半突然没有任何落点提示，用户会以为程序卡了
+    // 里程碑不接受子任务：中间区退化成「插到它后面」，避免中途没有落点提示
     if (position === "inside" && tasks[index].milestone) position = "after";
 
     return { index, position, valid: true };
@@ -1383,10 +1331,9 @@ function DropIndicator({
   const target = tasks[drop.index];
   if (!target) return null;
 
-  const color = drop.valid ? "var(--accent)" : "#f43f5e";
+  const color = drop.valid ? "var(--accent)" : "var(--danger)";
 
-  // 「变成子任务」用整行高亮框，「插到前后」用一条线 ——
-  // 两种落点的后果完全不同，视觉上必须一眼分得开
+  // 变成子任务用整行高亮框，插到前后用线：两种落点后果不同
   if (drop.position === "inside") {
     return (
       <div
@@ -1398,13 +1345,13 @@ function DropIndicator({
           boxShadow: `inset 0 0 0 2px ${color}`,
           background: drop.valid
             ? "color-mix(in srgb, var(--accent) 10%, transparent)"
-            : "rgba(244,63,94,0.08)",
+            : "color-mix(in srgb, var(--danger) 8%, transparent)",
         }}
       />
     );
   }
 
-  // 指示线缩进到落点的实际层级，让人看清会落在哪一级
+  // 指示线缩进到落点的层级
   const indent = NAME_PAD + target.depth * INDENT;
 
   return (

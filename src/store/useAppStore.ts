@@ -46,10 +46,7 @@ import {
 import { BUILTIN_KINDS, blockerRef, parseBlockerRef, parseItemOrder } from "../core/items";
 import type { DailyNote, ItemKind, ItemNote, Risk, Milestone } from "../db/api";
 
-/**
- * 一条待写入的逐日记录。
- * 带 id = 在改已有的那条；不带 = 新写一条。
- */
+/** 一条待写入的逐日记录。带 id = 改已有的那条；不带 = 新写 */
 export interface NoteDraft {
   id?: number;
   taskId: number | null;
@@ -60,14 +57,8 @@ export interface NoteDraft {
 import { today } from "../gantt/time";
 
 /**
- * 应用状态。
- *
- * 任务表是一个**就地修改**的 Map，不是不可变对象 —— 拖拽时每帧都会改它，
- * 每帧复制 500 个任务是纯粹的浪费。React 靠 `revision` 计数器感知变化：
- * 命令栈每次落地就 +1，读取方 memo 在 revision 上。
- *
- * 代价是必须纪律性地「只经由命令栈修改 tasks」。这条纪律换来的是
- * 撤销/重做/落库三件事自动全部正确 —— 没有任何一条写路径能绕过它们。
+ * tasks 是就地修改的 Map（拖拽每帧都改），React 靠 `revision` 感知变化。
+ * 只许经由命令栈修改 tasks，否则撤销/落库会漏。
  */
 
 export type Screen = { name: "list" } | { name: "workspace"; projectId: number };
@@ -81,7 +72,6 @@ interface AppState {
   loadingProjects: boolean;
 
   project: Project | null;
-  /** 工作日历。渲染、工期换算、自动重排都读它（DESIGN.md §1.5） */
   calendar: WorkCalendar;
   tasks: TaskMap;
   dependencies: DependencyRow[];
@@ -91,190 +81,86 @@ interface AppState {
   persistence: Persistence | null;
   detachGuards: (() => void) | null;
 
-  /**
-   * 甘特条按哪一维数据着色（DESIGN.md §11）。
-   * 这是视图偏好而非项目数据 —— 存全局 settings，不进撤销栈，也不随项目走。
-   */
+  /** 视图偏好：存全局 settings，不进撤销栈，不随项目走（以下几项同） */
   colorBy: ColorBy;
-
-  /** 行高档位。和着色一样属于视图偏好，存全局 settings */
   rowHeightKey: RowHeightKey;
 
-  /**
-   * 主题：跟随系统 / 浅色 / 深色。
-   *
-   * 和前两个视图偏好不同，它存 localStorage 而不是 settings 表 —— 数据库要
-   * 等窗口起来才能异步读，那一段会先画一帧错的。理由见 core/themeMode.ts。
-   */
+  /** 存 localStorage 而非 settings 表，否则启动会先画一帧错的主题 */
   themeMode: ThemeMode;
 
-  /**
-   * 系统当前是不是深色。只在 themeMode === "system" 时有意义，但**始终**维护 ——
-   * 这样从「浅色」切回「跟随系统」时不需要再去问一次 matchMedia，直接读它即可。
-   * 由 App 的 matchMedia 监听写入，全应用只有那一个监听源。
-   */
+  /** 始终维护，只由 App 的 matchMedia 监听写入 */
   systemDark: boolean;
 
-  /**
-   * 顶层视图：甘特 / 看板 / 时间线 / 复盘 / 事项（core/views.ts）。
-   * 同一批数据的几种看法，切换它不改任何数据。
-   */
   activeView: AppView;
 
-  /**
-   * 哪些内置视图是开着的。甘特永远在里面。
-   *
-   * 和 colorBy、rowHeightKey 同一类：**全局视图偏好**，存 settings 表，
-   * 不进撤销栈，也不随项目走。为什么不分项目：active_view 本来就是全局的，
-   * 分项目会让「这个项目怎么没看板」变成一个要解释的现象，而收益
-   * （少数项目想精简视图）在这个量级的工具里不值得。
-   *
-   * 插件视图不在这里 —— 它们的开关是「装不装那个插件」。
-   */
+  /** 甘特永远在里面。插件视图不归它管 */
   enabledViews: BuiltinView[];
 
-  /**
-   * 顶部标签的手动顺序（完整 key 列表，含插件视图）。
-   *
-   * 空数组 = 没排过，走 core/views.ts 的默认顺序。和 enabled_views 一样是
-   * **全局视图偏好**，存 settings 表、不进撤销栈、不随项目走：用户是在
-   * 「这个软件怎么用」的层面上排它，不是在排某个项目的甘特。
-   */
+  /** 完整 key 列表（含插件视图）；空 = 默认顺序 */
   viewOrder: string[];
 
-  /**
-   * 计划 / 实施。切的是「读哪一组日期」，不是换一张表。
-   * 只对甘特视图有意义 —— 另外三个视图各自有固定的数据归属。
-   */
+  /** 只对甘特视图有意义 */
   viewMode: ViewMode;
   /** 实施侧是否叠加显示计划条 */
   compareOn: boolean;
 
-  /**
-   * 负责人。全局共享，不按项目隔离 —— 同一个人通常同时出现在多个项目里。
-   * 它不是任务数据，所以不进撤销栈：删掉一个人再按 ⌘Z，用户预期撤销的是
-   * 刚才的任务编辑，而不是把人变回来。
-   */
+  /** 全局共享，不按项目隔离；不进撤销栈 */
   people: Person[];
 
-  /** 左侧网格的选中行；跨组件共享，因为快捷键在 window 上监听 */
+  /** 放在 store 是因为快捷键在 window 上监听 */
   selectedId: number | null;
 
-  /** 详情面板正在看哪个任务；null 表示关闭 */
   detailId: number | null;
 
-  /**
-   * 新建任务后要自动进入重命名的那一行。
-   *
-   * 双击已经被「打开详情」占用，所以新建之后必须自动进编辑态 ——
-   * 否则连按 Enter 批量建任务，每一条都得再想办法进重命名，速度就没了。
-   */
+  /** 新建后自动进入重命名的那一行（双击已被「打开详情」占用） */
   pendingEditId: number | null;
 
-  /**
-   * taskId → 未关闭的风险（条数 + 最高一档）。网格和看板卡片的角标靠它。
-   *
-   * 带上等级是因为角标要按严重程度上色 —— 一条低风险和三条高风险
-   * 用同一个灰点表示，等于把最该看的那条藏起来了。
-   */
+  /** taskId → 未关闭风险的条数 + 最高一档，角标按等级上色 */
   openRisks: Map<number, RiskFlag>;
 
-  /**
-   * 当前项目的全部风险，全局风险清单的数据源。
-   *
-   * 和逐日记录一样即写即存、不进撤销栈：⌘Z 该撤销的是刚才那次拖拽，
-   * 而不是把你刚记下的一条风险悄悄抹掉。
-   */
+  /** 风险、逐日记录、事项、里程碑都即写即存，不进命令栈 */
   projectRisks: Risk[];
 
-  /**
-   * 正在写/正在改的那一条逐日记录。
-   *
-   * 放在 store 而不是时间线组件内部，是因为它有**两个入口**：时间线里的
-   * 「记一笔」，和甘特条上右键某一天。后者要先切到时间线视图再把草稿递过去，
-   * 跨组件传递必须走共享状态。
-   */
+  /** 两个入口（时间线「记一笔」/ 甘特右键某天），所以放 store */
   noteDraft: NoteDraft | null;
 
-  /**
-   * 当前项目的全部逐日记录，时间线视图的数据源。
-   *
-   * 和风险、评论一样是**即写即存**的独立实体，不进命令栈 —— ⌘Z 撤销的
-   * 应该是刚才那次拖拽，而不是把你写下的一句当日总结抹掉。
-   */
   dailyNotes: DailyNote[];
 
-  /**
-   * 当前项目的全部事项，事项视图的数据源之一（另两个是阻碍和风险实体）。
-   *
-   * 即写即存、不进命令栈 —— 同上。库层已按创建时间倒序排好。
-   */
+  /** 库层已按创建时间倒序排好 */
   itemNotes: ItemNote[];
 
   /**
-   * 事项视图的手动顺序：行 key（`note:1` / `blocker:12/b1` / `risk:3`）的列表。
-   * 空数组 = 没排过，用默认的时间倒序。
-   *
-   * 存的是 key 而不是给三张表各加一个 sort_order 列：清单里的行来自
-   * item_notes / risks / tasks.blocked 三处，顺序是**这张清单**的属性，
-   * 不是哪个实体的属性。按项目存在 settings 表里（ITEM_ORDER_KEY）。
+   * 事项清单的手动顺序：行 key（`note:1` / `blocker:12/b1` / `risk:3`）；空 = 时间倒序。
+   * 行来自三张表，所以存 key 而不是 sort_order 列；按项目存 settings。
    */
   itemOrder: string[];
 
-  /**
-   * 当前项目的全部里程碑，里程碑视图和甘特图的数据源。
-   *
-   * 和事项、风险一样**即写即存、不进命令栈** —— ⌘Z 该撤销的是刚才那次
-   * 拖拽改期，而不是把你刚建的一个项目节点悄悄抹掉。库层已按手动顺序排好。
-   */
+  /** 库层已按手动顺序排好 */
   milestones: Milestone[];
 
-  /**
-   * 事项类型清单。**全局**，不随项目走（migrations/011_item_kinds.sql）。
-   *
-   * 初值是代码里的常量而不是空数组：事项视图在第一帧就要渲染类型标签，
-   * 而这张表是异步读回来的 —— 空数组会让所有「代办」先显示成裸 key。
-   */
+  /** 全局表。初值用常量，否则首帧类型标签显示成裸 key */
   itemKinds: ItemKind[];
 
-  /**
-   * `Ctrl+K` 那个弹窗开着没有。
-   *
-   * 放在 store 而不是组件内部，是因为它有**两个入口**：任何视图下的全局
-   * 快捷键，和事项视图里那个「＋」按钮。跨组件的开关必须走共享状态。
-   */
+  /** `Ctrl+K` 弹窗；全局快捷键和事项视图「＋」两个入口 */
   quickNoteOpen: boolean;
 
-  /**
-   * 「存下并立刻分拣」（录入弹窗里的 ⌘↵）要给哪一行弹分拣菜单。
-   *
-   * 和 pendingEditId 同款的一次性信号，理由也一样：动作的发起方
-   * （录入弹窗）和执行方（事项列表里那一行）是两个组件，而分拣菜单
-   * 只该有一份实现 —— 在弹窗里再画一个等于两套代码迟早长出两种行为。
-   */
+  /** 录入弹窗 ⌘↵ 后要给哪一行弹分拣菜单（一次性信号） */
   pendingSortNoteId: number | null;
 
-  /**
-   * 设置面板：null = 关着，字符串 = 开在那一页。
-   *
-   * 本来是 Workspace 的局部 state。挪到 store 是因为出现了第二个入口 ——
-   * 事项的分拣菜单里那句「新建类型…」要直接把人送到「设置 → 视图」。
-   * 自定义类型藏在设置里，而用户是在分拣菜单前面发现「没有我要的类型」的，
-   * 那一刻给一条直达的路，比让他自己去齿轮图标下面翻有用得多。
-   */
+  /** null = 关着，字符串 = 开在那一页。分拣菜单「新建类型…」要直达设置 */
   settingsTab: string | null;
 
-  /** 全局下一个可用的任务 id，由 load_project 给出。见 nextId 的说明 */
+  /** 全库下一个可用的任务 id，见 nextId */
   nextTaskId: number;
   saving: boolean;
   saveError: unknown;
 
   openDetail: (id: number | null) => void;
   consumePendingEdit: () => void;
-  /** 重新拉一遍项目风险，并据此重算角标。任何风险的增删改之后都要调 */
+  /** 任何风险的增删改之后都要调，同时重算角标 */
   refreshRisks: () => Promise<void>;
   addRisk: (taskId: number, content: string, level: number) => Promise<void>;
-  /** 关闭一条风险，必须带上处置说明 —— 打个勾就完事的关闭是没有价值的记录 */
+  /** 必须带处置说明 */
   resolveRisk: (id: number, resolution: string) => Promise<void>;
   reopenRisk: (id: number) => Promise<void>;
   removeRisk: (id: number) => Promise<void>;
@@ -286,12 +172,7 @@ interface AppState {
   assignPerson: (taskId: number, personId: number | null) => void;
   setPriority: (taskId: number, priority: 0 | 1 | 2 | 3) => void;
   addBlocked: (taskId: number, period: BlockedPeriod) => void;
-  /**
-   * 新记一条阻碍。默认是未关闭的、从今天起算（把卡片拖进受阻列走的也是它）。
-   *
-   * `span` / `live` 是补记用的：一条上个月卡过三天、现在已经做完的活，
-   * 既不该从今天起算，也不该继续往后长。
-   */
+  /** 默认未关闭、从今天起算；`span` / `live` 给补记用 */
   addBlocker: (
     taskId: number,
     reason: BlockReason,
@@ -299,77 +180,61 @@ interface AppState {
     span?: { from: number; to: number },
     live?: boolean,
   ) => void;
-  /** 手动关掉一条阻碍 —— 未关闭的阻碍只有这一个出口 */
   closeBlocker: (taskId: number, periodId: string) => void;
-  /**
-   * 跨天：把没关掉的阻碍延到今天，并顺延对应任务的计划结束日。
-   * 不进撤销栈（见 CommandStack.applySystem）。
-   */
+  /** 跨天顺延，不进撤销栈（CommandStack.applySystem） */
   extendOpenBlockers: () => void;
   updateBlocked: (taskId: number, period: BlockedPeriod) => void;
   removeBlocked: (taskId: number, periodId: string) => void;
   setColorBy: (mode: ColorBy) => void;
   setRowHeight: (key: RowHeightKey) => void;
-  /** 切主题：跟随系统 / 浅色 / 深色。落 localStorage，并同步写 DOM 属性 */
   setThemeMode: (mode: ThemeMode) => void;
-  /** 系统深浅变了。只有 App 的 matchMedia 监听调它 —— 全应用唯一写入源 */
+  /** 只有 App 的 matchMedia 监听调它 */
   setSystemDark: (systemDark: boolean) => void;
   setNoteDraft: (draft: NoteDraft | null) => void;
-  /** 在甘特上右键某天：切到时间线并把草稿准备好 */
+  /** 切到时间线并准备好草稿 */
   startNoteAt: (taskId: number | null, day: number) => void;
   loadDailyNotes: () => Promise<void>;
   addDailyNote: (taskId: number | null, day: string, content: string) => Promise<void>;
   editDailyNote: (id: number, day: string, content: string) => Promise<void>;
   removeDailyNote: (id: number) => Promise<void>;
   setActiveView: (view: AppView) => void;
-  /** 开关一个内置视图。甘特关不掉（core/views.toggleView 拦住） */
   setViewEnabled: (view: BuiltinView, on: boolean) => void;
-  /** 手动排标签顺序；传空数组 = 恢复默认顺序 */
+  /** 空数组 = 恢复默认 */
   setViewOrder: (order: string[]) => void;
 
   /* ---------------- 事项 ---------------- */
 
   setQuickNoteOpen: (open: boolean) => void;
   setPendingSortNote: (id: number | null) => void;
-  /** 打开设置面板。传页签 id 可以直接落在那一页 */
   openSettings: (tab?: string) => void;
   closeSettings: () => void;
   loadItemNotes: () => Promise<void>;
-  /** 记下手动排好的顺序；传空数组 = 恢复默认的时间倒序 */
+  /** 空数组 = 恢复时间倒序 */
   setItemOrder: (order: string[]) => void;
   loadItemKinds: () => Promise<void>;
-  /** 记一条。返回新建的那条，录入弹窗据此清空标题继续记 */
+  /** 返回新建的那条，录入弹窗据此判断成没成 */
   addItemNote: (
     name: string,
     priority: 0 | 1 | 2 | 3,
     personId: number | null,
     taskId: number | null,
   ) => Promise<ItemNote | null>;
-  /** 改字段。**不碰关闭状态和晋升去向** —— 那两件事各有入口 */
+  /** 不碰关闭状态和晋升去向，那两件事各有入口 */
   patchItemNote: (id: number, changes: Partial<ItemNote>) => Promise<void>;
-  /** 关闭。库层按类型校验结论是否必填 */
+  /** 库层按类型校验结论是否必填 */
   closeItemNote: (id: number, resolution: string | null) => Promise<void>;
   reopenItemNote: (id: number) => Promise<void>;
   removeItemNote: (id: number) => Promise<void>;
-  /** 分拣成阻碍：建实体（走命令栈）+ 记引用 */
   promoteToBlocker: (
     noteId: number,
     taskId: number,
     reason: BlockReason,
     note?: string,
   ) => Promise<void>;
-  /** 分拣成风险：库层一个事务里建实体 + 记引用 */
   promoteToRisk: (noteId: number, taskId: number, level: number) => Promise<void>;
-  /** 撤销分拣：删掉实体，事项退回「未分拣」 */
+  /** 删掉实体，事项退回「未分拣」 */
   unpromoteNote: (noteId: number) => Promise<void>;
-  /**
-   * 把一条实体（阻碍 / 风险）**收回成事项**，返回那条事项的 id。
-   *
-   * 它是「改类型」的前半步，也是「我当初分错了」唯一的退路。两种情形：
-   *   · 本来就是从事项分拣来的 —— 退回那条事项（unpromoteNote）
-   *   · 不是（⌥ 拖甘特条标的阻碍、任务详情里直接建的风险）—— 新建一条
-   *     事项承接它的内容，再删掉实体
-   */
+  /** 把阻碍 / 风险收回成事项，返回事项 id。分拣来的走 unpromoteNote，否则新建一条再删实体 */
   reclaimToNote: (args: {
     source: "blocker" | "risk";
     /** 来源事项；null = 这条实体不是分拣来的 */
@@ -386,16 +251,14 @@ interface AppState {
     color: string,
     requiresNote: boolean,
   ) => Promise<void>;
-  /** 删一个自定义类型。返回被退回「未分拣」的事项条数 */
+  /** 返回被退回「未分拣」的事项条数 */
   removeItemKind: (key: string) => Promise<number>;
-  /** 只改一条风险的优先级 —— 事项视图里点一下标签就生效 */
   setRiskPriority: (id: number, priority: 0 | 1 | 2 | 3 | null) => Promise<void>;
 
   /* ---------------- 里程碑 ---------------- */
 
-  /** 重新拉一遍当前项目的里程碑 */
   loadMilestones: () => Promise<void>;
-  /** 新建。返回新建的那条；失败返回 null */
+  /** 失败返回 null */
   addMilestone: (
     name: string,
     date: string,
@@ -403,7 +266,7 @@ interface AppState {
     description: string,
     taskIds: number[],
   ) => Promise<Milestone | null>;
-  /** 改字段。不碰排序 */
+  /** 不碰排序 */
   patchMilestone: (
     id: number,
     changes: {
@@ -414,7 +277,7 @@ interface AppState {
       taskIds?: number[];
     },
   ) => Promise<void>;
-  /** 拖拽改顺序。ids 是完整的目标顺序 */
+  /** ids 是完整的目标顺序 */
   reorderMilestones: (ids: number[]) => Promise<void>;
   removeMilestone: (id: number) => Promise<void>;
   setViewMode: (mode: ViewMode) => void;
@@ -446,14 +309,13 @@ interface AppState {
   patchTask: (id: number, changes: Partial<Task>, label: string) => void;
 }
 
-/** 项目卡片的强调色候选 —— 每个项目一个，贯穿到甘特条形成识别。 */
 export const PROJECT_COLORS = [
-  "#6366f1",
-  "#0ea5e9",
-  "#10b981",
-  "#f59e0b",
-  "#ef4444",
-  "#a855f7",
+  "#2f6d5e",
+  "#1f5f74",
+  "#35705c",
+  "#b0752a",
+  "#a83e3e",
+  "#5a5490",
 ];
 
 const COLOR_BY_KEY = "bar_color_by";
@@ -462,19 +324,10 @@ const VIEW_MODE_KEY = "view_mode";
 const ACTIVE_VIEW_KEY = "active_view";
 const ENABLED_VIEWS_KEY = "enabled_views";
 const VIEW_ORDER_KEY = "view_order";
-/** 事项视图的手动顺序，按项目分开存 */
 const itemOrderKey = (projectId: number) => `items_order.${projectId}`;
 
 export const useAppStore = create<AppState>((set, get) => {
-  /**
-   * 新任务的 ID 由前端分配，但**基准必须来自数据库**。
-   *
-   * 曾经这里是「当前项目里最大的 id + 1」。而 tasks.id 是全局主键 ——
-   * 在项目 B 里造出的 id 会撞上项目 A 已有的行，保存时 upsert 就把
-   * 项目 A 的那条任务整个改写掉了，静默的跨项目数据损坏。
-   *
-   * 现在以 load_project 返回的全库最大 id 为起点，本会话内单调递增。
-   */
+  /** tasks.id 是全库主键，基准必须用 load_project 给的全库最大 id，否则 upsert 会改写别的项目的行 */
   const nextId = () => {
     const base = get().nextTaskId;
     let max = base - 1;
@@ -491,30 +344,24 @@ export const useAppStore = create<AppState>((set, get) => {
       saveError: s.persistence?.lastError ?? null,
     }));
 
-  /** 同一父节点下的兄弟，按 sortOrder 排序 —— 与 resolve() 的展平顺序一致。 */
+  /** 排序必须与 resolve() 的展平顺序一致 */
   const siblingsOf = (parentId: number | null): Task[] =>
     [...get().tasks.values()]
       .filter((t) => t.parentId === parentId)
       .sort((a, b) => a.sortOrder - b.sortOrder || a.id - b.id);
 
-  /**
-   * 求「插在 after 之后」的 sortOrder。
-   *
-   * 取前后两个兄弟的中点，所以插入一行只产生一行变更，不用给后面所有行重新编号。
-   * 反复在同一处插入会让间隔指数级变小，但 double 有 52 位尾数，
-   * 连续对半分约 50 次才会退化 —— 真实使用中到不了，先不做重新编号。
-   */
+  /** 取前后兄弟的中点，只改一行。同一处连续对半约 50 次才会耗尽 double 精度 */
   const orderAfter = (parentId: number | null, afterId: number | null): number => {
     const siblings = siblingsOf(parentId);
     if (siblings.length === 0) return 0;
 
     const index = afterId == null ? -1 : siblings.findIndex((t) => t.id === afterId);
-    if (index < 0) return siblings[siblings.length - 1].sortOrder + 1; // 追加到末尾
+    if (index < 0) return siblings[siblings.length - 1].sortOrder + 1;
     if (index === siblings.length - 1) return siblings[index].sortOrder + 1;
     return (siblings[index].sortOrder + siblings[index + 1].sortOrder) / 2;
   };
 
-  /** 新建任务的公共部分：日期与负责人继承参照任务，用户连按 Enter 时只需改名字。 */
+  /** 日期与负责人继承参照任务，连按 Enter 时只需改名字 */
   const draftTask = (
     id: number,
     parentId: number | null,
@@ -538,9 +385,7 @@ export const useAppStore = create<AppState>((set, get) => {
       pinned: false,
       sortOrder,
       blocked: [],
-      // 新建的任务默认不自动顺延：是不是该跟着事实走，要用户逐条决定
       autoRollover: false,
-      // 新建的任务默认「还没动过」，实施视图里显示为计划的虚线轮廓
       actualStartDay: null,
       actualEndDay: null,
     };
@@ -564,9 +409,7 @@ export const useAppStore = create<AppState>((set, get) => {
     colorBy: "stage",
     rowHeightKey: "normal",
     themeMode: readStoredThemeMode(),
-    // 初值要和 index.html 首帧脚本的判据一致，否则属性已定、状态却不同，
-    // 第一次切换会跳一下。用 readSystemDark 而不是直接调 matchMedia ——
-    // 这一行在模块加载时就执行，测试环境的桩还没装上
+    // 模块加载时就执行，测试的 matchMedia 桩还没装上，所以不能直接调 matchMedia
     systemDark: readSystemDark(),
     activeView: "gantt",
     enabledViews: [...DEFAULT_ENABLED],
@@ -606,15 +449,9 @@ export const useAppStore = create<AppState>((set, get) => {
       }
       if (row && row in ROW_HEIGHTS) set({ rowHeightKey: row as RowHeightKey });
       if (view === "plan" || view === "actual") set({ viewMode: view });
-      // 读不懂一律回退到「全开」，不是「全关」—— 见 views.parseEnabledViews
       set({ enabledViews: parseEnabledViews(enabled) });
       set({ viewOrder: parseViewOrder(order) });
-      // 只挡明显不合法的字符串。格式合法但插件已被删掉的那种 key 留给
-      // Workspace 渲染时查注册表 —— 这里读设置的时候插件目录还没扫过。
-      //
-      // 「active_view 指向一个被关掉的内置视图」也走同一条兜底路径：
-      // store 这里不判断（它不知道有哪些插件视图），Workspace 查不到就回退到
-      // 甘特。少了那条兜底，关掉看板再重启会得到一个白屏的工作区
+      // 只挡格式不合法的；插件已删 / 视图已关的 key 由 Workspace 查注册表后回退到甘特
       if (isViewKey(active)) set({ activeView: active });
     },
 
@@ -631,15 +468,12 @@ export const useAppStore = create<AppState>((set, get) => {
     setThemeMode(mode) {
       set({ themeMode: mode });
       storeThemeMode(mode);
-      // 写 DOM 属性这一步必须在这里做，不能等 React 重渲染 ——
-      // 甘特图的 Canvas 颜色是在渲染循环里读 store 的，而 DOM 变量是给
-      // 静态层用的，两者要同时换，中间不能有一帧半深半浅
+      // 必须同步写 DOM，不能等 React 重渲染：Canvas 和 DOM 要同一帧换色
       applyThemeMode(mode, get().systemDark);
     },
 
     setSystemDark(systemDark) {
-      // 只有「跟随系统」这一档才需要把变化落到 DOM 上。
-      // 另外两档下系统怎么变都不该动 —— 那正是用户显式选它的原因
+      // 只有「跟随系统」才落到 DOM
       set((s) => {
         if (s.themeMode === "system") applyThemeMode("system", systemDark);
         return { systemDark };
@@ -661,7 +495,6 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         set({ dailyNotes: await api.loadDailyNotes(project.id) });
       } catch {
-        // 时间线读不出来不该拦住整个应用 —— 视图里会显示成空
         set({ dailyNotes: [] });
       }
     },
@@ -670,8 +503,7 @@ export const useAppStore = create<AppState>((set, get) => {
       const { project } = get();
       if (!project || !content.trim()) return;
       const note = await api.addDailyNote(project.id, taskId, day, content);
-      // 库里按 day 正序返回，这里插进来时保持同一个顺序，
-      // 免得刚写的一条跳到列表末尾
+      // 保持库里的 day 正序
       set({
         dailyNotes: [...get().dailyNotes, note].sort(
           (a, b) => a.day.localeCompare(b.day) || a.id - b.id,
@@ -699,13 +531,7 @@ export const useAppStore = create<AppState>((set, get) => {
       void api.setSetting(ACTIVE_VIEW_KEY, view).catch(() => {});
     },
 
-    /**
-     * 开关一个内置视图。
-     *
-     * 关掉正在看的那个视图时要同时切走 —— 否则工作区会停在一个已经不在
-     * 清单里的 key 上，而那条兜底逻辑只在下次启动读设置时才跑。
-     * 回落到甘特：它是唯一一个永远在、且必然有意义的视图。
-     */
+    /** 关掉正在看的视图时同时切回甘特 */
     setViewEnabled(view, on) {
       const next = toggleView(get().enabledViews, view, on);
       set({ enabledViews: next });
@@ -713,11 +539,6 @@ export const useAppStore = create<AppState>((set, get) => {
       if (!on && get().activeView === view) get().setActiveView("gantt");
     },
 
-    /**
-     * 手动排标签顺序。空数组 = 恢复默认，存进去的值也清掉 ——
-     * 这样以后新增内置视图时会自然接在用户排好的队伍末尾，
-     * 而不是被一份陈旧的完整清单挡在外面。
-     */
     setViewOrder(order) {
       set({ viewOrder: order });
       void api.setSetting(VIEW_ORDER_KEY, order.length ? JSON.stringify(order) : "").catch(() => {});
@@ -745,7 +566,6 @@ export const useAppStore = create<AppState>((set, get) => {
       const { project } = get();
       if (!project) return set({ itemNotes: [], itemOrder: [] });
       const [notes, order] = await Promise.all([
-        // 事项读不出来不该拦住整个应用 —— 视图里显示成空
         api.loadItemNotes(project.id).catch(() => [] as ItemNote[]),
         api.getSetting(itemOrderKey(project.id)).catch(() => null),
       ]);
@@ -764,8 +584,7 @@ export const useAppStore = create<AppState>((set, get) => {
     async loadItemKinds() {
       try {
         const kinds = await api.listItemKinds();
-        // 空结果保留常量兜底。库里那两行由打开时的 ensure_builtin_kinds 保证
-        // 存在，真查出来空的说明读失败了 —— 那时显示内置两类比显示零类有用
+        // 库里必有内置两类（ensure_builtin_kinds），空结果说明读失败，保留常量兜底
         if (Array.isArray(kinds) && kinds.length > 0) set({ itemKinds: kinds });
       } catch {
         set({ itemKinds: BUILTIN_KINDS });
@@ -777,10 +596,7 @@ export const useAppStore = create<AppState>((set, get) => {
     async loadMilestones() {
       const { project } = get();
       if (!project) return set({ milestones: [] });
-      // 读不出来不该拦住整个应用 —— 视图和甘特图都显示成空。
-      // Array.isArray 是第二道防线：invoke 正常返回 null 时 catch 不会触发
-      // （测试桩、以及将来某条兼容路径都可能这样），而下游 GanttView 会
-      // 直接对结果 flatMap
+      // invoke 可能正常返回 null（catch 不触发），而 GanttView 会直接 flatMap 结果
       const rows = await api.loadMilestones(project.id).catch(() => [] as Milestone[]);
       set({ milestones: Array.isArray(rows) ? rows : [] });
     },
@@ -800,7 +616,6 @@ export const useAppStore = create<AppState>((set, get) => {
         set({ milestones: [...get().milestones, created] });
         return created;
       } catch {
-        // 库层拦下的原因（空名称、日期读不懂、跨项目任务）由视图弹出提示
         return null;
       }
     },
@@ -822,7 +637,6 @@ export const useAppStore = create<AppState>((set, get) => {
           milestones: get().milestones.map((m) => (m.id === id ? next : m)),
         });
       } catch {
-        // 改失败了以库为准重拉，避免界面停在一个没存下去的状态
         await get().loadMilestones();
       }
     },
@@ -831,7 +645,6 @@ export const useAppStore = create<AppState>((set, get) => {
       const { project } = get();
       if (!project) return;
       const byId = new Map(get().milestones.map((m) => [m.id, m]));
-      // 只认清单里确实有的 id，且按传入顺序重排
       const ordered = ids.map((id) => byId.get(id)).filter((m): m is Milestone => !!m);
       const rest = get().milestones.filter((m) => !ids.includes(m.id));
       set({ milestones: [...ordered, ...rest] });
@@ -851,19 +664,12 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
-    /**
-     * 记一条事项。
-     *
-     * 返回新建的那条而不是 void：录入弹窗存完要**不关窗、清标题、焦点留在
-     * 标题**，好连着记下一条，而它需要知道这次到底成没成。
-     */
     async addItemNote(name, priority, personId, taskId) {
       const { project } = get();
       if (!project || !name.trim()) return null;
       try {
         const row = await api.addItemNote(project.id, name, priority, personId, taskId);
-        // 库层按创建时间倒序返回，这里插到最前面保持同一个顺序 ——
-        // 刚记的那条必须在最上面，否则「快」这个唯一的核心指标就丢了
+        // 保持库里的创建时间倒序
         set({ itemNotes: [row, ...get().itemNotes] });
         return row;
       } catch {
@@ -871,13 +677,7 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
-    /**
-     * 改一条事项的字段。
-     *
-     * 先改内存再落库（乐观更新）：行内改优先级、改负责人是点一下就该见效的
-     * 操作，等一次 IPC 往返会让标签「跳一下才变」。失败时整条重新拉回来 ——
-     * 不是回滚到旧值，而是以库为准，那样不会留下一个凭空想出来的中间态。
-     */
+    /** 乐观更新；失败时以库为准重拉，不回滚到旧值 */
     async patchItemNote(id, changes) {
       const before = get().itemNotes.find((n) => n.id === id);
       if (!before) return;
@@ -906,7 +706,6 @@ export const useAppStore = create<AppState>((set, get) => {
           ),
         });
       } catch {
-        // 库层按类型拦住了（未分拣、结论必填）。以库为准重新拉一遍
         await get().loadItemNotes();
       }
     },
@@ -926,21 +725,8 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     /**
-     * 分拣成阻碍。
-     *
-     * **两步，而且顺序是定的：先建实体，再记引用。**
-     *
-     * 阻碍住在 `tasks.blocked` 这列 JSON 里，由命令栈 + 防抖的整项目保存写出，
-     * 不在事项那条 IPC 的事务边界内 —— 所以做不到像晋升成风险那样一个事务
-     * 两件事（见 query::promote_note_to_risk）。既然必须分两步，就把**不会失败
-     * 的那一步放前面**：patchTask 是纯内存操作，之后的落库失败会走和其余所有
-     * 编辑完全相同的那条路（状态栏「● 未保存」+ ⌘S 重试）。
-     *
-     * 反过来（先记引用）万一任务那边没落库成功，事项上就留着一个指向不存在的
-     * 阻碍的引用；而现在这个顺序下，最坏情况是实体建好了、事项还显示未分拣 ——
-     * 而那条实体**本来就会出现在清单里**（合并层的第 3 个来源），什么都不会丢。
-     *
-     * 准入检查放在这一步，不在录入时：录入的时候连类型都还没定。
+     * 先建实体（纯内存 patchTask，不会失败）再记引用；阻碍不在事项 IPC 的事务里。
+     * 反过来的话落库失败会留下指向不存在阻碍的引用。
      */
     async promoteToBlocker(noteId, taskId, reason, note) {
       const { tasks } = get();
@@ -952,7 +738,6 @@ export const useAppStore = create<AppState>((set, get) => {
       if (!canRecordBlocker(task, day)) return;
 
       const changes = openBlockerOn(task, day, reason, note ?? row.name);
-      // 优先级跟着事项过去 —— 用户刚刚做的那个判断不该在分拣这一步被扔掉
       const period = changes.blocked?.[changes.blocked.length - 1];
       if (period) period.priority = row.priority as 0 | 1 | 2 | 3;
       get().patchTask(taskId, changes, "分拣为阻碍");
@@ -971,12 +756,7 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
-    /**
-     * 分拣成风险。库层一个事务里建风险行 + 写回引用，不可能半途而废。
-     *
-     * 优先级一起带过去（migrations/012_risk_priority.sql）。等级（高/中/低）
-     * 是另一个轴，由分拣对话框单独问 —— 「多严重」和「先做哪个」不是一件事。
-     */
+    /** 库层一个事务里建风险行 + 写回引用 */
     async promoteToRisk(noteId, taskId, level) {
       const row = get().itemNotes.find((n) => n.id === noteId);
       if (!row || row.promotedKind != null) return;
@@ -988,16 +768,7 @@ export const useAppStore = create<AppState>((set, get) => {
       await Promise.all([get().loadItemNotes(), get().refreshRisks()]);
     },
 
-    /**
-     * 撤销分拣：实体删掉，事项退回「未分拣」。
-     *
-     * 这是**悬挂引用唯一的出路**，也是「晋升」这个动作的反向操作。风险那边
-     * 库层在同一个事务里就删掉了；阻碍那边要前端走命令栈把那一段摘掉 ——
-     * 所以库层把原来的引用返回给我们。
-     *
-     * 为什么不靠 ⌘Z：⌘Z 只能退掉命令栈上那一半（阻碍区间），事项上那三列
-     * 它碰不到，结果是一个悬挂引用。这个显式入口才是完整的反向操作。
-     */
+    /** 风险由库层同事务删掉；阻碍由库层返回引用，前端走命令栈摘掉 */
     async unpromoteNote(noteId) {
       let ref: string | null = null;
       try {
@@ -1009,7 +780,7 @@ export const useAppStore = create<AppState>((set, get) => {
       const parsed = ref ? parseBlockerRef(ref) : null;
       if (parsed) {
         const task = get().tasks.get(parsed.taskId);
-        // 引用可能已经悬挂（阻碍被单独删过）—— 那就没什么要摘的了
+        // 引用可能已悬挂
         if (task?.blocked.some((p) => p.id === parsed.periodId)) {
           get().removeBlocked(parsed.taskId, parsed.periodId);
         }
@@ -1017,27 +788,14 @@ export const useAppStore = create<AppState>((set, get) => {
       await Promise.all([get().loadItemNotes(), get().refreshRisks()]);
     },
 
-    /**
-     * 实体 → 事项。见接口上那段注释。
-     *
-     * 为什么要有这条路：类型分错了是常事（「这其实是个风险，不是阻碍」），
-     * 而阻碍和风险是实体，不能像标签那样改一下字段就完事 —— 必须先把实体
-     * 拆掉。拆掉之后那句话得有地方待着，否则用户唯一的选择是删掉重记一遍，
-     * 而「谁在什么时候说的」就此丢失。
-     *
-     * **会丢东西，调用方必须说清楚**：阻碍累计的天数、顺延记录（pushed）、
-     * 归类都随实体一起消失；风险的等级和处置说明同理。这不是可以优化掉的
-     * 实现细节 —— 一条阻碍的身份就是那段区间，区间没了它就不是同一条了。
-     */
+    /** 会丢掉区间、pushed、归类、风险等级与处置说明，调用方要告知用户 */
     async reclaimToNote({ source, noteId, taskId, periodId, riskId, content, priority }) {
       if (noteId != null) {
-        // 分拣来的那种：库层在一个事务里删掉风险 / 返回引用让我们摘掉阻碍
         await get().unpromoteNote(noteId);
         return noteId;
       }
 
-      // 不是分拣来的：先把内容接住，再删实体。顺序是定的 —— 反过来的话
-      // 新建失败就等于静默删掉了一条阻碍
+      // 先建事项再删实体，否则新建失败等于静默删掉
       const row = await get().addItemNote(content, priority ?? 2, null, taskId);
       if (!row) return null;
 
@@ -1054,10 +812,7 @@ export const useAppStore = create<AppState>((set, get) => {
       await get().loadItemKinds();
     },
 
-    /**
-     * 删一个自定义类型。用着它的事项**退回「未分拣」**，不跟着删 ——
-     * 库层保证（query::delete_item_kind）。返回被退回的条数，界面据此提示。
-     */
+    /** 用着它的事项由库层退回「未分拣」（query::delete_item_kind） */
     async removeItemKind(key) {
       let reverted = 0;
       try {
@@ -1075,7 +830,6 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     setViewMode(mode) {
-      // 切回计划视图时顺手关掉对照 —— 对照只在看实施时才有意义
       set({ viewMode: mode, ...(mode === "plan" ? { compareOn: false } : {}) });
       void api.setSetting(VIEW_MODE_KEY, mode).catch(() => {});
     },
@@ -1084,12 +838,7 @@ export const useAppStore = create<AppState>((set, get) => {
       set({ compareOn: on });
     },
 
-    /**
-     * 写实施区间。传 null 表示清空（回到「还没动过」）。
-     *
-     * 两端必须同空同有 —— 半填状态没有语义，而且会让每一处取区间的地方
-     * 都多一个分支。库层有触发器兜底，这里是第一道。
-     */
+    /** null = 清空。两端必须同空同有，库层触发器兜底 */
     setActualSpan(taskId, span, label = "调整实施日期") {
       const task = get().tasks.get(taskId);
       if (!task) return;
@@ -1114,7 +863,6 @@ export const useAppStore = create<AppState>((set, get) => {
       get().run(makeCommand(label, get().tasks, [{ id: taskId, changes }]));
     },
 
-    /** 一键照计划填实施日期 —— 「完全按计划走」那种情况的快捷方式 */
     adoptPlanDates(taskId) {
       const task = get().tasks.get(taskId);
       if (!task) return;
@@ -1125,38 +873,24 @@ export const useAppStore = create<AppState>((set, get) => {
       );
     },
 
-    /**
-     * 拖放是否合法。
-     *
-     * 拖拽过程中每帧都要问一次（决定要不要画落点指示），所以它必须是纯查询、
-     * 没有副作用，而且和真正执行时用的是同一套判断 —— 两处规则一旦分叉，
-     * 就会出现「指示线画出来了但松手没反应」这种最让人困惑的表现。
-     */
+    /** 拖拽每帧都调，必须无副作用；reparentTask 用同一套判断 */
     canDrop(id, targetId, position) {
       const { tasks } = get();
       const task = tasks.get(id);
       const target = tasks.get(targetId);
       if (!task || !target || id === targetId) return false;
 
-      // 不能把一个任务拖进它自己的后代 —— 那会造出一个脱离树的环，
-      // 展平时直接无限递归
+      // 拖进自己的后代会成环，展平时无限递归
       for (let cur = target.parentId; cur != null; cur = tasks.get(cur)?.parentId ?? null) {
         if (cur === id) return false;
       }
 
-      // 里程碑是时间轴上的一个点，不是容器，不接受子任务
       if (position === "inside" && target.milestone) return false;
 
       return true;
     },
 
-    /**
-     * 把任务挂到别处：变成某个任务的子任务，或插到某个任务前 / 后。
-     *
-     * 和 moveTask 一样走「整组兄弟重新编号」，而不是给一个中点值：
-     * 重新编号顺带修好历史遗留的重复 sortOrder，且这一整批变更打包成
-     * **一条**命令，⌘Z 一次就完整回滚（父子关系 + 全组顺序）。
-     */
+    /** 整组兄弟重新编号（顺带修好重复的 sortOrder），打包成一条命令 */
     reparentTask(id, targetId, position) {
       const { tasks, stack } = get();
       if (!stack || !get().canDrop(id, targetId, position)) return;
@@ -1165,11 +899,10 @@ export const useAppStore = create<AppState>((set, get) => {
       const target = tasks.get(targetId)!;
       const newParentId = position === "inside" ? targetId : target.parentId;
 
-      // 目标层级里的兄弟，先把被拖的那个摘出去再算插入位置
       const siblings = siblingsOf(newParentId).filter((t) => t.id !== id);
       let index: number;
       if (position === "inside") {
-        index = siblings.length; // 追加为最后一个子任务
+        index = siblings.length;
       } else {
         const at = siblings.findIndex((t) => t.id === targetId);
         index = position === "before" ? at : at + 1;
@@ -1197,17 +930,7 @@ export const useAppStore = create<AppState>((set, get) => {
       set({ selectedId: id });
     },
 
-    /**
-     * 在兄弟之间上移 / 下移一行。
-     *
-     * 只在同一个父节点下移动，越过首尾就不动 —— 这是大纲编辑器的通用约定。
-     * 「移出当前层级」是另一个语义，交给 ⌘[ 取消缩进，两件事混在一起
-     * 会让用户按一下方向键突然跳到别的分支下面。
-     *
-     * 实现上不是交换两个 sortOrder，而是**把整组兄弟重新按位置编号**。
-     * 交换的写法在两个 sortOrder 恰好相等时（历史数据、导入数据都可能）
-     * 会静默失效；重新编号顺带把这类退化值一并修好。
-     */
+    /** 只在同一父节点内移动。重新编号而非交换：两个 sortOrder 相等时交换会静默失效 */
     moveTask(id, delta) {
       const { tasks, stack } = get();
       const task = tasks.get(id);
@@ -1239,19 +962,12 @@ export const useAppStore = create<AppState>((set, get) => {
       set({ pendingEditId: null });
     },
 
-    /**
-     * 一次查全项目的风险，角标在前端从这份数据推导。
-     *
-     * 之前这里查的是 count_open_risks（只回条数）。全局风险清单要的是明细，
-     * 角标要的是等级 —— 两个都从同一份结果算出来，就不会出现清单里三条高风险、
-     * 角标却显示两条的错位。
-     */
+    /** 清单和角标从同一份结果算，避免两者对不上 */
     async refreshRisks() {
       const { project } = get();
       if (!project) return;
       const rows = await api.loadProjectRisks(project.id).catch(() => []);
-      // IPC 的返回值只是「承诺」是数组，不是保证。拿到别的东西就当空 ——
-      // 一个坏掉的查询不该让整张看板白屏
+      // IPC 不保证返回数组
       const risks = Array.isArray(rows) ? rows : [];
       set({
         projectRisks: risks,
@@ -1288,7 +1004,6 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async addPerson(name) {
-      // 新人的颜色按现有人数轮转，保证「按负责人着色」下彼此不同
       const color = PROJECT_COLORS[get().people.length % PROJECT_COLORS.length];
       await api.createPerson(name, color);
       await get().loadPeople();
@@ -1297,7 +1012,6 @@ export const useAppStore = create<AppState>((set, get) => {
     async savePerson(id, name, color, avatar) {
       await api.updatePerson(id, name, color, avatar);
       await get().loadPeople();
-      // 头像和颜色会直接影响甘特条着色，得让画布重绘
       set({ revision: get().revision + 1 });
     },
 
@@ -1305,8 +1019,7 @@ export const useAppStore = create<AppState>((set, get) => {
       await api.deletePerson(id);
       await get().loadPeople();
 
-      // 库层是 ON DELETE SET NULL，但内存里的任务还指着这个人。
-      // 不同步的话，下一次整项目保存会把已删除的 id 写回去，触发外键错误。
+      // 库层 ON DELETE SET NULL 不影响内存；不同步的话下次保存会写回已删 id，触发外键错误
       const { tasks } = get();
       const orphaned = [...tasks.values()].filter((t) => t.personId === id);
       if (orphaned.length > 0) {
@@ -1330,20 +1043,13 @@ export const useAppStore = create<AppState>((set, get) => {
       get().patchTask(taskId, { priority }, "改紧急程度");
     },
 
-    /**
-     * 受阻时段走 patchTask，所以自动进撤销栈、自动随整项目保存 ——
-     * 它由拖拽手势创建，而条子上其他拖拽全都能 ⌘Z，这一个必须一致。
-     */
     addBlocked(taskId, period) {
       const task = get().tasks.get(taskId);
       if (!task) return;
       get().patchTask(taskId, { blocked: [...task.blocked, period] }, "标记受阻时段");
     },
 
-    /**
-     * 改一条阻碍。区间超出任务时**拉长任务**而不是裁掉这一段 ——
-     * 裁回去的表现是「调了没反应」，最难查的那种 bug（见 blocked.fitBlocked）。
-     */
+    /** 超出任务时拉长任务而不是裁掉（blocked.fitBlocked） */
     updateBlocked(taskId, period) {
       const task = get().tasks.get(taskId);
       if (!task) return;
@@ -1352,16 +1058,10 @@ export const useAppStore = create<AppState>((set, get) => {
       get().patchTask(taskId, changes, "修改阻碍");
     },
 
-    /**
-     * 新建阻碍。走命令栈，所以误点一下可以 ⌘Z ——
-     * 它是用户主动开的，和自动延长不是一回事。
-     */
     addBlocker(taskId, reason, note, span, live = true) {
       const task = get().tasks.get(taskId);
       if (!task) return;
-      // 准入判据在 core 里，这里再挡一次：UI 会禁用按钮，但 store 是
-      // 唯一的写入口，规则只写在界面上等于没写。
-      // 注意它比风险那边宽一格 —— 已完成的活允许补记（canRecordBlocker）
+      // UI 已禁用按钮，store 作为唯一写入口再挡一次
       const day = today();
       if (!canRecordBlocker(task, day)) return;
       get().patchTask(
@@ -1382,25 +1082,15 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     /**
-     * 每日跨天：没关掉的阻碍往后长一天，任务的计划结束日跟着顺延；
-     * 开了自动顺延开关（task.autoRollover）的逾期未完工叶子任务也一并推。
-     *
-     * 全项目一次算完、一条命令落地：一条一条写会让持久化层被触发 N 次，
-     * 而它每次都是整项目全量写回。
-     *
-     * 两条路径可以同时命中同一条任务（既标了阻碍、又单纯逾期），所以这里
-     * **先各自算、再取最大值合并**，而不是把两个 patch 依次叠上去 ——
-     * 叠上去的话同一天会被算两次，工期凭空多一倍。这和 blocked.ts 里
-     * 「两段阻碍同时开着取最大值不求和」是同一条规矩。
+     * 未关阻碍顺延 + autoRollover 逾期顺延，全项目一条命令落地（持久化是整项目全量写）。
+     * 两条路径命中同一任务时取最大值，不叠加，否则同一天算两次。
      */
     extendOpenBlockers() {
       const { tasks, stack } = get();
       if (!stack) return;
       const day = today();
 
-      // 只有叶子任务能被自动顺延：父任务的日期是子任务汇总出来的
-      // （model.resolve），推它下一轮汇总就覆盖回去，等于没改。
-      // rolloverOverdue 内部还会再看 task.autoRollover 这个开关。
+      // 只顺延叶子：父任务日期由 resolve 汇总，推了也会被覆盖
       const parents = new Set<number>();
       for (const task of tasks.values()) {
         if (task.parentId != null) parents.add(task.parentId);
@@ -1408,7 +1098,6 @@ export const useAppStore = create<AppState>((set, get) => {
 
       const changes: Array<{ id: number; changes: Partial<Task> }> = [];
       for (const task of tasks.values()) {
-        // 目标结束日：两条路径都想推时取最靠后的那个
         const blockerPatch = extendOpenBlocks(task, day);
         const overduePatch = parents.has(task.id) ? null : rolloverOverdue(task, day);
         if (!blockerPatch && !overduePatch) continue;
@@ -1418,7 +1107,7 @@ export const useAppStore = create<AppState>((set, get) => {
           overduePatch?.endDay ?? task.endDay,
         );
         const merged: Partial<Task> = { ...blockerPatch, ...overduePatch, endDay: end };
-        // actualEndDay 只有阻碍那条路径会写；逾期顺延不动实施日期
+        // 逾期顺延不动实施日期
         if (blockerPatch?.actualEndDay != null) merged.actualEndDay = blockerPatch.actualEndDay;
         changes.push({ id: task.id, changes: merged });
       }
@@ -1496,29 +1185,23 @@ export const useAppStore = create<AppState>((set, get) => {
       void get().refreshRisks();
       void get().loadDailyNotes();
       void get().loadItemNotes();
-      // 里程碑是项目数据，和任务一起打开；甘特图要拿它叠画节点
       void get().loadMilestones();
-      // 类型表是全局的，不随项目走 —— 但它要在事项视图第一次渲染之前到位，
-      // 而「打开项目」是唯一能保证那之前发生的时机
+      // 全局表，但要在事项视图首次渲染前到位
       void get().loadItemKinds();
-      // 关掉应用过了一夜再打开，没关的阻碍要先补上这几天
+      // 补上应用关着期间跨过的天
       get().extendOpenBlockers();
     },
 
     async closeProject() {
       const { persistence, detachGuards } = get();
 
-      // 必须等落库完成再离开，否则最后 400ms 的编辑会随着卸载丢掉。
-      //
-      // 而且**保存失败时绝不能继续离开** —— 离开会把内存里的任务表整个丢掉，
-      // 那才是真正的数据丢失。之前这里是 `.catch(() => {})`，
-      // 把失败吞掉之后照样清空，等于给自己开了一条静默丢数据的通道。
+      // 必须等落库完成；保存失败绝不能离开，否则内存里的任务表整个丢掉
       if (persistence) {
         try {
           await persistence.flush();
         } catch (err) {
           set({ saveError: err, revision: get().revision + 1 });
-          return; // 留在项目里，让用户看到「● 未保存」并有机会重试
+          return;
         }
       }
 
@@ -1539,7 +1222,7 @@ export const useAppStore = create<AppState>((set, get) => {
         openRisks: new Map(),
         projectRisks: [],
         dailyNotes: [],
-        // 事项随项目走，类型清单不随 —— 后者是全局表，下次开项目不必再读一遍
+        // itemKinds 是全局表，不清
         itemNotes: [],
         milestones: [],
         quickNoteOpen: false,
@@ -1549,11 +1232,7 @@ export const useAppStore = create<AppState>((set, get) => {
       await get().loadProjects();
     },
 
-    /**
-     * 改工作日历。立刻生效于界面，异步落库 ——
-     * 它不属于任务数据，所以不进命令栈（改日历不该被 ⌘Z 撤销掉，
-     * 那会让用户以为自己撤销的是刚才的任务编辑）。
-     */
+    /** 不属于任务数据，不进命令栈 */
     setCalendar(calendar) {
       const { project } = get();
       set({ calendar, revision: get().revision + 1 });
@@ -1582,9 +1261,7 @@ export const useAppStore = create<AppState>((set, get) => {
       set({ selectedId: id });
     },
 
-    /**
-     * 新建同级任务，插在选中行**紧接着的下一行**（而不是列表末尾）。
-     */
+    /** 插在选中行紧接着的下一行，而不是末尾 */
     addTaskAfter(siblingId) {
       const { tasks, stack } = get();
       if (!stack) return;
@@ -1602,12 +1279,7 @@ export const useAppStore = create<AppState>((set, get) => {
       set({ selectedId: id, pendingEditId: id });
     },
 
-    /**
-     * 在指定任务下新建子任务，追加为它的最后一个子节点。
-     *
-     * 和「新建同级 + 缩进」两步走等价，但少一步、且不依赖「前面必须有兄弟」
-     * 这个前提 —— 一个刚建好、还没有任何兄弟的任务也能直接挂子任务。
-     */
+    /** 追加为最后一个子节点 */
     addSubtask(parentId) {
       const { tasks, stack } = get();
       const parent = tasks.get(parentId);
@@ -1618,11 +1290,10 @@ export const useAppStore = create<AppState>((set, get) => {
       const sortOrder =
         existing.length > 0 ? existing[existing.length - 1].sortOrder + 1 : 0;
 
-      // 日期参照最后一个已有子任务，没有的话参照父任务
       const task = draftTask(id, parentId, sortOrder, existing.at(-1) ?? parent);
 
       const edits = [{ kind: "insert" as const, row: task }];
-      // 挂到折叠的父节点下，新任务会凭空消失 —— 顺手展开
+      // 父节点折叠着的话新任务会看不见，顺手展开
       const expand = parent.collapsed
         ? makeCommand("", tasks, [{ id: parentId, changes: { collapsed: false } }])
         : null;
@@ -1634,7 +1305,7 @@ export const useAppStore = create<AppState>((set, get) => {
       set({ selectedId: id, pendingEditId: id });
     },
 
-    /** 删除任务及其全部后代 —— 打包成一条命令，撤销一次整棵子树回来。 */
+    /** 连同全部后代打包成一条命令 */
     deleteTask(id) {
       const { tasks, stack } = get();
       const target = tasks.get(id);
@@ -1662,7 +1333,7 @@ export const useAppStore = create<AppState>((set, get) => {
       });
     },
 
-    /** 缩进：认前一个兄弟做父节点。这是建立层级最快的方式，比拖拽快得多。 */
+    /** 认前一个兄弟做父节点 */
     indentTask(id) {
       const { tasks, stack } = get();
       const task = tasks.get(id);
@@ -1670,7 +1341,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
       const siblings = siblingsOf(task.parentId);
       const index = siblings.findIndex((t) => t.id === id);
-      if (index <= 0) return; // 没有前一个兄弟，无处可缩进
+      if (index <= 0) return;
 
       const newParent = siblings[index - 1];
       const cousins = siblingsOf(newParent.id);
@@ -1680,11 +1351,10 @@ export const useAppStore = create<AppState>((set, get) => {
             id,
             changes: {
               parentId: newParent.id,
-              // 成为新父节点的最后一个子任务
               sortOrder: cousins.length > 0 ? cousins[cousins.length - 1].sortOrder + 1 : 0,
             },
           },
-          // 缩进到一个折叠的父节点里，任务会凭空消失，所以顺手展开
+          // 父节点折叠着的话任务会看不见，顺手展开
           ...(newParent.collapsed
             ? [{ id: newParent.id, changes: { collapsed: false } }]
             : []),
@@ -1705,7 +1375,7 @@ export const useAppStore = create<AppState>((set, get) => {
             id,
             changes: {
               parentId: grandParentId,
-              // 落在原父任务的紧后面，而不是跳到列表末尾
+              // 落在原父任务紧后面
               sortOrder: orderAfter(grandParentId, parent?.id ?? null),
             },
           },
@@ -1730,5 +1400,4 @@ export const useAppStore = create<AppState>((set, get) => {
   };
 });
 
-/** 供持久化层订阅用：把 edits 落库之外的副作用集中在这里。 */
 export type { Edit };

@@ -1,13 +1,4 @@
-/**
- * 实施逾期自动顺延（core/rollover.ts）。
- *
- * 和 blockers.test.ts 是同一类风险：**系统自己改用户的排期**。所以这里逐条
- * 钉死准入条件 —— 什么该推、什么一天也不许动 —— 以及幂等（同一天跑两次
- * 不能推两天）。
- *
- * 开关挂在任务行上（autoRollover），不是全局设置，所以它和另外三个条件
- * 一样是「准入条件」之一，一并在 isOverdue 里验收。
- */
+/** 实施逾期自动顺延：钉死准入条件和幂等（同一天跑两次不能推两天）。 */
 
 import { describe, expect, it } from "vitest";
 import { isOverdue, rolloverOverdue, type RolloverHost } from "./rollover";
@@ -28,7 +19,7 @@ describe("isOverdue —— 该不该顺延这条任务", () => {
   });
 
   it("没开开关的不推 —— 默认就是关的", () => {
-    // 这是它和全局开关的根本区别：同一条活开不开，是它自己的排期决定
+    // 开关挂在任务上，不是全局
     expect(isOverdue(host({ autoRollover: false }), TODAY)).toBe(false);
   });
 
@@ -50,7 +41,6 @@ describe("isOverdue —— 该不该顺延这条任务", () => {
   });
 
   it("开关和另外三个条件是「与」的关系，缺一不可", () => {
-    // 开了开关但没开工、或开了开关但已干完，都不该推
     expect(isOverdue(host({ autoRollover: true, actualStartDay: null }), TODAY)).toBe(false);
     expect(isOverdue(host({ autoRollover: true, progress: 1 }), TODAY)).toBe(false);
   });
@@ -78,7 +68,7 @@ describe("rolloverOverdue —— 跨天顺延", () => {
   });
 
   it("只动计划结束日，不碰实施日期", () => {
-    // 实施日期是「实际怎么干的」的事实记录，自动顺延没有理由改写它
+    // 顺延只改计划，不碰实施日期
     const patch = rolloverOverdue(host() as never, TODAY);
     expect(patch).not.toHaveProperty("actualEndDay");
     expect(patch).not.toHaveProperty("actualStartDay");

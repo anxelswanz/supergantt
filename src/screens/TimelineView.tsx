@@ -1,12 +1,6 @@
 /**
- * 时间线视图：按天倒序的项目流水。
- *
- * 甘特按任务组织，这里按日期组织 —— 回答的是"那天到底怎么了"。
- * 聚合规则全在 core/timeline.ts，这里只负责摆出来和写入。
- *
- * 写入口有两个，都落到同一张 daily_notes 表：
- *   · 这里的「记一笔」
- *   · 甘特条上右键某一天（见 GanttView 的 onContextMenu）
+ * 时间线视图：按天倒序的项目流水，聚合规则在 core/timeline.ts。
+ * 「记一笔」和甘特条右键写的是同一张 daily_notes 表。
  */
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
@@ -35,7 +29,7 @@ const KIND_STYLE: Record<
 > = {
   start: { dot: "var(--accent)", label: "开工" },
   finish: { dot: "#10b981", label: "完成" },
-  blocked: { dot: "#f43f5e", label: "受阻" },
+  blocked: { dot: "var(--danger)", label: "受阻" },
   risk: { dot: "#f59e0b", label: "风险" },
   note: { dot: "var(--text-dim)", label: "记录" },
 };
@@ -44,10 +38,7 @@ const KIND_ORDER: TimelineEvent["kind"][] = ["start", "finish", "blocked", "risk
 
 const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
-/**
- * 连着这么多天没记录才标「间隔」。一个普通周末是两天，标出来只是噪音；
- * 三天起才是值得看一眼的空白。
- */
+/** 连续这么多天没记录才标间隔：周末两天不算 */
 const GAP_MIN = 3;
 
 const tint = (color: string, pct: number) =>
@@ -68,7 +59,7 @@ export function TimelineView() {
   const [range, setRange] = useState<DayRange | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
-  // 右栏点了某一天：等那天真的在屏幕上了再滚过去（可能得先清掉筛选）
+  // 右栏点了某天：等那天渲染出来再滚（可能要先清筛选）
   const [jump, setJump] = useState<number | null>(null);
   const [flash, setFlash] = useState<number | null>(null);
 
@@ -104,14 +95,14 @@ export function TimelineView() {
   const careers = useMemo(() => buildCareers(tasks, todayDay, range), [tasks, todayDay, range]);
 
   const jumpTo = (day: number) => {
-    // 要去的那天被筛掉了就先放开筛选 —— 点了没反应比筛选被清掉更糟
+    // 目标日被筛掉了就先清筛选
     if (range && (day < range.from || day > range.to)) setRange(null);
     setJump(day);
   };
 
   useEffect(() => {
     if (jump == null) return;
-    // 那天未必有记录（比如完成日当天什么都没写）：落到它之前最近的一天
+    // 那天未必有记录：落到它之前最近的一天
     const target = shown.find((d) => d.day <= jump) ?? shown[shown.length - 1];
     setJump(null);
     if (!target) return;
@@ -128,7 +119,7 @@ export function TimelineView() {
     return () => clearTimeout(id);
   }, [flash]);
 
-  // 筛着某一段时「记一笔」落在那一段里：正看着上周，记的多半就是上周的事
+  // 有筛选时「记一笔」的默认日期夹进筛选区间
   const draftDay = range ? Math.min(Math.max(todayDay, range.from), range.to) : todayDay;
 
   const editNote = (e: TimelineEvent) =>
@@ -141,8 +132,7 @@ export function TimelineView() {
     });
 
   return (
-    // 两栏作为一组居中：流水和履历挨着，多出来的宽度平分到两侧，
-    // 而不是把右栏钉在窗口右边、在中间留一道空谷
+    // 两栏作为一组居中，多余宽度分到两侧
     <div className="@container flex min-h-0 flex-1 justify-center">
       <div ref={scrollRef} className="min-h-0 min-w-0 max-w-[820px] flex-1 overflow-y-auto">
         <div className="px-7 pb-16 pt-7">
@@ -152,27 +142,24 @@ export function TimelineView() {
                 逐日流水
               </h2>
               <p className="mt-1 text-[11px] text-[var(--text-dim)]">
-                开工、完成、受阻、风险、当日记录，都落在它们发生的那天
+                按日期查看开工、完成、受阻、风险和记录
               </p>
             </div>
-            {/* 时间线自己的出口：Excel 那份是按任务排的排期表，
-                一段段人写的话塞进单元格只会被截断。HTML 单文件、零外部请求，
-                发到群里或存进共享盘都能直接打开 */}
             <div className="ml-auto flex shrink-0 items-center gap-2">
               <RangeFilter value={range} onChange={setRange} marked={marked} />
               <ExportButton
                 label="⤓ 导出 HTML"
                 title={
                   range
-                    ? `只导出 ${formatRange(range)} 这段的流水（清除筛选可导出全部）`
-                    : "把这条时间线导出成一份可以直接转发的网页"
+                    ? `导出 ${formatRange(range)} 的记录，清除筛选可导出全部`
+                    : "导出为网页文件，可直接转发"
                 }
                 size="sm"
                 run={async () => (await import("../export/run")).exportTimelineToHtml(range)}
               />
               <button
                 onClick={() => setNoteDraft({ taskId: null, day: draftDay })}
-                className="rounded-full px-3 py-1 text-xs font-medium text-white"
+                className="rounded-[var(--r-m)] px-3 py-1 text-xs font-medium text-white"
                 style={{ background: "var(--accent)" }}
               >
                 记一笔
@@ -180,7 +167,7 @@ export function TimelineView() {
             </div>
           </div>
 
-          {/* 快捷区间 + 这一屏的概览。概览跟着筛选走：它说的是「眼前这些」 */}
+          {/* 概览的计数跟着筛选走 */}
           <div className="mb-6 flex min-h-9 flex-wrap items-center gap-x-4 gap-y-2 border-y border-[var(--rule)] py-1.5">
             <div className="flex items-center gap-0.5">
               {presets.map((p) => {
@@ -220,9 +207,9 @@ export function TimelineView() {
 
           {days.length === 0 && !noteDraft && (
             <div className="rounded-xl border border-dashed border-[var(--rule)] px-4 py-10 text-center text-xs leading-relaxed text-[var(--text-dim)]">
-              还没有任何记录。
+              还没有记录。
               <br />
-              拖甘特条开工、在看板里把卡片拖进「卡住」，或者直接「记一笔」。
+              点「记一笔」写下第一条。
             </div>
           )}
 
@@ -236,13 +223,13 @@ export function TimelineView() {
               <div className="mt-3 flex justify-center gap-2">
                 <button
                   onClick={() => setNoteDraft({ taskId: null, day: draftDay })}
-                  className="rounded-full border border-[var(--rule)] px-3 py-1 text-[11px] text-[var(--text)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                  className="rounded-[var(--r-m)] border border-[var(--rule)] px-3 py-1 text-[11px] text-[var(--text)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
                 >
                   ＋ 记一笔
                 </button>
                 <button
                   onClick={() => setRange(null)}
-                  className="rounded-full px-3 py-1 text-[11px] text-[var(--accent)] hover:underline"
+                  className="rounded-[var(--r-m)] px-3 py-1 text-[11px] text-[var(--accent)] hover:underline"
                 >
                   清除筛选
                 </button>
@@ -250,7 +237,7 @@ export function TimelineView() {
             </div>
           )}
 
-          {/* key 跟着筛选变：换一段日期，整列重新入场，看得出「内容换了」 */}
+          {/* key 跟着筛选变：换日期时整列重新入场 */}
           <div key={range ? `${range.from}-${range.to}` : "all"}>
             {shown.map((d, i) => {
               const prev = shown[i - 1];
@@ -272,7 +259,7 @@ export function TimelineView() {
                       type: "spring",
                       stiffness: 200,
                       damping: 26,
-                      // 只错开头几行：后面的本来就在屏幕外，排着队等只会拖慢滚动
+                      // 只错开头几行，屏幕外的不必排队
                       delay: Math.min(i, 10) * 0.025,
                     }}
                   >
@@ -293,7 +280,7 @@ export function TimelineView() {
         </div>
       </div>
 
-      {/* 右栏只在放得下的时候出现：窗口窄了、或者详情抽屉滑出来了，流水优先 */}
+      {/* 右栏只在放得下时出现 */}
       <aside className="hidden min-h-0 w-[420px] shrink-0 overflow-y-auto border-l border-[var(--rule)] @[1080px]:block">
         <TimelineSide
           careers={careers}
@@ -305,7 +292,7 @@ export function TimelineView() {
   );
 }
 
-/** 月份分节。吸顶：往回翻几十天时，抬头就知道自己翻到了哪个月 */
+/** 月份分节，吸顶 */
 function MonthHeader({ iso, count }: { iso: string; count: number }) {
   return (
     <div
@@ -325,14 +312,13 @@ function MonthHeader({ iso, count }: { iso: string; count: number }) {
   );
 }
 
-/** 空白也是信息：哪几段时间没动静，逐日往下翻是看不见的 */
 function Gap({ days }: { days: number }) {
   return (
     <div className="mb-5 flex items-center gap-5">
       <div className="w-14 shrink-0" />
       <div className="flex flex-1 items-center gap-[19px] text-[10px] text-[var(--text-dim)]">
         <span className="ml-[4px] h-4 border-l border-dashed border-[var(--text-dim)] opacity-50" />
-        <span className="opacity-70">间隔 {days} 天没有记录</span>
+        <span className="opacity-70">{days} 天没有记录</span>
       </div>
     </div>
   );
@@ -349,7 +335,7 @@ function Day({
 }: {
   d: TimelineDay;
   isToday: boolean;
-  /** 刚从右栏跳过来：亮一下，告诉眼睛落点在哪 */
+  /** 刚从右栏跳过来，高亮一下 */
   flash: boolean;
   onOpen: (e: TimelineEvent) => void;
   onEdit: (e: TimelineEvent) => void;
@@ -363,7 +349,7 @@ function Day({
       className="group/day -mx-2 mb-5 flex scroll-mt-11 gap-5 rounded-xl px-2 py-1 transition-colors duration-500"
       style={{ background: flash ? tint("var(--accent)", 9) : "transparent" }}
     >
-      {/* 日期列固定宽度，右边的内容才能对齐成一条真正的"线" */}
+      {/* 日期列定宽，右侧轴线才能对齐 */}
       <div className="w-14 shrink-0 text-right">
         <div
           className="font-mono text-[26px] font-semibold leading-none tracking-tight tabular-nums"
@@ -379,7 +365,7 @@ function Day({
         </div>
         {isToday && (
           <span
-            className="mt-1.5 inline-block rounded-full px-1.5 text-[9px] font-semibold leading-[15px] text-white"
+            className="mt-1.5 inline-block rounded-[var(--r-m)] px-1.5 text-[9px] font-semibold leading-[15px] text-white"
             style={{ background: "var(--accent)" }}
           >
             今天
@@ -388,7 +374,6 @@ function Day({
       </div>
 
       <div className="relative min-w-0 flex-1 pl-6">
-        {/* 轴线单独画，节点才能精确压在线上 */}
         <span
           className="absolute bottom-0 left-[4px] top-1 w-px"
           style={{ background: isToday ? tint("var(--accent)", 45) : "var(--rule)" }}
@@ -411,7 +396,7 @@ function Day({
             isToday ? "" : "opacity-0"
           }`}
         >
-          ＋ 给这天记一笔
+          ＋ 记一笔
         </button>
       </div>
     </div>
@@ -465,15 +450,15 @@ function Event({
             <span className="text-[11px] text-[var(--text-dim)]">全项目</span>
           )}
           {event.days != null && event.days > 1 && (
-            <span className="font-mono text-[10px] tabular-nums text-[#f43f5e]">
+            <span className="font-mono text-[10px] tabular-nums text-[var(--danger)]">
               共 {event.days} 天
             </span>
           )}
           {event.unresolved && (
             <span
               className="rounded px-1 text-[9px] font-semibold leading-[14px] text-white"
-              style={{ background: "#f43f5e" }}
-              title="这条阻碍还没关掉，天数每天还在长"
+              style={{ background: "var(--danger)" }}
+              title="未关闭，每天自动加一天"
             >
               未关闭
             </span>
@@ -481,13 +466,13 @@ function Event({
           {event.backdated && (
             <span
               className="text-[10px] text-[var(--text-dim)]"
-              title="写下的日子晚于它所说的日子"
+              title="记录时间晚于事情发生的日期"
             >
               事后补记
             </span>
           )}
         </div>
-        {/* 开工/完成没有正文，标题行已经说完了 */}
+        {/* 开工/完成没有正文 */}
         {event.kind !== "start" && event.kind !== "finish" && (
           <div className="mt-0.5 text-xs leading-relaxed whitespace-pre-wrap text-[var(--text-dim)]">
             {event.text}
@@ -501,13 +486,13 @@ function Event({
             onClick={onEdit}
             className="rounded px-1.5 py-0.5 text-[10px] text-[var(--text-dim)] hover:text-[var(--text)]"
           >
-            改
+            编辑
           </button>
           <button
             onClick={onDelete}
-            className="rounded px-1.5 py-0.5 text-[10px] text-[var(--text-dim)] hover:text-[#f43f5e]"
+            className="rounded px-1.5 py-0.5 text-[10px] text-[var(--text-dim)] hover:text-[var(--danger)]"
           >
-            删
+            删除
           </button>
         </div>
       )}
@@ -515,11 +500,7 @@ function Event({
   );
 }
 
-/**
- * 筛选区间开始之前就卡住、到区间里还没放开的受阻。
- *
- * 置顶、不混进任何一天：它不是这几天「发生」的事，却是这几天的底色。
- */
+/** 筛选区间之前开始、区间内仍在持续的受阻；置顶，不归入任何一天 */
 function Carried({
   events,
   onOpen,
@@ -530,10 +511,10 @@ function Carried({
   return (
     <div
       className="mb-6 rounded-xl border px-3.5 py-3"
-      style={{ borderColor: tint("#f43f5e", 28), background: tint("#f43f5e", 5) }}
+      style={{ borderColor: tint("var(--danger)", 28), background: tint("var(--danger)", 5) }}
     >
-      <div className="mb-2 text-[10px] font-semibold tracking-wide text-[#f43f5e]">
-        此前开始 · 这段日期里仍在受阻
+      <div className="mb-2 text-[10px] font-semibold tracking-wide text-[var(--danger)]">
+        此前开始，仍在受阻
       </div>
       <div className="space-y-2">
         {events.map((e) => (
@@ -545,14 +526,14 @@ function Carried({
               >
                 {e.task?.name || "未命名"}
               </button>
-              <span className="font-mono text-[10px] tabular-nums text-[#f43f5e]">
-                自 {dayToIso(e.since ?? 0).slice(5)} 起 · 共 {e.days} 天
+              <span className="font-mono text-[10px] tabular-nums text-[var(--danger)]">
+                自 {dayToIso(e.since ?? 0).slice(5)} 起，共 {e.days} 天
               </span>
               {e.unresolved && (
                 <span
                   className="rounded px-1 text-[9px] font-semibold leading-[14px] text-white"
-                  style={{ background: "#f43f5e" }}
-                  title="这条阻碍还没关掉，天数每天还在长"
+                  style={{ background: "var(--danger)" }}
+                  title="未关闭，每天自动加一天"
                 >
                   未关闭
                 </span>
@@ -568,12 +549,7 @@ function Carried({
   );
 }
 
-/**
- * 记一笔。
- *
- * 挂不挂任务是可选的 —— 「今天下雨全场停工」不属于任何一条活，硬塞给某个任务
- * 会让它在复盘里被算到那条活头上。
- */
+/** 记一笔。关联任务可选：全项目的事不该算到某条任务头上 */
 function Composer() {
   const draft = useAppStore((s) => s.noteDraft)!;
   const setNoteDraft = useAppStore((s) => s.setNoteDraft);
@@ -624,7 +600,7 @@ function Composer() {
           disabled={draft.id != null}
           className="min-w-0 flex-1 rounded-lg border border-[var(--rule)] bg-[var(--surface)] px-2 py-1 text-xs text-[var(--text)] disabled:opacity-50"
         >
-          <option value="">不挂任务（全项目）</option>
+          <option value="">全项目（不关联任务）</option>
           {leaves.map((t) => (
             <option key={t.id} value={t.id}>
               {t.name || "未命名"}
@@ -639,7 +615,7 @@ function Composer() {
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Escape") setNoteDraft(null);
-          // ⌘Enter 提交：这是个多行输入框，裸 Enter 必须留给换行
+          // 多行输入，裸 Enter 留给换行
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit();
         }}
         rows={3}
@@ -648,7 +624,7 @@ function Composer() {
       />
 
       <div className="mt-2 flex items-center gap-2">
-        <span className="text-[10px] text-[var(--text-dim)]">{shortcut("mod", "Enter")} 保存 · Esc 取消</span>
+        <span className="text-[10px] text-[var(--text-dim)]">{shortcut("mod", "Enter")} 保存，Esc 取消</span>
         <button
           onClick={() => setNoteDraft(null)}
           className="ml-auto rounded-lg px-3 py-1 text-xs text-[var(--text-dim)] hover:text-[var(--text)]"

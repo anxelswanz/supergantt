@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { compareVersions, validateManifest } from "./manifest";
 
-/** 1.2 新增的 manifest 字段：permissions.exec 和 skills。挡的是写错，不是作恶 */
+/** permissions.exec 和 skills：挡的是写错（带路径），不是作恶 */
 
 const base = { id: "demo", name: "示例", version: "1.0.0", apiVersion: "1.2" };
 const check = (extra: Record<string, unknown>) =>

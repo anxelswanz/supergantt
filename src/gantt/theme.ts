@@ -1,8 +1,8 @@
 /**
  * Canvas 绘制用的颜色 token。
  *
- * DOM 层走 Tailwind / CSS 变量，但 Canvas 拿不到 CSS 变量，所以这里维护一份
- * 平行的 JS 常量，按 prefers-color-scheme 切换。两边的语义名保持一致。
+ * Canvas 读不到 CSS 变量，所以这里维护一份与之语义同名的 JS 常量。
+ * 改色时两边必须一起改（DOM 侧见 src/styles.css）。
  */
 
 export interface Theme {
@@ -31,49 +31,49 @@ export interface Theme {
 }
 
 const light: Theme = {
-  surface: "#ffffff",
-  surfaceAlt: "#fafafa",
-  weekend: "rgba(15, 23, 42, 0.035)",
-  holiday: "rgba(244, 63, 94, 0.07)",
-  gridMinor: "rgba(15, 23, 42, 0.06)",
-  gridMajor: "rgba(15, 23, 42, 0.12)",
-  axisText: "#0f172a",
-  axisTextDim: "#64748b",
-  axisRule: "rgba(15, 23, 42, 0.10)",
-  rowHover: "rgba(15, 23, 42, 0.035)",
-  rowStripe: "rgba(15, 23, 42, 0.018)",
-  today: "#f43f5e",
-  todayGlow: "rgba(244, 63, 94, 0.10)",
-  overdue: "#dc2626",
-  onTime: "#059669",
-  bar: "#6366f1",
-  barTrack: "rgba(99, 102, 241, 0.22)",
-  barParent: "#334155",
-  barText: "#ffffff",
-  milestone: "#f59e0b",
+  surface: "#fbfcfc",
+  surfaceAlt: "#f1f4f3",
+  weekend: "rgba(23, 41, 45, 0.03)",
+  holiday: "rgba(168, 62, 62, 0.06)",
+  gridMinor: "rgba(23, 41, 45, 0.05)",
+  gridMajor: "rgba(23, 41, 45, 0.11)",
+  axisText: "#17292d",
+  axisTextDim: "#6a7a7d",
+  axisRule: "rgba(23, 41, 45, 0.09)",
+  rowHover: "rgba(23, 41, 45, 0.035)",
+  rowStripe: "rgba(23, 41, 45, 0.016)",
+  today: "#b4442f",
+  todayGlow: "rgba(180, 68, 47, 0.09)",
+  overdue: "#a83e3e",
+  onTime: "#366f5a",
+  bar: "#2f6d5e",
+  barTrack: "rgba(47, 109, 94, 0.18)",
+  barParent: "#3a4a49",
+  barText: "#fbfcfc",
+  milestone: "#b0752a",
 };
 
 const dark: Theme = {
-  surface: "#0b1020",
-  surfaceAlt: "#0f1629",
-  weekend: "rgba(255, 255, 255, 0.035)",
-  holiday: "rgba(251, 113, 133, 0.11)",
-  gridMinor: "rgba(255, 255, 255, 0.06)",
-  gridMajor: "rgba(255, 255, 255, 0.13)",
-  axisText: "#e2e8f0",
-  axisTextDim: "#7c8aa5",
-  axisRule: "rgba(255, 255, 255, 0.10)",
-  rowHover: "rgba(255, 255, 255, 0.05)",
-  rowStripe: "rgba(255, 255, 255, 0.022)",
-  today: "#fb7185",
-  todayGlow: "rgba(251, 113, 133, 0.14)",
-  overdue: "#f87171",
-  onTime: "#34d399",
-  bar: "#818cf8",
-  barTrack: "rgba(129, 140, 248, 0.24)",
-  barParent: "#94a3b8",
-  barText: "#0b1020",
-  milestone: "#fbbf24",
+  surface: "#0c1416",
+  surfaceAlt: "#111d20",
+  weekend: "rgba(233, 240, 236, 0.03)",
+  holiday: "rgba(217, 122, 105, 0.09)",
+  gridMinor: "rgba(233, 240, 236, 0.05)",
+  gridMajor: "rgba(233, 240, 236, 0.11)",
+  axisText: "#e9f0ec",
+  axisTextDim: "#8a9b9c",
+  axisRule: "rgba(233, 240, 236, 0.09)",
+  rowHover: "rgba(233, 240, 236, 0.045)",
+  rowStripe: "rgba(233, 240, 236, 0.02)",
+  today: "#d97a69",
+  todayGlow: "rgba(217, 122, 105, 0.12)",
+  overdue: "#d97a69",
+  onTime: "#7aad96",
+  bar: "#4e9b86",
+  barTrack: "rgba(78, 155, 134, 0.22)",
+  barParent: "#9fb0ae",
+  barText: "#0c1416",
+  milestone: "#d8a24a",
 };
 
 export function getTheme(isDark: boolean): Theme {
@@ -81,7 +81,7 @@ export function getTheme(isDark: boolean): Theme {
 }
 
 /** 紧急程度色标（DESIGN.md §1.7）：只画条子左端 3px 竖标，不整条染色。 */
-export const PRIORITY_COLORS = ["#ef4444", "#f97316", "#3b82f6", "#94a3b8"];
+export const PRIORITY_COLORS = ["#b23a32", "#c2693a", "#3f7da0", "#8a9a9c"];
 export const PRIORITY_LABELS = ["P0 紧急", "P1 高", "P2 中", "P3 低"];
 
 /**

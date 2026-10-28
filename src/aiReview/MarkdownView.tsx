@@ -1,11 +1,7 @@
 /**
- * 复盘文档的阅读视图。
- *
- * 读的是 markdown.ts 解析出来的块树，一个块一个 React 元素 —— **不拼 HTML、
- * 不用 dangerouslySetInnerHTML**。文档内容来自模型和用户的手改，两者都可能
- * 带尖括号；当成文本渲染，它们就只是文本。
- *
- * Word 导出（export/aiReview.ts）读的是同一棵树。
+ * 复盘文档的阅读视图。读 markdown.ts 的块树，一个块一个 React 元素，
+ * 不拼 HTML、不用 dangerouslySetInnerHTML：文档带尖括号时它们就只是文本。
+ * Word 导出读的是同一棵树。
  */
 
 import { Fragment, useMemo, type ReactNode } from "react";
@@ -25,7 +21,7 @@ function Inlines({ list }: { list: Inline[] }) {
         if (i.bold) node = <strong className="font-semibold text-[var(--text)]">{node}</strong>;
         if (i.italic) node = <em>{node}</em>;
         if (i.strike) node = <del>{node}</del>;
-        // 不做成可点的链接：这是桌面应用里的一份文档，点一下把整个窗口导航走是事故
+        // 不做成可点的链接：点一下会把整个窗口导航走
         if (i.href) node = <span className="underline decoration-dotted" title={i.href}>{node}</span>;
         return <Fragment key={k}>{node}</Fragment>;
       })}
@@ -146,8 +142,7 @@ function Blocks({ list }: { list: Block[] }) {
 export function Markdown({ source }: { source: string }) {
   const tree = useMemo(() => parseMarkdown(source), [source]);
   return (
-    // 全局样式关掉了文本选中（桌面应用不该有网页那种拖影），但文档是要被
-    // 复制走的。那条规则打在 `*` 上，不继承，所以这里也得逐个元素打开
+    // 全局样式在 `*` 上关掉了选中，不继承；但文档要能被复制，所以逐个元素打开
     <div className="text-[13px] text-[var(--text)] select-text [&_*]:select-text">
       <Blocks list={tree} />
     </div>

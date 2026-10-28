@@ -1,9 +1,6 @@
 /**
- * 问 Claude 一次。
- *
- * 分两半：上半是纯函数，把 `claude --output-format stream-json` 的输出读成
- * 三种事件；下半把它接到进程上。能起什么、带什么参数**不在这里决定** ——
- * 那是 src-tauri/src/ai_review.rs 的事，这里只给得了提示词和输出 schema。
+ * 问 Claude 一次。上半把 `claude --output-format stream-json` 的输出读成事件，
+ * 下半接到进程上；起参数由 src-tauri/src/ai_review.rs 决定。
  */
 
 import { api } from "../db/api";
@@ -60,10 +57,8 @@ export function readStreamLine(line: string): StreamEvent | null {
 }
 
 /**
- * 把失败说成人话。
- *
- * 最常见的失败不是模型出错，而是「装了但没登录」和「登录过期了」——
- * 那时 claude 给的是一句英文加一个斜杠命令，而用户此刻不在终端里。
+ * 把失败说成人话。最常见的是「装了但没登录 / 登录过期」，那时 claude
+ * 给的是一句英文加斜杠命令，而用户此刻不在终端里。
  */
 export function explainFailure(detail: string): string {
   const text = detail.trim();
@@ -100,13 +95,13 @@ export async function askClaude(
     onText?: (soFar: string) => void;
   } = {},
 ): Promise<ClaudeRun> {
-  // 先挂监听再起进程：反过来的话，快的那几行输出会在监听挂上之前到达，直接丢掉
+  // 先挂监听再起进程，否则快的那几行输出会在监听挂上之前到达，直接丢掉
   await ensureProcListener();
   const runId = await api.aiReviewRun(prompt, opts.schema ?? null);
 
   let streamed = "";
   let lastMessage = "";
-  // 断言而不是标注：它在回调里被赋值，标注的话 TS 会认定它在下面永远是 null
+  // 断言而不是标注：它在回调里被赋值，标注的话 TS 会认定它永远是 null
   let result = null as Extract<StreamEvent, { type: "result" }> | null;
   const stderr: string[] = [];
   let cancelled = false;
@@ -135,7 +130,7 @@ export async function askClaude(
     finish(code) {
       if (cancelled) return finish({ ok: false, error: "已取消", cancelled: true });
       if (result?.ok) {
-        // result.text 是权威的全文；流式攒出来的那份只在它缺席时兜底
+        // result.text 是权威全文；流式攒的那份只在它缺席时兜底
         return finish({
           ok: true,
           text: result.text || streamed || lastMessage,

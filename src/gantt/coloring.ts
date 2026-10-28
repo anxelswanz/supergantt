@@ -1,20 +1,4 @@
-/**
- * 甘特条着色。
- *
- * 核心约束：**每一个颜色都必须能被解释**。
- *
- * 所以色相不由「行号」决定 —— 那种「保证相邻不同色」的做法看着热闹，
- * 但用户看到一根橙条时无从判断它是「延后了」还是「只是轮到橙色了」，
- * 等于把一个视觉通道浪费在噪音上。而颜色通道在这张图上已经很紧张：
- * 进度、父子、紧急度、里程碑、今天/节假日都在用它，v2 还要塞基线偏差和依赖冲突。
- *
- * 色相由**数据**决定，具体由哪一维数据决定交给用户选。
- *
- * 进度不和色相抢通道，走**明度对比**：
- *   已完成部分 = 该色 100%，未完成部分 = 同色 18%。
- * 于是「60% 完成的设计阶段任务」= 一根 60% 实心紫 + 40% 淡紫的条子，
- * 色相回答「属于谁」，实心比例回答「做了多少」，互不干扰。
- */
+/** 甘特条着色：色相一律由数据决定，进度走明度（实心 vs 同色 18%），不与色相抢通道。 */
 
 import type { ResolvedTask } from "./model";
 import { PRIORITY_COLORS } from "./theme";
@@ -29,33 +13,28 @@ export const COLOR_BY_LABELS: Record<ColorBy, string> = {
   none: "单色",
 };
 
-/**
- * 8 个色相，**明度刻意错开**。
- *
- * 不只是为了好看：红绿色觉障碍者分不清其中几组色相，灰度打印更是全部退化成
- * 明度差。让明度本身就有区分度，这两种情况下依然读得出分组。
- */
+/** 8 个色相，明度刻意错开：色障和灰度打印下仍能靠明度分组 */
 const PALETTE_LIGHT = [
-  "#4f46e5", // 靛蓝，暗
-  "#0ea5e9", // 天蓝，亮
-  "#059669", // 翠绿，中暗
-  "#f59e0b", // 琥珀，很亮
-  "#be185d", // 玫红，暗
-  "#14b8a6", // 青，中
-  "#7c3aed", // 紫罗兰，中暗
-  "#f97316", // 橙，亮
+  "#295565",
+  "#9b6b3b",
+  "#6a538d",
+  "#3d765b",
+  "#9e4767",
+  "#698a38",
+  "#4c7dbd",
+  "#724672",
 ];
 
-/** 深色背景下同一组色相要提亮，否则条子和底色糊在一起 */
+/** 深色背景下同一组色相提亮，否则糊在底色里 */
 const PALETTE_DARK = [
-  "#818cf8",
-  "#38bdf8",
-  "#34d399",
-  "#fbbf24",
-  "#f472b6",
-  "#2dd4bf",
-  "#a78bfa",
-  "#fb923c",
+  "#6ba7bd",
+  "#cca37b",
+  "#a492bf",
+  "#81bba0",
+  "#c889a0",
+  "#abc87e",
+  "#91aed4",
+  "#b78fb7",
 ];
 
 /* ------------------------------------------------------------------ */
@@ -63,16 +42,9 @@ const PALETTE_DARK = [
 /* ------------------------------------------------------------------ */
 
 /**
- * 同一阶段下，让每个后代拿到一个**同色系的变体**，而不是和阶段完全同色。
- *
- * 关键约束：**明度已经被进度占用了**（实心 vs 同色 18%）。如果变体主要靠明度拉开，
- * 一个浅蓝子任务的实心段会和一个深蓝子任务的轨道段长得差不多 ——
- * 那就等于用一个通道同时表达两件事。
- *
- * 所以以**色相微旋**为主（视觉上最能区分、又不跨出色系），明度只做小幅点缀，
- * 且钳在一条安全带里：太亮的话 18% 的轨道会淡到看不见，太暗则和文字抢对比。
- *
- * 两个步长数组长度互质（9 和 7），组合周期 63 —— 一个阶段下不会有那么多后代。
+ * 同阶段后代拿同色系变体。主用色相微旋，明度只小幅点缀——
+ * 明度已被进度占用（实心 vs 18%），再让变体靠明度会撞车。
+ * 两个步长数组长度互质（9、7），组合周期 63。
  */
 const HUE_STEPS = [0, 14, -14, 26, -26, 8, -8, 20, -20];
 const LIGHT_STEPS = [0, -7, 7, -12, 12, -4, 4];
@@ -131,10 +103,7 @@ function hslToHex(h: number, s: number, l: number): string {
 
 const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v);
 
-/**
- * 求基色的第 index 个变体。index 为 0 时返回基色本身（阶段自己用）。
- * 明度安全带按主题分开：深色背景下条子必须更亮才浮得出来。
- */
+/** 基色的第 index 个变体；0 返回基色本身。明度安全带按主题分开，深色下需更亮。 */
 export function variantOf(base: string, index: number, isDark: boolean): string {
   if (index <= 0) return base;
 
@@ -149,8 +118,8 @@ export function variantOf(base: string, index: number, isDark: boolean): string 
 }
 
 /** 分组为空时的中性色（比如没填负责人） */
-const NEUTRAL_LIGHT = "#94a3b8";
-const NEUTRAL_DARK = "#64748b";
+const NEUTRAL_LIGHT = "#8a9a9c";
+const NEUTRAL_DARK = "#5f7073";
 
 export interface BarPaint {
   /** 未完成部分 */
@@ -187,16 +156,11 @@ function paintFrom(base: string): BarPaint {
     track: withAlpha(base, 0.18),
     fill: base,
     parent: withAlpha(base, 0.72),
-    onFill: luminance(base) > 0.55 ? "#0f172a" : "#ffffff",
+    onFill: luminance(base) > 0.55 ? "#17292d" : "#fbfcfc",
   };
 }
 
-/**
- * 建一个取色器。
- *
- * 色相按**出现顺序**分配，不用 id 哈希 ——
- * 哈希会导致调整一次任务顺序整屏变色，用户会以为数据坏了。
- */
+/** 建取色器。色相按出现顺序分配，不用 id 哈希——否则调整一次顺序整屏变色。 */
 export function makeBarPainter(
   tasks: ResolvedTask[],
   mode: ColorBy,
@@ -212,23 +176,20 @@ export function makeBarPainter(
 
   if (mode === "none") return () => singlePaint;
 
-  // 紧急度是固定映射，不参与顺序分配 —— P0 永远是红的，不能因为
-  // 项目里恰好没有 P0 就让 P1 变成红色
+  // 紧急度是固定映射，不参与顺序分配：P0 永远红，不能因项目里没 P0 就让 P1 变红
   if (mode === "priority") {
     const byPriority = PRIORITY_COLORS.map(paintFrom);
     return (task) => byPriority[task.priority] ?? neutralPaint;
   }
 
-  // 「按负责人」不走顺序分配的调色板，直接用每个人自己的颜色 ——
-  // 这样甘特条的颜色和设置里那张脸的头像底色是同一个，用户不用做二次映射
+  // 按负责人直接用各人自己的颜色，与设置里头像底色同一个，免去二次映射
   if (mode === "assignee") {
     const byPerson = new Map(people.map((p) => [`p${p.id}`, paintFrom(p.color)]));
     return (task) =>
       (task.personId != null && byPerson.get(`p${task.personId}`)) || neutralPaint;
   }
 
-  // 「按阶段」：顶层任务拿调色板里的一个基色，它的每个后代拿一个同色系变体。
-  // 这样一屏之内每一行的颜色都不同，但同一阶段仍然一眼看得出是一族。
+  // 按阶段：顶层任务取调色板基色，后代取同色系变体，同行不同色但同族一眼可辨
   const byTaskId = new Map<number, BarPaint>();
   let base = palette[0];
   let stageIndex = 0;

@@ -1,21 +1,8 @@
 /**
- * 时间线导出 → 一份自包含的 HTML 文件。
- *
- * 为什么时间线要单独一个出口，而不是塞进那张 Excel：
- * Excel 那份是按**任务**排的（一行一件活，右边一条甘特条），发出去是给人
- * 核排期的。时间线问的是另一个问题 ——「那几天到底发生了什么」——
- * 它的正文是一段段人写的话，长短不一、还带层级，塞进单元格只会被截断，
- * 读的人得挨个点开格子。HTML 天生就排这种东西。
- *
- * 三条约束：
- *
- *  1. **单文件、零外部请求**。样式和脚本全内联，不引字体、不引图标。
- *     导出件的去处是微信、邮件附件、共享盘 —— 那些地方没有网，也没有
- *     和它一起被复制的 assets 目录。少一个依赖就少一种「在我这打不开」。
- *  2. **没有 JS 也是一份完整的文件**。筛选和正/倒序是脚本加的，但默认
- *     状态就是全部展开、按天倒序 —— 脚本没跑起来时读到的内容不缺一条。
- *  3. **只呈现，不重算**。事件聚合走 core/timeline 的 buildTimeline，
- *     和屏幕上看到的是同一份结果；这里再实现一遍迟早会和界面对不上。
+ * 时间线导出 → 一份自包含的 HTML 文件。约束：
+ *  1. 单文件、零外部请求：样式脚本全内联，不引字体图标（去处常是微信、邮件附件）。
+ *  2. 没有 JS 也完整：默认全部展开、按天倒序，脚本只加筛选和正/倒序。
+ *  3. 只呈现不重算：事件聚合走 core/timeline 的 buildTimeline，与屏幕同一份结果。
  */
 
 import { blockedDays } from "../core/blocked";
@@ -35,22 +22,19 @@ export interface TimelineHtmlInput {
   projectName: string;
   /** 项目色，做通篇的 accent */
   projectColor: string;
-  /** 已经 resolve 过、且**全部展开**的任务 */
+  /** 已 resolve 且全部展开的任务 */
   tasks: ResolvedTask[];
   notes: DailyNote[];
   risks: Risk[];
   people: Person[];
   exportedAt: Date;
-  /**
-   * 只导出这段日期（首尾都含）。屏幕上筛着什么就导出什么 ——
-   * 和事项页「先筛选就只导筛出来的」是同一条规矩
-   */
+  /** 只导出这段日期（首尾都含），与屏幕上的筛选一致 */
   range?: DayRange | null;
 }
 
 const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
-/** 和屏幕上的 KIND_STYLE 保持一致 —— 换了颜色的导出件读起来像另一个软件 */
+/** 和屏幕上的 KIND_STYLE 保持一致 */
 const KINDS: { key: TimelineEvent["kind"]; label: string; color: string }[] = [
   { key: "start", label: "开工", color: "#6366f1" },
   { key: "finish", label: "完成", color: "#10b981" },
@@ -102,7 +86,6 @@ export function buildTimelineHtml(input: TimelineHtmlInput): string {
   ].join("\n");
 }
 
-/** 导出件的文件名。和 Excel 那份同一套命名，只是换个后缀 */
 export function timelineFileName(projectName: string, at: Date): string {
   const stem = (projectName || "项目").replace(/[\\/:*?"<>|]/g, " ").trim() || "项目";
   const p = (n: number) => String(n).padStart(2, "0");
@@ -134,13 +117,7 @@ function header(
 </header>`;
 }
 
-/**
- * 摘要。
- *
- * 挑的这几个数都能直接进汇报：干了多少天、开了几件完了几件、卡了多久、
- * 还有多少风险没关。「记录条数」单独列出来是给写记录的人看的 ——
- * 一段时间下来一条没写，时间线本身就不可信。
- */
+/** 摘要卡片：天数、开工/完成、受阻天数、未关风险、记录条数。 */
 function summary(
   tasks: ResolvedTask[],
   days: TimelineDay[],
@@ -152,8 +129,7 @@ function summary(
     for (const e of d.events) counts.set(e.kind, (counts.get(e.kind) ?? 0) + 1);
   }
 
-  // 筛了日期就只摆这段日期里数得出来的数。把「全项目已完成 12 / 30」摆在
-  // 一份只讲三天的文件上，读的人会以为那是这三天干出来的
+  // 筛了日期就只摆这段日期里的数，否则全项目的数会被读成这几天干出来的
   if (filter) {
     const n = (k: TimelineEvent["kind"]) => String(counts.get(k) ?? 0);
     return cardRow([
@@ -195,12 +171,7 @@ function cardRow(cards: { value: string; label: string; tone?: string }[]): stri
     .join("")}</section>`;
 }
 
-/**
- * 项目周期条：计划从哪天到哪天，今天走到了哪。
- *
- * 时间线是一串局部的日子，读的人很容易失去「这在整个项目的什么位置」的感觉 ——
- * 这一条就是那个坐标尺。
- */
+/** 项目周期条：计划从哪天到哪天，今天走到了哪。 */
 function spanBar(tasks: ResolvedTask[]): string {
   if (tasks.length === 0) return "";
 
@@ -223,12 +194,7 @@ function spanBar(tasks: ResolvedTask[]): string {
 </section>`;
 }
 
-/**
- * 活动热力图：一列一周，一格一天，颜色深浅是那天的事件条数。
- *
- * 它回答的是时间线本身答不了的问题 ——「哪几段时间根本没动静」。
- * 逐日往下翻只看得到有记录的日子，空白是看不见的；这张图里空白是主角。
- */
+/** 活动热力图：一列一周，一格一天，深浅是当天事件条数，用来暴露没动静的时段。 */
 function heatmap(days: TimelineDay[]): string {
   if (days.length === 0) return "";
 
@@ -249,7 +215,7 @@ function heatmap(days: TimelineDay[]): string {
   for (let w = 0; w < weeks; w++) {
     const colFirst = from + w * 7;
     const month = dayToDate(colFirst).getUTCMonth();
-    // 每月的第一列打一个标签。同月只打一次，否则标签会连成一条糊掉的带子
+    // 每月只在第一列打一次标签
     if (month !== lastMonth) {
       labels.push(`<span class="hm-label" style="grid-column:${w + 1}">${month + 1}月</span>`);
       lastMonth = month;
@@ -277,12 +243,7 @@ function heatmap(days: TimelineDay[]): string {
 </section>`;
 }
 
-/**
- * 筛选条。
- *
- * 只列**这份文件里真的出现过**的类型 —— 摆一个点了之后什么都不会发生的
- * 「受阻」按钮，比没有这个按钮更让人困惑。
- */
+/** 筛选条，只列这份文件里真出现过的类型。 */
 function filters(days: TimelineDay[]): string {
   const present = new Set<TimelineEvent["kind"]>();
   for (const d of days) for (const e of d.events) present.add(e.kind);
@@ -364,8 +325,7 @@ function eventRow(e: TimelineEvent, personOf: Map<number, Person>): string {
 
   const tags: string[] = [];
   if (e.days != null && e.days > 1) tags.push(`<span class="tag stuck">共 ${e.days} 天</span>`);
-  // 还没关掉的阻碍：导出件是发出去给人看的，一个还在走的数必须标明白，
-  // 否则收件人会把它当成最终结果
+  // 还没关掉的阻碍要标明，否则天数会被当成最终结果
   if (e.unresolved) tags.push(`<span class="tag live">未关闭</span>`);
   if (e.level != null) {
     tags.push(`<span class="tag risk-l${e.level}">${esc(RISK_LEVELS[e.level] ?? "中")}风险</span>`);
@@ -377,7 +337,6 @@ function eventRow(e: TimelineEvent, personOf: Map<number, Person>): string {
     ? `<span class="who"><i style="background:${esc(person.color)}"></i>${esc(person.name)}</span>`
     : "";
 
-  // 开工 / 完成没有正文，标题行已经把话说完了
   const body =
     e.kind === "start" || e.kind === "finish"
       ? ""
@@ -497,12 +456,7 @@ h1{margin:0;font-size:22px;font-weight:650;letter-spacing:-.01em}
 }`;
 }
 
-/**
- * 内联脚本：按类型筛选 + 正/倒序。
- *
- * 筛选条在 HTML 里是 `hidden` 的，由脚本自己解除 —— 脚本没跑起来时，
- * 页面上不会留下一排点了没反应的按钮。
- */
+/** 内联脚本：按类型筛选 + 正/倒序。筛选条默认 hidden，由脚本解除，没 JS 时不留死按钮。 */
 function script(): string {
   return `
 (function(){
@@ -547,13 +501,7 @@ function script(): string {
 /* 小工具                                                              */
 /* ------------------------------------------------------------------ */
 
-/**
- * HTML 转义。
- *
- * 记录正文是用户手写的自由文本，里面出现 `<` 和 `&` 是常事
- * （「压力 < 0.3MPa」「A&B 供应商」）—— 不转义的话，轻则内容凭空消失，
- * 重则整份文件从那一行起排版全乱。
- */
+/** HTML 转义：用户手写正文里常有 `<` `&`（「压力 < 0.3MPa」）。 */
 export function esc(value: string): string {
   return String(value)
     .replace(/&/g, "&amp;")

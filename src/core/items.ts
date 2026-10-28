@@ -1,29 +1,7 @@
 /**
- * 事项视图的合并层 —— 把**三个来源**摊成一张清单。
- *
- * 这是整个事项功能里唯一需要想清楚的地方，所以它是纯函数，放在 core 里，
- * 由单测钉死（core/items.test.ts），不碰 UI 也不碰数据库。
- *
- * ## 为什么是三个来源而不是一张表
- *
- *   1. `item_notes` 里**还没分拣**的行 —— 直接编辑，写回 item_notes
- *   2. `item_notes` 里**已经分拣**的行 —— 内容按实体本身渲染，标 `⤴`
- *   3. 全库的阻碍（`tasks.blocked`）与风险（`risks`）实体 —— **包括不是从
- *      事项分拣来的那些**（⌥ 拖甘特条标的阻碍、任务详情里直接建的风险）
- *
- * 第 3 点不能省。如果清单只显示「有事项来源」的实体，那么在甘特上标的阻碍
- * 就不会出现在这里，用户会得到一个「同一个东西在两个地方说法不同」的工具 ——
- * 而那正是 DESIGN.md §1.2 反复在防的「两个真相」。
- *
- * ## 已分拣的事项不显示自己那行，只显示实体行
- *
- * 两个理由：一个事项占两行，列表里全是重复；以及两行会立刻不同步 ——
- * 改实体不会改事项，于是屏幕上同时出现两种说法。同一个错误。
- *
- * ## 代价：数据分在三处
- *
- * `item_notes` / `risks` / `tasks.blocked`，本模块是三者的合并层。
- * 换来的是不碰已经跑通的导出/导入路径，也不用给已开的风险做数据搬迁。
+ * 事项视图的合并层（纯函数，单测见 core/items.test.ts）：item_notes 未分拣行、
+ * 已分拣行指向的实体、以及全库的阻碍与风险实体，三者摊成一张清单。
+ * 阻碍/风险实体必须全收（含非事项来源的），否则同一实体两处说法不同。
  */
 
 import type { ItemKind, ItemNote, Risk } from "../db/api";
@@ -37,45 +15,28 @@ import type { DayRange } from "./timeline";
 /* ------------------------------------------------------------------ */
 
 /**
- * 内置类型的常量副本。
- *
- * 库里也有这两行（migrations/011 + schema::ensure_builtin_kinds），这里再写一份
- * 不是重复：**一个读不出 item_kinds 的库不该让事项视图整个白掉**。库里那份是
- * 真相（用户可以改名改色），这份只在查询失败或旧库刚导入时兜一下底。
+ * 内置类型常量副本。库里的才是真相（可改名改色），这份只在查询失败或
+ * 旧库刚导入时兜底，避免读不出 item_kinds 时事项视图整个白掉。
  */
 export const BUILTIN_KINDS: ItemKind[] = [
-  { key: "todo", label: "代办", color: "#0ea5e9", requiresNote: false, builtin: true, sortOrder: 0 },
-  { key: "issue", label: "问题", color: "#a855f7", requiresNote: true, builtin: true, sortOrder: 1 },
+  { key: "todo", label: "代办", color: "#4a93b4", requiresNote: false, builtin: true, sortOrder: 0 },
+  { key: "issue", label: "问题", color: "#7a5f9e", requiresNote: true, builtin: true, sortOrder: 1 },
 ];
 
 /**
- * 阻碍与风险的标签和颜色。
- *
- * 它们**不在 `item_kinds` 表里**，这是刻意的：它们是实体，不是分类。
- * 做成那张表的两行会制造出「分类名叫阻碍、但底下没有任何实体」的悬空状态，
- * 而用户点进去看到的和看板、复盘里说的就不是一回事了。
- *
- * 但清单上总得给它们一个标签和一个颜色，所以这里是**显示用的伪类型**，
- * 不参与「分拣成什么」之外的任何逻辑。颜色沿用两个面板里已经在用的那两个
- * （阻碍玫红、风险琥珀），不新引入色相。
+ * 阻碍与风险的显示用伪类型：它们是实体不是分类，刻意不进 item_kinds 表，
+ * 以免出现「有分类无实体」的悬空状态。颜色沿用两个面板已有的。
  */
-export const BLOCKER_KIND = { key: "blocker", label: "阻碍", color: "#f43f5e" } as const;
-export const RISK_KIND = { key: "risk", label: "风险", color: "#f59e0b" } as const;
+export const BLOCKER_KIND = { key: "blocker", label: "阻碍", color: "#a83e3e" } as const;
+export const RISK_KIND = { key: "risk", label: "风险", color: "#b0752a" } as const;
 
-/** 未分拣那一行的样子。灰的 —— 它在喊「还需要你做一个决定」，不该抢颜色 */
-export const UNSORTED_KIND = { key: "", label: "未分拣", color: "#94a3b8" } as const;
+/** 未分拣那一行：灰的，不该抢颜色 */
+export const UNSORTED_KIND = { key: "", label: "未分拣", color: "#8a9a9c" } as const;
 
-/**
- * 行上那个按钮的文案，和筛选器里的「未分拣」刻意用两个词。
- *
- * 筛选器问的是**状态**（「现在有哪些还没想清楚」），所以那里是「未分拣」；
- * 行上那个按钮是一个**动作**，用户点它是为了做一件事，所以是动词短语。
- * 同一个概念在「描述它」和「做它」两个位置用不同措辞是对的 ——
- * 把按钮也写成「未分拣」，读起来像在陈述现状，没人会想到它能点。
- */
+/** 行上按钮的文案。筛选器里是「未分拣」（状态），这里是动作，刻意用两个词。 */
 export const SORT_ACTION_LABEL = "加入到事项";
 
-/** 显示某个类型 key 用什么标签。认不出来的 key 原样显示，不吞掉 */
+/** 类型 key → 标签；认不出的 key 原样返回 */
 export function kindLabel(key: string | null, kinds: ItemKind[]): string {
   if (key == null) return UNSORTED_KIND.label;
   if (key === BLOCKER_KIND.key) return BLOCKER_KIND.label;
@@ -94,35 +55,13 @@ export function kindColor(key: string | null, kinds: ItemKind[]): string {
 /* 类型多起来之后                                                       */
 /* ------------------------------------------------------------------ */
 
-/**
- * 超过这个数就认为「类型多了」，分拣菜单和筛选器开始给搜索框和「常用」分组。
- *
- * 取 8 不是因为 8 有什么道理，是因为**阈值本身必须存在**：三五个类型的时候
- * 摆一个搜索框是纯噪音，而二十个类型的时候不摆就得滚着找。一个数把两种
- * 规模分开，比让界面一直按最坏情况长要好。
- */
+/** 超过这个数就上搜索框和「常用」分组（三五个类型时摆搜索框是噪音） */
 export const MANY_KINDS = 8;
 
 /**
- * 按「这个项目里用了多少条」给类型排个序，取前几个当「常用」。
- *
- * ## 为什么需要它
- *
- * 类型是全局的，而一个项目通常只真的用到其中几个 —— 产线项目用「待验收」，
- * 软件项目用「待评审」，两边都在同一张清单里。二十个类型平铺的菜单里，
- * 你要找的那三个藏在十七个用不上的中间。
- *
- * ## 为什么不直接把整个菜单按使用频次排
- *
- * 那样菜单的顺序每天都在变，肌肉记忆建不起来 —— 用户记住「问题在第二个」
- * 之后，某天它跳到第五个，而他看不出发生了什么。所以是**「常用」单独一组
- * 放在上面，下面那份完整清单顺序不变**。两边都在，但常用的那几个不用找。
- *
- * ## 统计范围只有当前项目
- *
- * 这是刻意的：全局统计会让一个项目的习惯污染另一个项目的菜单。
- * 代价是刚打开一个新项目时没有常用（返回空数组，界面据此不显示那一组）——
- * 那种情况下完整清单本来也够用。
+ * 按当前项目里的使用条数取前几个当「常用」，单独成组放在完整清单之上
+ * （整份菜单按频次排会天天变序，肌肉记忆建不起来）。只统计当前项目；
+ * 新项目无数据时返回空数组，界面据此不显示该组。
  */
 export function frequentKinds(
   kinds: ItemKind[],
@@ -131,8 +70,7 @@ export function frequentKinds(
 ): ItemKind[] {
   const used = new Map<string, number>();
   for (const n of notes) {
-    // 和导出那边同一个判据（export/itemKinds.countByKind）：未分拣的不属于
-    // 任何一类，已晋升成实体的身份由实体表达
+    // 判据同 export/itemKinds.countByKind：未分拣、已晋升的都不计
     if (n.kind == null || n.promotedKind != null) continue;
     used.set(n.kind, (used.get(n.kind) ?? 0) + 1);
   }
@@ -143,18 +81,14 @@ export function frequentKinds(
     .sort(
       (a, b) =>
         (used.get(b.key) ?? 0) - (used.get(a.key) ?? 0) ||
-        // 用得一样多时按清单原序，不按 key 的字典序 —— 后者会让两个
-        // 同样常用的类型以一个用户看不出理由的顺序排列
+        // 次数相同时按清单原序，不按字典序
         a.sortOrder - b.sortOrder ||
         a.key.localeCompare(b.key),
     )
     .slice(0, limit);
 }
 
-/**
- * 按关键词筛类型。名称和 key 都参与匹配 —— key 里带着 `custom:` 前缀，
- * 用户搜「custom」能把自定义的那些一次捞出来。
- */
+/** 按关键词筛类型，名称和 key 都参与匹配（搜 custom 可捞出全部自定义）。 */
 export function searchKinds(kinds: ItemKind[], query: string): ItemKind[] {
   const q = query.trim().toLowerCase();
   if (!q) return kinds;
@@ -167,12 +101,7 @@ export function searchKinds(kinds: ItemKind[], query: string): ItemKind[] {
 /* 引用编码                                                            */
 /* ------------------------------------------------------------------ */
 
-/**
- * 阻碍的引用：`"<taskId>/<periodId>"`。
- *
- * 两段都要。`BlockedPeriod.id` 在一个任务内唯一，但事项这边不知道它属于谁 ——
- * 而清单要显示「卡在哪条活上」，总不能为了找它去遍历全项目的每一段阻碍。
- */
+/** 阻碍的引用 `"<taskId>/<periodId>"`。periodId 只在任务内唯一，故须带 taskId。 */
 export const blockerRef = (taskId: number, periodId: string): string =>
   `${taskId}/${periodId}`;
 
@@ -194,52 +123,29 @@ export const riskRef = (riskId: number): string => String(riskId);
 
 export type ItemSource = "note" | "blocker" | "risk";
 
-/**
- * 清单里的一行。三种来源归一成同一个形状，渲染层只认这个。
- *
- * 原始数据（`note` / `blocker` / `risk`）也带着：行内交互要改的是实体本身，
- * 而「改哪一条」只有原始数据说得清。归一化成一个形状但不丢原件 ——
- * 列表好写，写回仍然精确。
- */
+/** 清单的一行。三种来源归一成同一形状，但保留原始数据以便精确写回。 */
 export interface ItemRow {
-  /**
-   * 列表 key，跨三种来源唯一。
-   *
-   * 带来源前缀而不是裸 id：三张表的自增 id 会撞车，React 会把一条风险的
-   * DOM 复用给一条事项，表现是「改了一行，另一行的输入框跟着变」。
-   */
+  /** 列表 key，带来源前缀（三张表自增 id 会撞车，React 会串着复用 DOM） */
   key: string;
   source: ItemSource;
-  /** 标题。实体行按实体本身渲染（阻碍优先显示自己写的说明，不是归类标签） */
+  /** 标题：阻碍优先用自己写的说明，不用归类标签 */
   title: string;
   /** 类型 key：业务类型 / 'blocker' / 'risk' / null = 未分拣 */
   kind: string | null;
-  /**
-   * P0–P3；null = 没填过。
-   *
-   * 历史的阻碍和风险确实没有优先级，界面显示一个空的优先级槽，不伪造一个
-   * 「中」—— 和 blocked.open、tasks.autoRollover 是同一条规矩。
-   */
+  /** P0–P3；null = 没填过，界面显示空槽，不伪造「中」 */
   priority: Priority | null;
   personId: number | null;
   taskId: number | null;
   /** Unix 秒。排序用的那个时间，见 sortItems */
   createdAt: number;
   closed: boolean;
-  /** 怎么关掉的。阻碍这一项可不填，风险必填 —— 既有差异的延续 */
+  /** 关闭原因。阻碍可不填，风险必填 */
   resolution: string | null;
-  /**
-   * 这条实体是从哪条事项分拣来的；null = 不是分拣来的（甘特上标的、
-   * 详情里直接建的）。界面上带 `⤴` 标记，并据此提供「改回未分拣」的出路。
-   */
+  /** 来源事项 id；null = 不是分拣来的（如甘特上直接标的）。界面带 ⤴ 标记 */
   fromNoteId: number | null;
   /**
-   * 引用指向的实体已经不存在了。
-   *
-   * **这是预期状态，不是损坏**：阻碍能删、风险能删（设计稿 §6.2 规则三）。
-   * 此时这一行显示原始的那句话 + 「已被删除」，并给出「重新分拣 / 改回未分拣」
-   * 两个出路。不给出路的话，用户唯一能做的就是把这条事项也删掉重记一遍，
-   * 而它记录的原始信息（谁在什么时候说的）就此丢失。
+   * 指向的实体已被删除 —— 预期状态，不是损坏。显示原话 + 「已被删除」，
+   * 并给出「重新分拣 / 改回未分拣」，否则原始信息只能随事项一起丢掉。
    */
   dangling: boolean;
   note?: ItemNote;
@@ -247,7 +153,7 @@ export interface ItemRow {
   risk?: Risk;
 }
 
-/** 合并时需要从任务上读的那几个字段 */
+/** 合并时需要从任务上读的字段 */
 export interface ItemTask {
   id: number;
   name: string;
@@ -258,13 +164,10 @@ export interface ItemTask {
 const clampPriority = (v: number): Priority =>
   (v < 0 ? 0 : v > 3 ? 3 : Math.round(v)) as Priority;
 
-/** 天序号 → Unix 秒。阻碍没有「记录时刻」，只能用它起始的那天当排序依据 */
+/** 天序号 → Unix 秒。阻碍没有记录时刻，用起始日当排序依据 */
 const dayToUnix = (day: number): number => Date.parse(`${dayToIso(day)}T00:00:00Z`) / 1000;
 
-/**
- * 三个来源合并成一张清单。**不排序** —— 排序是 sortItems 的事，
- * 分开是为了让「合并对不对」和「顺序对不对」能各自被测。
- */
+/** 三个来源合并成一张清单，不排序（见 sortItems），以便分别测。 */
 export function mergeItems(input: {
   notes: ItemNote[];
   tasks: ItemTask[];
@@ -273,7 +176,7 @@ export function mergeItems(input: {
 }): ItemRow[] {
   const { notes, tasks, risks, today } = input;
 
-  // 哪些实体已经被某条事项认领了。认领者的 id 一并记下 —— 实体行要显示 ⤴
+  // 已被事项认领的实体；记下认领者以便实体行显示 ⤴
   const claimedBlockers = new Map<string, ItemNote>();
   const claimedRisks = new Map<number, ItemNote>();
   for (const n of notes) {
@@ -288,8 +191,7 @@ export function mergeItems(input: {
 
   /* ---- 来源 1 + 2：事项 ---- */
   for (const n of notes) {
-    // 已分拣的事项不出自己那一行：实体行会代表它（下面那两段），
-    // 否则同一件事占两行，而且两行必然立刻不同步
+    // 已分拣的不出自己那一行，由实体行代表；否则两行必然不同步
     if (n.promotedKind != null) continue;
     out.push(noteRow(n));
   }
@@ -303,17 +205,15 @@ export function mergeItems(input: {
       out.push({
         key: `blocker:${ref}`,
         source: "blocker",
-        // 自己写的说明优先于归类标签 —— 类型是给机器归类的，人要看的是
-        // 「三号机主轴异响」这种具体的话（同 blocked.describeBlocked）
+        // 同 blocked.describeBlocked：自写说明优先于归类标签
         title: describeBlocked(period),
         kind: BLOCKER_KIND.key,
         priority: period.priority != null ? clampPriority(period.priority) : null,
-        // 阻碍挂在活上，所以「谁的」就是那条活的负责人。事项分拣过来时
-        // 选的也是它 —— 两处一个口径，不会出现「清单里是张三、详情里是李四」
+        // 阻碍挂在活上，负责人即那条活的负责人（两处口径一致）
         personId: task.personId,
         taskId: task.id,
         createdAt: dayToUnix(period.from),
-        // 「持续中」才算未关闭。已经过去的那些是历史事实，不需要人再去处理
+        // 只有「持续中」算未关闭
         closed: period.open !== true,
         resolution: period.resolution ?? null,
         fromNoteId: owner?.id ?? null,
@@ -333,7 +233,7 @@ export function mergeItems(input: {
       title: risk.content,
       kind: RISK_KIND.key,
       priority: risk.priority != null ? clampPriority(risk.priority) : null,
-      // 风险表上没有负责人一列。挂着它的那条活的负责人才是要盯这件事的人
+      // 风险表无负责人列，取所挂任务的负责人
       personId: tasks.find((t) => t.id === risk.taskId)?.personId ?? null,
       taskId: risk.taskId,
       createdAt: risk.createdAt,
@@ -345,7 +245,7 @@ export function mergeItems(input: {
     });
   }
 
-  /* ---- 悬挂引用：实体被单独删掉了，事项还指着它 ---- */
+  /* ---- 悬挂引用：实体已被删，事项还指着它 ---- */
   for (const n of [...claimedBlockers.values(), ...claimedRisks.values()]) {
     out.push({ ...noteRow(n), dangling: true });
   }
@@ -375,20 +275,12 @@ function noteRow(n: ItemNote): ItemRow {
 /* 排序                                                                */
 /* ------------------------------------------------------------------ */
 
-/** 同一时刻上谁在前：实体在事项之前 —— 需要人今天去处理的那些排前面 */
+/** 同一时刻的先后：实体在事项之前 */
 const SOURCE_RANK: Record<ItemSource, number> = { blocker: 0, risk: 1, note: 2 };
 
 /**
- * 默认顺序：**未关闭在前 → 创建时间倒序 → 实体在前**。
- *
- * 「按创建时间倒序、不按类型分组」是一个有代价的选择，但它买到的东西值这个价：
- * **分拣不改变行的位置**。记完抬头一看那条还在原地，不会找不到东西 ——
- * 按类型分组的话，每点一次分拣，那一行就跳到别处去了。
- *
- * 阻碍和风险各自的既有规则（持续中在前 / 等级高在前）在**同一时刻相撞**时
- * 才生效，不覆盖时间倒序。设计稿里那句「它们是实体，排序规则属于实体」说的是
- * 这个：实体之间比的是自己的规则，但一张按时间读的清单不能被某一类实体打断 ——
- * 否则「最近记了什么」这个问题就答不了了。§5.1 的示意图也正是这个顺序。
+ * 默认顺序：未关闭在前 → 创建时间倒序 → 实体在前。不按类型分组，
+ * 这样分拣不会让行跳位置。阻碍/风险各自的规则只在同一时刻相撞时生效。
  */
 export function sortItems(rows: ItemRow[]): ItemRow[] {
   return [...rows].sort(
@@ -409,16 +301,8 @@ export function sortItems(rows: ItemRow[]): ItemRow[] {
 /* ------------------------------------------------------------------ */
 
 /**
- * 按用户手动排好的顺序重排。`order` 是行 key 的列表。
- *
- * **不在 order 里的行排在最前**，彼此之间保持传进来的（默认）顺序。
- * 排完之后新记的那条没有位置 —— 放到最上面，和默认顺序下「新的在上」
- * 是同一个直觉；放到最下面的话，刚记的东西会被埋在一长串旧事项后面。
- *
- * order 里指向已经不存在的行的 key 直接忽略，不需要清理。
- *
- * 未关闭 / 已关闭的分区不在这里做 —— 视图拿到结果之后自己按 closed 拆开，
- * 两个区各自保持这里排出来的相对顺序。
+ * 按手动顺序重排（order 为行 key 列表）。不在 order 里的排最前、保持原相对顺序，
+ * 新记的因此在最上。失效 key 忽略；未关闭/已关闭的分区由视图自己做。
  */
 export function applyManualOrder(rows: ItemRow[], order: string[]): ItemRow[] {
   if (order.length === 0) return rows;
@@ -428,12 +312,7 @@ export function applyManualOrder(rows: ItemRow[], order: string[]): ItemRow[] {
   return [...fresh, ...placed];
 }
 
-/**
- * 把 `from` 挪到 `to` 的前面或后面，返回新的完整 key 列表。
- *
- * 操作的是**全部行**的顺序，不是筛出来的那几条：有筛选时拖动一条，
- * 被筛掉的那些相对位置不变，清掉筛选后不会出现一次莫名其妙的大洗牌。
- */
+/** 把 `from` 挪到 `to` 前/后。操作全部行而非筛出的子集，清掉筛选后不会大洗牌。 */
 export function moveItem(
   keys: string[],
   from: string,
@@ -446,7 +325,7 @@ export function moveItem(
   return [...rest.slice(0, at), from, ...rest.slice(at)];
 }
 
-/** settings 里存的那串 JSON → key 列表。坏数据当作没排过 */
+/** settings 里的 JSON → key 列表；坏数据当作没排过 */
 export function parseItemOrder(raw: string | null): string[] {
   if (!raw) return [];
   try {
@@ -476,7 +355,7 @@ export interface ItemFilter {
   status?: ItemStatus | null;
   /** 搜索词，对标题和结论做大小写无关的包含匹配 */
   query: string;
-  /** 记录日期落在这段里（首尾都含）。按年、按月也是一段。null / 缺省 = 不筛 */
+  /** 记录日期区间，首尾都含；null / 缺省 = 不筛 */
   range?: DayRange | null;
 }
 
@@ -493,19 +372,11 @@ export const EMPTY_FILTER: ItemFilter = {
   range: null,
 };
 
-/**
- * 一条事项「记在哪天」—— 日期筛选比的就是它。
- * 和列表上显示的日期（shortDate）同一个换算，不然筛出来的和看到的对不上。
- */
+/** 一条事项记在哪天，日期筛选比的就是它。换算须与 shortDate 一致。 */
 export const itemDay = (row: ItemRow): number =>
   isoToDay(new Date(row.createdAt * 1000).toISOString().slice(0, 10));
 
-/**
- * 可叠加的筛选。每一维空着就是不筛那一维。
- *
- * 「没填优先级」（priority 为 null）**不会**被优先级筛选器命中 ——
- * 一条没填过优先级的历史风险不属于任何一档，硬塞进某一档就是伪造。
- */
+/** 可叠加筛选，每一维空着即不筛。priority 为 null 不会被优先级筛选命中。 */
 export function filterItems(rows: ItemRow[], f: ItemFilter): ItemRow[] {
   const q = f.query.trim().toLowerCase();
   return rows.filter((r) => {
@@ -516,10 +387,10 @@ export function filterItems(rows: ItemRow[], f: ItemFilter): ItemRow[] {
     if (f.priorities.length > 0 && (r.priority == null || !f.priorities.includes(r.priority)))
       return false;
     if (f.people.length > 0 && !f.people.includes(r.personId)) return false;
-    // 旧状态里可能没有 tasks 这一维 —— 当作不筛
+    // 旧状态可能没有 tasks 这一维，当作不筛
     if (f.tasks?.length > 0 && !f.tasks.includes(r.taskId)) return false;
     if (f.range && (itemDay(r) < f.range.from || itemDay(r) > f.range.to)) return false;
-    // 结论也搜：「上次那个怎么解决的」是翻已关闭事项的主要理由
+    // 结论也搜：翻已关闭事项多半为了找当初怎么解决的
     if (q && !r.title.toLowerCase().includes(q) && !(r.resolution ?? "").toLowerCase().includes(q))
       return false;
     return true;
@@ -541,22 +412,9 @@ export const hasFilter = (f: ItemFilter): boolean =>
 /* ------------------------------------------------------------------ */
 
 /**
- * 点那个圆圈会发生什么。按类型区分（设计稿 §5.4）：
- *
- *   · `"click"`     —— 单击即关（代办，以及 requiresNote 关着的自定义类型）
- *   · `"note"`      —— 展开输入框，写「怎么解决的」（问题、风险）
- *   · `"blocker"`   —— 「标记为已解决」：区间收到昨天，卡片当场离开受阻列
- *   · `"forbidden"` —— 未分拣。还没决定它是什么，谈不上完成
- *
- * 为什么不是一个统一的「打勾」：一个 resolved 布尔把「这条不用管了」和
- * 「我们做了什么让它不用管」压成同一个比特，而后者才是复盘时唯一值得抄的
- * 东西（migrations/008_risk_resolution.sql 已经论证过一遍）。这条理由对
- * 「问题」同样成立，所以「问题」默认开着 requiresNote。
- *
- * 为什么阻碍不强制写结论、风险强制：阻碍是**既成事实**，它的价值在于
- * 「卡了几天、卡在什么上」，那两项已经记在区间和归类里了；风险是一个
- * **判断**（「它不会发生了」），没有依据的判断三个月后没人敢信。
- * 这是既有差异的延续，不是新引入的（见 core/blocked.ts 的 resolution 注释）。
+ * 点圆圈的行为：click 单击即关；note 展开写「怎么解决的」；blocker 区间收到昨天、
+ * 卡片离开受阻列；forbidden 未分拣。阻碍不强制结论（已记在区间与归类里），
+ * 风险强制 —— 没有依据的判断三个月后没人敢信。
  */
 export type ClosePolicy = "click" | "note" | "blocker" | "forbidden";
 
@@ -573,17 +431,13 @@ export function closePolicy(row: ItemRow, kinds: ItemKind[]): ClosePolicy {
 /* ------------------------------------------------------------------ */
 
 /**
- * 新自定义类型的 key。
- *
- * 带 `custom:` 前缀是为了让它永远不可能撞上将来新增的内置 key ——
- * 用户建了一个叫「阻碍」的自定义类型之后，内置语义不会被它悄悄顶掉。
- * 用随机串而不是名字：类型可以改名，而 key 是 item_notes.kind 指着的东西，
- * 改名不该让已有的事项全部失去类型。
+ * 新自定义类型的 key。`custom:` 前缀避免撞上将来的内置 key；
+ * 用随机串而非名字，因为类型可改名而 item_notes.kind 指着 key。
  */
 export const newKindKey = (): string =>
   `custom:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 
-/** 给界面用：日期显示成 MM-DD，和清单里其余时间列一个口径 */
+/** 日期显示成 MM-DD，与清单其余时间列同口径 */
 export function shortDate(unixSeconds: number): string {
   const iso = new Date(unixSeconds * 1000).toISOString().slice(0, 10);
   return iso.slice(5);
@@ -592,5 +446,5 @@ export function shortDate(unixSeconds: number): string {
 /** 天序号版本，阻碍那一列用 */
 export const shortDay = (day: number): string => dayToIso(day).slice(5);
 
-/** 反向：ISO 日期串转天序号。悬挂引用重新分拣时要用 */
+/** ISO 日期串 → 天序号（悬挂引用重新分拣时用） */
 export { isoToDay };

@@ -8,37 +8,21 @@ import { MenuDivider, MenuItem, Popover } from "./Popover";
 import type { Milestone } from "../db/api";
 
 /**
- * 里程碑视图 —— 用户自己设立的**项目节点**，不是任务表里的一个勾。
- *
- * 任务表里那个 `milestone` 布尔问的是「这条活本身是不是个节点」，
- * 它依附在任务上；这里的每一条能脱离任务存在、能挂若干条任务、有自己的
- * 名称/日期/说明/颜色，并且**在甘特图上叠画出来**（见 gantt/render.ts）。
- *
- * ## 为什么关联任务而不复制任务
- *
- * 关联是一根引用：任务改名、改期、删掉，里程碑跟着看到同一件事。
- * 复制一份快照会立刻分叉 —— 那条活往后挪了两周，里程碑上写的还是老日期。
- * 所以这里只存 id，显示时现查。
- *
- * ## 为什么这页不进撤销栈
- *
- * 和事项、风险、逐日记录同一类：它们是**独立记录**，不是任务表的编辑。
- * ⌘Z 该撤销的是刚才在甘特里拖的那一条，而不是把你刚写下的节点悄悄抹掉。
- * 所以增删改全部即写即存。
+ * 里程碑视图：独立于任务表的项目节点，关联任务只存 id（任务改名改期这里跟着变）。
+ * 和事项、风险一样是独立记录：不进撤销栈，即写即存。
  */
 
-/** 可选颜色。和项目色、优先级色同一套灰度下都读得出来 */
 const COLORS = [
-  "#f59e0b",
-  "#ef4444",
-  "#a855f7",
-  "#0ea5e9",
-  "#10b981",
-  "#6366f1",
+  "#b0752a",
+  "#a83e3e",
+  "#5a5490",
+  "#1f5f74",
+  "#35705c",
+  "#2f6d5e",
   "#64748b",
 ];
 
-/** 拖拽起手的阈值，和事项页同一手感 */
+/** 拖拽起手阈值 */
 const DRAG_THRESHOLD = 4;
 
 export function MilestoneView() {
@@ -55,8 +39,7 @@ export function MilestoneView() {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
 
-  // 打开项目时已经拉过一次，但用户可能在别处（比如撤销）改过任务关联，
-  // 进这一页时再对一次库，代价是一次本地查询
+  // 进这一页时再读一次库：任务关联可能在别处（比如撤销）被改过
   useEffect(() => {
     void loadMilestones();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -84,12 +67,11 @@ export function MilestoneView() {
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--surface)]">
-      {/* 头部：标题 + 新建。和事项页同一结构，用户不用重新学 */}
       <div className="flex shrink-0 items-center gap-3 border-b border-[var(--rule)] px-5 py-3">
         <div className="min-w-0">
           <h2 className="text-sm font-semibold text-[var(--text)]">里程碑</h2>
           <p className="mt-0.5 text-[11px] text-[var(--text-dim)]">
-            项目关键节点。设好日期后会在甘特图上标出来，也可以关联若干条任务
+            项目关键节点，会标在甘特图上
           </p>
         </div>
         <button
@@ -178,8 +160,7 @@ export function MilestoneView() {
                       />
                     ) : (
                       <div className="flex items-center gap-3 px-3 py-2.5">
-                        {/* 拖拽把手。用 span 不用 button：起拖逻辑会跳过按在按钮上的
-                            按下（那是按钮自己的事），把手若是按钮就永远起不了拖 */}
+                        {/* 用 span 不用 button：起拖逻辑会跳过落在按钮上的按下 */}
                         <span
                           onPointerDown={(e) => drag.start(m.id, e)}
                           title="拖动调整顺序"
@@ -208,12 +189,12 @@ export function MilestoneView() {
                         </button>
 
                         <span
-                          className="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium tabular-nums"
+                          className="shrink-0 rounded-[var(--r-m)] px-2 py-0.5 text-[11px] font-medium tabular-nums"
                           style={{
                             background: "color-mix(in srgb, var(--accent) 12%, transparent)",
                             color: "var(--accent)",
                           }}
-                          title="这一天在甘特图上会画一个菱形标记"
+                          title="在甘特图上显示为菱形标记"
                         >
                           {m.date}
                         </span>
@@ -247,7 +228,6 @@ export function MilestoneView() {
         )}
       </div>
 
-      {/* 删除确认：里程碑删了就没了，关联只是引用，不该有「撤销一下就好」的错觉 */}
       <AnimatePresence>
         {confirmDelete != null && (
           <ConfirmDelete
@@ -262,7 +242,6 @@ export function MilestoneView() {
         )}
       </AnimatePresence>
 
-      {/* 拖动时跟着指针的小牌子 —— 和大列表同一套反馈 */}
       {drag.ghost && (
         <div
           className="pointer-events-none fixed z-50 rounded-lg bg-[var(--surface)] px-2.5 py-1 text-xs shadow-lg ring-1 ring-[var(--rule)]"
@@ -315,7 +294,7 @@ function MilestoneEditor({
   const commit = async () => {
     if (saving) return;
     if (!draft.name.trim()) {
-      setError("名称不能为空");
+      setError("请填写名称");
       nameRef.current?.focus();
       return;
     }
@@ -323,14 +302,14 @@ function MilestoneEditor({
     setError(null);
     const ok = await onSave({ ...draft, name: draft.name.trim() });
     setSaving(false);
-    if (!ok) setError("保存失败 —— 名称、日期和关联任务都检查一下");
+    if (!ok) setError("保存失败，请检查名称和日期后重试");
   };
 
   return (
     <div
       className="rounded-xl border border-[var(--accent)] bg-[var(--surface-alt)] p-3"
       onKeyDown={(e) => {
-        // 编辑框里的 Enter 是「保存」，不是工作区的「新建任务」
+        // Enter 是保存，不能冒泡成工作区的「新建任务」
         if (e.key === "Enter" && !e.shiftKey && !(e.target as HTMLElement).closest("textarea")) {
           e.preventDefault();
           e.stopPropagation();
@@ -348,7 +327,7 @@ function MilestoneEditor({
           ref={nameRef}
           value={draft.name}
           onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-          placeholder="里程碑名称，比如「样机验收」"
+          placeholder="里程碑名称，例如：样机验收"
           className="min-w-[12rem] flex-1 rounded-lg border border-[var(--rule)] bg-[var(--surface)] px-2.5 py-1.5 text-sm text-[var(--text)] outline-none focus:border-[var(--accent)]"
         />
 
@@ -362,7 +341,7 @@ function MilestoneEditor({
             <button
               key={c}
               onClick={() => setDraft({ ...draft, color: c })}
-              title="这一条的颜色（在甘特图上也是它）"
+              title="标记颜色，甘特图上同步使用"
               className="grid size-6 place-items-center rounded-full"
               style={{ background: c }}
             >
@@ -378,7 +357,7 @@ function MilestoneEditor({
         <input
           value={draft.description}
           onChange={(e) => setDraft({ ...draft, description: e.target.value })}
-          placeholder="说明（可选）：这一站要交付什么、谁验收"
+          placeholder="说明（可选）：交付什么、谁验收"
           className="min-w-[16rem] flex-1 rounded-lg border border-[var(--rule)] bg-[var(--surface)] px-2.5 py-1.5 text-xs text-[var(--text)] outline-none focus:border-[var(--accent)]"
         />
 
@@ -405,8 +384,8 @@ function MilestoneEditor({
                   onClick={() =>
                     setDraft({ ...draft, taskIds: draft.taskIds.filter((x) => x !== id) })
                   }
-                  title="取消关联（不会删掉任务）"
-                  className="text-[var(--text-dim)] hover:text-rose-500"
+                  title="取消关联，不会删除任务"
+                  className="text-[var(--text-dim)] hover:text-[var(--danger)]"
                 >
                   ×
                 </button>
@@ -416,7 +395,7 @@ function MilestoneEditor({
         </div>
       )}
 
-      {error && <p className="mt-2 text-[11px] text-rose-500">{error}</p>}
+      {error && <p className="mt-2 text-[11px] text-[var(--danger)]">{error}</p>}
 
       <div className="mt-3 flex items-center gap-2">
         <button
@@ -436,7 +415,7 @@ function MilestoneEditor({
         {onDelete && (
           <button
             onClick={onDelete}
-            className="ml-auto rounded-lg px-3 py-1.5 text-xs font-medium text-rose-500 transition-colors hover:bg-rose-500/10"
+            className="ml-auto rounded-lg px-3 py-1.5 text-xs font-medium text-[var(--danger)] transition-colors hover:bg-[var(--danger)]/10"
           >
             删除
           </button>
@@ -446,7 +425,7 @@ function MilestoneEditor({
   );
 }
 
-/** 日期输入。点开是项目里那套日历，不用原生 date input（理由见 DatePicker） */
+/** 用项目自己的日历，不用原生 date input（见 DatePicker） */
 function DateField({ value, onChange }: { value: string; onChange: (iso: string) => void }) {
   const [open, setOpen] = useState(false);
   const anchorRef = useRef<HTMLButtonElement>(null);
@@ -457,7 +436,7 @@ function DateField({ value, onChange }: { value: string; onChange: (iso: string)
       <button
         ref={anchorRef}
         onClick={() => setOpen(true)}
-        title="设立里程碑的日期"
+        title="里程碑日期"
         className="rounded-lg border border-[var(--rule)] bg-[var(--surface)] px-2.5 py-1.5 text-xs tabular-nums text-[var(--text)] transition-colors hover:border-[var(--accent)]"
       >
         {value}
@@ -513,7 +492,7 @@ function TaskPicker({
       <button
         ref={setAnchor}
         onClick={() => onOpenChange(!open)}
-        title="关联若干条任务；关联是引用，任务改名改期这里跟着变"
+        title="选择要关联的任务"
         className="rounded-lg border border-[var(--rule)] bg-[var(--surface)] px-2.5 py-1.5 text-xs text-[var(--text-dim)] transition-colors hover:border-[var(--accent)] hover:text-[var(--text)]"
       >
         {selected.length > 0 ? `已关联 ${selected.length} 条任务` : "关联任务…"}
@@ -546,7 +525,7 @@ function TaskPicker({
                   >
                     {on ? "✓" : ""}
                   </span>
-                  <span className="truncate">{t.name || "（未命名）"}</span>
+                  <span className="truncate">{t.name || "未命名"}</span>
                 </button>
               );
             })}
@@ -603,7 +582,6 @@ function RowActions({
           删除里程碑
         </MenuItem>
       </Popover>
-      {/* 保留 title 里的完整信息：列表里只看得到名字，悬停能确认是哪一条 */}
       <span className="sr-only">{milestone.description}</span>
     </>
   );
@@ -615,15 +593,14 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
       <div className="max-w-sm">
         <p className="text-sm font-medium text-[var(--text)]">还没有里程碑</p>
         <p className="mt-1 text-xs leading-relaxed text-[var(--text-dim)]">
-          里程碑是项目走到哪算一站的标记，不是任务。设好日期后，它会以菱形出现在甘特图上；
-          也可以关联若干条任务，一眼看出那一站由哪些活支撑。
+          设好日期后，里程碑会以菱形标在甘特图上。
         </p>
         <button
           onClick={onCreate}
           className="mt-4 rounded-lg px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90"
           style={{ background: "var(--accent)" }}
         >
-          ＋ 新建第一个里程碑
+          ＋ 新建里程碑
         </button>
       </div>
     </div>
@@ -658,7 +635,7 @@ function ConfirmDelete({
       >
         <p className="text-sm font-semibold text-[var(--text)]">删除「{name}」？</p>
         <p className="mt-1 text-xs leading-relaxed text-[var(--text-dim)]">
-          只删这个节点，关联的任务不受影响，甘特图上的标记也会一起消失。
+          删除后无法撤销。关联的任务不受影响。
         </p>
         <div className="mt-4 flex justify-end gap-2">
           <button
@@ -669,7 +646,7 @@ function ConfirmDelete({
           </button>
           <button
             onClick={onConfirm}
-            className="rounded-lg bg-rose-500 px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90"
+            className="rounded-lg bg-[var(--danger)] px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90"
           >
             删除
           </button>
@@ -683,10 +660,7 @@ function ConfirmDelete({
 /* 拖拽排序                                                            */
 /* ------------------------------------------------------------------ */
 
-/**
- * 指针事件实现，和事项页的行拖拽同一套理由：Tauri 在 Windows 上接管了窗口的
- * 拖放，HTML5 draggable 在那里整个失效。
- */
+/** 用指针事件：Tauri 在 Windows 上接管了窗口拖放，HTML5 draggable 会失效 */
 function useMilestoneDrag(
   onDrop: (from: number, to: number, place: "before" | "after") => void,
 ) {

@@ -6,10 +6,7 @@ import { useAppStore } from "../store/useAppStore";
 import { itemSnapshot } from "./registry";
 import type { Task } from "../gantt/model";
 
-/**
- * 插件 API 1.1 的 data.items。要钉死的是：它和事项页走同一个合并层 ——
- * 不是从事项分拣来的阻碍也在里面 —— 并且把名字、类型名都解好了。
- */
+/** data.items 和事项页走同一个合并层：含不是从事项分拣来的阻碍，名字/类型名已解好 */
 
 const unix = (iso: string) => new Date(`${iso}T10:00:00`).getTime() / 1000;
 

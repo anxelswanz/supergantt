@@ -1,10 +1,6 @@
 /**
  * 三次调用的提示词，以及把模型的出题结果收成 Question[]。
- *
- * 纯函数。每一份提示词都**自带完整上下文**（快照 + 背景 + 已有问答），
- * 不依赖模型那边的会话记忆 —— 理由见 src-tauri/src/ai_review.rs 顶部。
- *
- * 提示词全部走 stdin，所以这里怎么换行、带什么符号都没有限制。
+ * 每份提示词都自带完整上下文，不依赖模型的会话记忆（理由见 ai_review.rs 顶部）。
  */
 
 import { FACTS_PLACEHOLDER } from "./facts";
@@ -48,11 +44,8 @@ export const QUESTION_SCHEMA = JSON.stringify({
 });
 
 /**
- * 模型给的题 → Question[]。
- *
- * schema 管得住形状，管不住数量和质量：选项可能给了六个、可能有空串、
- * 可能两个一模一样。这里收一遍 —— 少于两个可选项的题直接丢掉（那不是
- * 选择题），选项去重后最多留 OPTION_COUNT 个，题数不超过这一轮的上限。
+ * 模型给的题 → Question[]。schema 管形状、管不住数量和质量：选项可能过多、
+ * 有空串或重复，所以少于两个可选项的题丢掉，去重后最多 OPTION_COUNT 个。
  */
 export function normalizeQuestions(raw: unknown, round: 1 | 2): Question[] {
   const list =
@@ -92,11 +85,8 @@ export function normalizeQuestions(raw: unknown, round: 1 | 2): Question[] {
 }
 
 /**
- * 从一段文字里把 JSON 抠出来。
- *
- * 正常情况用不上：结构化输出在 result 事件的 structured_output 里。这是给
- * 「CLI 版本太旧不认 --json-schema」留的退路 —— 那时模型会把 JSON 写在正文里，
- * 多半还包着代码块。
+ * 从文字里抠出 JSON。正常走 structured_output，这是给
+ * 「CLI 太旧不认 --json-schema」留的退路，那时 JSON 写在正文里、多半包着代码块。
  */
 export function extractJson(text: string): unknown {
   const fenced = text.match(/```(?:json)?\s*\n([\s\S]*?)\n```/);
@@ -117,7 +107,7 @@ export function extractJson(text: string): unknown {
 
 const orNone = (s: string): string => s.trim() || "（未填写）";
 
-/** 三份提示词共用的开头：这是什么项目、用户说了什么、数据长什么样 */
+/** 三份提示词共用的开头：项目、用户填的背景、数据 */
 function contextBlock(review: Review): string {
   const { background: bg, snapshot } = review;
   const omitted = omittedNote(snapshot);
@@ -148,7 +138,6 @@ function contextBlock(review: Review): string {
     .join("\n");
 }
 
-/** 已有的问答，写成模型好读的样子 */
 function qaBlock(questions: Question[]): string {
   if (questions.length === 0) return "";
   const lines = questions.map(
@@ -211,9 +200,7 @@ export function buildAskPrompt(review: Review, round: 1 | 2): string {
 /* 写文档                                                              */
 /* ------------------------------------------------------------------ */
 
-/**
- * @param instruction 「重新生成」时用户附带的一句要求；首次生成没有
- */
+/** @param instruction 「重新生成」时用户附加的要求；首次生成没有 */
 export function buildWritePrompt(review: Review, instruction = ""): string {
   const stage = review.background.kind === "stage";
   const task = [
@@ -267,6 +254,6 @@ export function buildWritePrompt(review: Review, instruction = ""): string {
     .join("\n\n");
 }
 
-/** 流式显示时，占位行还没被换掉 —— 先遮成一句人话 */
+/** 流式显示时占位行还没换掉，先遮成一句人话 */
 export const maskPlaceholder = (text: string): string =>
   text.replace(FACTS_PLACEHOLDER, "*（数据概览表将插入在这里）*");

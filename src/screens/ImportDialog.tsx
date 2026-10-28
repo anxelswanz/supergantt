@@ -3,21 +3,7 @@ import { motion } from "motion/react";
 import type { ImportOutcome, ImportPreview, SideSummary } from "../db/api";
 import { commit } from "../transfer/projectFile";
 
-/**
- * 导入项目文件前的预检对话框。
- *
- * 这一屏存在的理由只有一个：**导入是个会改数据库的操作，而用户此刻手上
- * 拿着的是一个从别处传过来的文件，他并不确切知道里面是什么。**
- * 所以在写任何东西之前，先把「文件里有什么」和「会发生什么」摊开给他看。
- *
- * 三种形态，对应三种局面：
- *   · 文件有问题   → 只报问题，明说数据库一个字没动（全有或全无）
- *   · 全新项目     → 报一下数量，直接导
- *   · 本机已有     → 并排对比本机版和文件版，让用户自己判断哪边更新
- *
- * 校验、匹配、落库全在 Rust 侧（src-tauri/src/transfer.rs），这里只负责
- * 把它给出的结论排版出来，以及在需要改名时收一个输入。
- */
+/** 导入项目文件前的预检对话框。校验、匹配、落库都在 Rust 侧（transfer.rs），这里只排版。 */
 
 export function ImportDialog({
   path,
@@ -45,9 +31,7 @@ export function ImportDialog({
     return () => window.removeEventListener("keydown", onKey);
   }, [onCancel, busy]);
 
-  // 改名撞车时，用户在输入框里改到不撞为止。这里只能挡住「和刚才那个撞的
-  // 名字一模一样」这一种情况 —— 真正的唯一性由库层的 UNIQUE 索引保证，
-  // 落库失败会走下面的 failure 分支
+  // 只挡住原样重提撞名的名字；真正的唯一性靠库层 UNIQUE 索引，失败走 failure 分支
   const nameTaken = preview.nameConflict && name.trim() === preview.suggestedName.trim();
   const canGo = !blocked && !busy && name.trim().length > 0 && !nameTaken;
 
@@ -99,17 +83,16 @@ export function ImportDialog({
             {preview.warnings.map((w) => (
               <p
                 key={w}
-                className="mt-3 rounded-lg bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-600 dark:text-amber-400"
+                className="mt-3 rounded-lg bg-[var(--warn)]/10 px-3 py-2 text-[11px] leading-relaxed text-[var(--warn)]"
               >
                 {w}
               </p>
             ))}
 
             {preview.nameConflict && (
-              <div className="mt-3 rounded-lg bg-amber-500/10 px-3 py-2.5">
-                <p className="text-[11px] leading-relaxed text-amber-600 dark:text-amber-400">
-                  改成「{preview.suggestedName}」会和本机另一个项目撞名。
-                  项目名必须唯一 —— 它是认出「这是同一个项目」的兜底线索。
+              <div className="mt-3 rounded-lg bg-[var(--warn)]/10 px-3 py-2.5">
+                <p className="text-[11px] leading-relaxed text-[var(--warn)]">
+                  「{preview.suggestedName}」会和本机另一个项目撞名，请换一个名字。
                 </p>
                 <input
                   autoFocus
@@ -125,13 +108,12 @@ export function ImportDialog({
 
             {overwrite && (
               <p className="mt-3 text-[11px] leading-relaxed text-[var(--text-dim)]">
-                覆盖前会把本机这一版整份导成一个 <code>.ganttproj</code> 存进{" "}
-                <code>backups/</code>，导完还能一键撤销。
+                覆盖前会把本机版备份为 <code>.ganttproj</code> 存进 <code>backups/</code>，导入后可撤销。
               </p>
             )}
 
             {failure && (
-              <p className="mt-3 rounded-lg bg-rose-500/10 px-3 py-2 text-[11px] leading-relaxed text-rose-500">
+              <p className="mt-3 rounded-lg bg-[var(--danger)]/10 px-3 py-2 text-[11px] leading-relaxed text-[var(--danger)]">
                 {failure}
               </p>
             )}
@@ -165,12 +147,7 @@ export function ImportDialog({
   );
 }
 
-/**
- * 文件不合格。
- *
- * 只说问题，并且**明说数据库没被碰过** —— 用户此刻最想知道的不是
- * 「哪里错了」，而是「我刚才那一下有没有把现有数据搞坏」。
- */
+/** 文件不合格：列出问题，并明说数据库没动过。 */
 function Blocked({
   preview,
   path,
@@ -182,7 +159,7 @@ function Blocked({
 }) {
   return (
     <>
-      <div className="text-sm font-semibold text-rose-500">
+      <div className="text-sm font-semibold text-[var(--danger)]">
         无法导入，文件有 {preview.problems.length} 处问题
       </div>
       <div className="mt-1 truncate font-mono text-[10px] text-[var(--text-dim)]" title={path}>
@@ -193,7 +170,7 @@ function Blocked({
         {preview.problems.map((p) => (
           <li
             key={p}
-            className="rounded-lg bg-rose-500/8 px-3 py-2 text-[11px] leading-relaxed text-[var(--text)]"
+            className="rounded-lg bg-[var(--danger)]/8 px-3 py-2 text-[11px] leading-relaxed text-[var(--text)]"
           >
             {p}
           </li>
@@ -201,7 +178,7 @@ function Blocked({
       </ul>
 
       <p className="mt-3 text-[11px] leading-relaxed text-[var(--text-dim)]">
-        导入是全有或全无的：只要有一条不合格就一条都不写。
+        有问题时整个文件都不导入。
         <span className="font-medium text-[var(--text)]">数据库未发生任何改动。</span>
       </p>
 
@@ -217,14 +194,13 @@ function Blocked({
   );
 }
 
-/** 全新项目：不需要对比，报一下里面有什么就行。 */
 function Fresh({ file }: { file: SideSummary }) {
   return (
     <div className="mt-3 rounded-xl border border-[var(--rule)] bg-[var(--surface-alt)] p-3.5">
       <div className="text-sm font-semibold text-[var(--text)]">{file.name}</div>
       <div className="mt-1.5 text-[11px] leading-relaxed text-[var(--text-dim)]">
-        {file.taskCount} 个任务 · {file.peopleCount} 位负责人 · {file.riskCount} 条风险 ·{" "}
-        {file.commentCount} 条评论 · {file.dailyNoteCount} 条当日记录
+        {file.taskCount} 个任务，{file.peopleCount} 位负责人，{file.riskCount} 条风险，
+        {file.commentCount} 条评论，{file.dailyNoteCount} 条当日记录
       </div>
       <div className="mt-1 font-mono text-[10px] tabular-nums text-[var(--text-dim)]">
         {file.startDate && file.endDate ? `${file.startDate} – ${file.endDate}` : "尚无任务"}
@@ -233,13 +209,7 @@ function Fresh({ file }: { file: SideSummary }) {
   );
 }
 
-/**
- * 本机版 vs 文件版。
- *
- * 不替用户判断哪边"更新"。时间戳只说明谁写得晚，说明不了谁更重要 ——
- * 你可能昨天在这台机器上改了一整天，而文件是今早从另一台随手导出的。
- * 所以这里只把数字并排摆好，判断留给唯一知道上下文的人。
- */
+/** 本机版与文件版并排对比。不替用户判断哪边该留：较晚修改不等于更重要。 */
 function Comparison({ preview }: { preview: ImportPreview }) {
   const local = preview.existing!;
   const file = preview.file;
@@ -261,8 +231,8 @@ function Comparison({ preview }: { preview: ImportPreview }) {
     <>
       <p className="mt-2 text-[11px] leading-relaxed text-[var(--text-dim)]">
         {preview.matchedBy === "uuid"
-          ? "文件里的项目标识和本机这个项目一致，是同一个项目的另一个版本。"
-          : "文件里的项目和本机这个项目同名 —— 项目名唯一，所以当作同一个项目。"}
+          ? "项目标识和本机这个项目一致，是它的另一个版本。"
+          : "和本机这个项目同名，按同一个项目处理。"}
       </p>
 
       <div className="mt-3 overflow-hidden rounded-xl border border-[var(--rule)]">
@@ -292,14 +262,13 @@ function Comparison({ preview }: { preview: ImportPreview }) {
 
       <p className="mt-2.5 text-[11px] leading-relaxed text-[var(--text-dim)]">
         覆盖会用文件版<span className="font-semibold text-[var(--text)]">整个替换</span>
-        本机版的任务、依赖、风险、评论、当日记录和基线。
-        负责人不会被替换：同名的沿用本机那一个（颜色不动，只在本机没有头像时补一张）。
+        本机版的任务、依赖、风险、评论、当日记录和基线。同名负责人沿用本机的。
       </p>
     </>
   );
 }
 
-/** Unix 秒字符串 → 本地「MM-DD HH:mm」。库里存的是秒，本地化是渲染层的事。 */
+/** Unix 秒字符串 → 本地「MM-DD HH:mm」。 */
 function stamp(secs: string): string {
   const n = Number(secs);
   if (!Number.isFinite(n) || n <= 0) return "—";
