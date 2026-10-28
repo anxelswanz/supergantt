@@ -17,7 +17,8 @@
  *   · 最小割集：能单独导致顶事件的最小基本事件组合。排查顺序就从这里来 ——
  *     先查一阶割集（单点原因），再查组合。
  *
- * 数据存在插件自己的 data/trees.json，按项目分开。一棵树引用事项用的是
+ * 数据存在插件自己的 data/trees.json，按项目分开。卸载插件不会删它，
+ * 重新安装后所有树都还在；停用 / 卸载前没落盘的改动在 onunload 里立刻写掉。一棵树引用事项用的是
  * noteId（和飞书同步插件同一个认法）：事项从「问题」改分拣成「阻碍」，
  * 行 key 会变，但还是同一条。
  *
@@ -425,15 +426,21 @@ export function onload(api) {
    */
   let saveTimer = null;
   let saving = Promise.resolve();
+  const writeNow = () => {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    const text = JSON.stringify(state.store, null, 2);
+    saving = saving
+      .then(() => api.storage.write(STORE_FILE, text))
+      .catch((e) => api.log("写入故障树失败", e));
+    return saving;
+  };
   const save = () => {
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      const text = JSON.stringify(state.store, null, 2);
-      saving = saving
-        .then(() => api.storage.write(STORE_FILE, text))
-        .catch((e) => api.log("写入故障树失败", e));
-    }, 300);
+    saveTimer = setTimeout(writeNow, 300);
   };
+  // 停用、卸载、热重载都会先调 onunload：还在防抖里的那次改动不能丢
+  flushPending = () => (saveTimer != null ? writeNow() : saving);
 
   /** 撤销 / 重做：只管本次会话里对树的改动 */
   const undo = [];
@@ -1614,4 +1621,10 @@ export function onload(api) {
   );
 }
 
-export function onunload() {}
+/** onload 里接上；没加载过就什么都不做 */
+let flushPending = () => Promise.resolve();
+
+export function onunload() {
+  void flushPending();
+  flushPending = () => Promise.resolve();
+}

@@ -11,6 +11,7 @@
 //! 所以这里的检查**不是**安全沙箱，挡的是「写错了」而不是「存心作恶」：
 //!
 //! - 存储只能落在 `plugins/<id>/data/` 下，文件名不许带路径分隔符；
+//!   卸载插件不删它，重新安装后数据还在；
 //! - 子进程只认裸程序名（不许带 `/`），也不许是 shell —— 插件要跑
 //!   `lark-cli`，不该顺手拿到一个能执行任意命令的 `sh -c`；
 //! - 插件 manifest 里声明的 `permissions.exec` 白名单在 TS 侧（registry.ts）
@@ -158,24 +159,50 @@ pub fn install_bundled_plugin(app: tauri::AppHandle, id: String) -> Result<()> {
         return Err(format!("附带插件里没有「{id}」"));
     }
     let dst = plugin_dir(&app, &id)?;
-    if dst.is_dir() {
-        for entry in std::fs::read_dir(&dst).map_err(|e| format!("读不了旧版本：{e}"))?.flatten() {
-            if entry.file_name() == "data" {
-                continue;
-            }
-            let p = entry.path();
-            let res = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
-            res.map_err(|e| format!("清理旧版本失败：{e}"))?;
-        }
-    }
+    remove_code(&dst)?;
     copy_tree(&src, &dst)
 }
 
-/// 卸载：整个目录删掉，`data/` 一起。调用方（设置页）负责先停用、先确认。
+/// 删掉插件目录里除 `data/` 以外的一切。目录不存在不算错。
+fn remove_code(dir: &Path) -> Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir).map_err(|e| format!("读不了插件目录：{e}"))?.flatten() {
+        if entry.file_name() == "data" {
+            continue;
+        }
+        let p = entry.path();
+        let res = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+        res.map_err(|e| format!("删除插件文件失败：{e}"))?;
+    }
+    Ok(())
+}
+
+/// 这个目录是不是只剩卸载后留下的 `data/`（隐藏文件不算）。
+/// 扫描插件时跳过它 —— 它不是一个坏掉的插件，只是在等重新安装。
+pub(crate) fn only_data(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let names: Vec<String> = entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| !n.starts_with('.'))
+        .collect();
+    names.iter().any(|n| n == "data") && names.iter().all(|n| n == "data")
+}
+
+/// 卸载：删掉代码，**`data/` 留着**。
+///
+/// 插件攒下的东西（故障树、同步记录）是用户的数据，不是插件的一部分 ——
+/// 卸了再装回来，应该什么都还在。没有数据的插件整个目录删干净。
+/// 调用方（设置页）负责先停用、先确认。
 #[tauri::command]
 pub fn uninstall_plugin(app: tauri::AppHandle, id: String) -> Result<()> {
     let dir = plugin_dir(&app, &id)?;
-    if dir.is_dir() {
+    remove_code(&dir)?;
+    if dir.is_dir() && !only_data(&dir) {
         std::fs::remove_dir_all(&dir).map_err(|e| format!("删除插件目录失败：{e}"))?;
     }
     Ok(())
@@ -522,5 +549,31 @@ mod tests {
         assert!(skip_on_install("data"));
         assert!(skip_on_install(".DS_Store"));
         assert!(!skip_on_install("main.js"));
+    }
+
+    #[test]
+    fn uninstall_keeps_data() {
+        let root = std::env::temp_dir().join(format!("gantt-plugin-uninstall-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        // 有数据：代码删掉，data/ 留着，扫描时被当成「只剩数据」跳过
+        let a = root.join("a");
+        std::fs::create_dir_all(a.join("data")).unwrap();
+        std::fs::create_dir_all(a.join("assets")).unwrap();
+        std::fs::write(a.join("main.js"), "x").unwrap();
+        std::fs::write(a.join("data/trees.json"), "{}").unwrap();
+        assert!(!only_data(&a));
+        remove_code(&a).unwrap();
+        assert!(only_data(&a));
+        assert_eq!(std::fs::read_to_string(a.join("data/trees.json")).unwrap(), "{}");
+
+        // 没数据：删完是空目录，不算「只剩数据」，调用方会整个删掉
+        let b = root.join("b");
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(b.join("main.js"), "x").unwrap();
+        remove_code(&b).unwrap();
+        assert!(!only_data(&b));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

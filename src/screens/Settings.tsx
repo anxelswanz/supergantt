@@ -302,7 +302,7 @@ function PluginsPane() {
                       onClick={() => {
                         if (
                           !window.confirm(
-                            `卸载「${r.manifest.name}」？\n\n插件目录会被整个删掉，包括它保存的数据（比如同步记录）。`,
+                            `卸载「${r.manifest.name}」？\n\n插件保存的数据（比如故障树、同步记录）会留着，重新安装后还能看到。`,
                           )
                         )
                           return;
@@ -312,7 +312,7 @@ function PluginsPane() {
                         });
                       }}
                       disabled={isBusy}
-                      title="删掉插件目录"
+                      title="删掉插件代码；保存的数据留着，重新安装后还在"
                       className="rounded-lg border border-[var(--rule)] px-2.5 py-1 text-[10px] text-[var(--text-dim)] hover:text-rose-500 disabled:opacity-50"
                     >
                       卸载

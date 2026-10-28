@@ -2,7 +2,7 @@
 import * as React from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { onload } from "./main.js";
+import { onload, onunload } from "./main.js";
 
 /**
  * 从事项建一棵树 → 在画布上用键盘拆两层 → 标确认 / 排除 → 右栏推出结论。
@@ -28,8 +28,9 @@ const ITEM = {
   noteId: 3,
 };
 
-function setup() {
-  const files = new Map<string, string>();
+const setup = () => setupWith(new Map<string, string>());
+
+function setupWith(files: Map<string, string>) {
   let View: React.ComponentType = () => null;
   const actions: { label: (i: unknown) => string | null; run: (i: unknown) => void }[] = [];
   const badges: { render: (i: unknown) => { text: string } | null }[] = [];
@@ -140,5 +141,26 @@ describe("故障树", () => {
     expect(confirm).toHaveBeenCalled();
     expect(screen.queryByRole("tab", { name: /夹具尺寸不对/ })).toBeNull();
     confirm.mockRestore();
+  });
+
+  it("卸载前没落盘的改动立刻写掉，重新加载读回同一份", async () => {
+    const { View, files, action } = setup();
+    await act(async () => {});
+    await act(async () => action.run(ITEM));
+    render(React.createElement(View));
+    key("Tab");
+    await type("图纸错");
+
+    // 防抖还没到就卸载
+    onunload();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(files.get("trees.json")).toContain("图纸错");
+    cleanup();
+
+    // 同一份存储，重新 onload：树还在
+    const again = setupWith(files);
+    await act(async () => {});
+    render(React.createElement(again.View));
+    expect(screen.getAllByText("图纸错").length).toBeGreaterThan(0);
   });
 });

@@ -501,7 +501,7 @@ export const api = {
   listBundledPlugins: () => invoke<BundledPlugin[]>("list_bundled_plugins"),
   /** 安装或更新一个附带插件。更新时保留插件的 data/ */
   installBundledPlugin: (id: string) => invoke<void>("install_bundled_plugin", { id }),
-  /** 删掉插件目录（含 data/）。调用前先停用 */
+  /** 删掉插件代码，保留 data/（重新安装后数据还在）。调用前先停用 */
   uninstallPlugin: (id: string) => invoke<void>("uninstall_plugin", { id }),
 
   /* 下面这些只给 plugins/registry.ts 用 —— 插件拿到的是包过一层、

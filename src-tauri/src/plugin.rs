@@ -85,6 +85,10 @@ fn scan(app: &tauri::AppHandle) -> Result<Vec<RawPlugin>> {
             Some(n) if !n.starts_with('.') => n.to_string(),
             _ => continue,
         };
+        // 卸载后只剩 data/ 的目录：在等重新安装，不是坏插件
+        if crate::plugin_host::only_data(&path) {
+            continue;
+        }
 
         let manifest_path = path.join("manifest.json");
         let manifest_raw = read_text(&manifest_path);

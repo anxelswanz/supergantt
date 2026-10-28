@@ -285,7 +285,7 @@ export interface PluginProcApi {
  *
  * 和 settings 的分工：settings 是小开关，存在数据库里；这里是插件自己的
  * 结构化数据（比如同步队列），存成文件 —— 这样外部程序（gantt CLI）也能读写。
- * 写入是原子的（临时文件 + rename）。
+ * 写入是原子的（临时文件 + rename）。卸载插件不删 data/，重新安装后还在。
  */
 export interface PluginStorage {
   read(name: string): Promise<string | null>;
