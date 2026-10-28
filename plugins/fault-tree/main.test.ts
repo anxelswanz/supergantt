@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { validateManifest } from "../../src/plugins/manifest";
 // 插件是纯 JS 单文件（宿主从 Blob URL 加载，不能 import），这里直接测它导出的纯函数
 import {
+  actionStats,
   addChild,
   addSibling,
   cutSetStatus,
@@ -17,6 +18,8 @@ import {
   outline,
   parseStore,
   removeNode,
+  roleOf,
+  rootCauses,
   updateNode,
 } from "./main.js";
 
@@ -147,6 +150,77 @@ describe("其他", () => {
   it("事项按 noteId 认，分拣改类型也还是同一条", () => {
     expect(itemRef({ key: "risk:7", noteId: 3 })).toBe("note:3");
     expect(itemRef({ key: "blocker:2/b1", noteId: null })).toBe("blocker:2/b1");
+  });
+
+  it("角色：老数据顶事件当现象、其余当原因", () => {
+    const { t, old } = sample();
+    expect(roleOf(t.nodes.n1)).toBe("phenomenon");
+    expect(roleOf(t.nodes[old])).toBe("cause");
+  });
+
+  it("对策挂上去不改结构，也不参与推导和割集", () => {
+    const { t: t0, old, unchecked, machining } = sample();
+    const before = minimalCutSets(t0).sets;
+    // 基本事件挂对策：仍是基本事件
+    let r = addChild(t0, old, { label: "发图前复核", role: "action" });
+    let t = r.tree;
+    const act = r.id as string;
+    expect(t.nodes[old].kind).toBe("basic");
+    expect(t.nodes[act].actionStatus).toBe("todo");
+    // 顶事件下挂临时措施
+    r = addChild(t, "n1", { label: "手工修配", role: "action" });
+    t = r.tree;
+    expect(minimalCutSets(t).sets).toEqual(before);
+    // 对策下面不能再挂
+    expect(addChild(t, act, { label: "x" }).id).toBeNull();
+    // 推导不受对策影响
+    t = updateNode(t, old, { status: "confirmed" });
+    t = updateNode(t, unchecked, { status: "confirmed" });
+    expect(evaluate(t).n1).toBe("confirmed");
+    // 删掉原因下唯一的对策，原因结构不变
+    expect(removeNode(t, act).nodes[old].kind).toBe("basic");
+    // 加工偏差：只挂对策的叶子删光后仍是基本事件
+    r = addChild(t, machining, { label: "换刀", role: "action" });
+    expect(removeNode(r.tree, r.id as string).nodes[machining].kind).toBe("basic");
+  });
+
+  it("改角色：有子原因的、顶事件不能改成对策；改回原因去掉对策字段", () => {
+    const { t, drawing, old } = sample();
+    expect(updateNode(t, drawing, { role: "action" })).toBe(t);
+    expect(updateNode(t, "n1", { role: "action" })).toBe(t);
+    let x = updateNode(t, old, { role: "action" });
+    expect(x.nodes[old].actionStatus).toBe("todo");
+    x = updateNode(x, old, { due: "2026-11-01" });
+    x = updateNode(x, old, { role: "cause" });
+    expect(x.nodes[old].due).toBeUndefined();
+    expect(x.nodes[old].actionStatus).toBeUndefined();
+  });
+
+  it("根因：已确认的叶子，且一路到顶都成立", () => {
+    const { t: t0, old, unchecked, machining } = sample();
+    let t = updateNode(t0, old, { status: "confirmed" });
+    t = updateNode(t, machining, { status: "confirmed" });
+    // 图纸错是与门，没复核还没确认 → 旧版图纸不在成立的链上
+    expect([...rootCauses(t)]).toEqual([machining]);
+    t = updateNode(t, unchecked, { status: "confirmed" });
+    expect([...rootCauses(t)].sort()).toEqual([machining, old, unchecked].sort());
+    t = updateNode(t, machining, { status: "ruled" });
+    expect(rootCauses(t).has(machining)).toBe(false);
+  });
+
+  it("对策统计：完成数、逾期（做完 / 无效的不算逾期）", () => {
+    const { t: t0, old, machining } = sample();
+    let t = t0;
+    const add = (p: string, over: object) => {
+      const r = addChild(t, p, { role: "action", ...over });
+      t = r.tree;
+    };
+    add(old, { actionStatus: "done", due: "2026-10-01" });
+    add(old, { actionStatus: "doing", due: "2026-10-01" });
+    add(machining, { actionStatus: "ineffective", due: "2026-10-01" });
+    add(machining, { due: "2026-12-01" });
+    expect(actionStats(t, "2026-10-28")).toEqual({ total: 4, done: 1, overdue: 1 });
+    expect(outline(t)).toContain("→ 对策：（未填写）（已完成，截止 2026-10-01）");
   });
 
   it("事件的时间：有 at 用 at，老数据退回建树那天", () => {

@@ -1,334 +1,420 @@
 /**
- * 复盘里的里程碑：一条从上往下走的路线，而不是一张日期表。
+ * 复盘里的里程碑。两层：
  *
- * 表格的问题是它把「已经过去的」「今天」「还没到的」排成一样的行，
- * 读的人得自己拿每个日期去和今天比。汇报现场被追问的永远是三句话：
- * 哪几个到了、到得准不准、哪个该到没到 —— 这三句话要在一眼里读出来。
+ *   ① 一条按真实日期比例画的横向时间轴 —— 节点之间隔多远、今天站在哪、
+ *      哪个晚了多少（计划位置到实际位置那一截），一眼看完。
+ *   ② 下面三栏，正好是汇报现场被追问的三句话：
+ *      已达成（到得准不准）/ 该到没到 / 接下来。
  *
- *   · 左列是日期。晚了 / 早了的，计划日划掉、实际日写在下面 —— 差多少看字就知道
- *   · 中间是轨道。今天是轨道上的一道红线，线上方实线（已经走过），下方虚线（还没到）
- *   · 右列直接写结论：准时 / 晚 3 天 / 逾期 5 天 · 未达成 / 还有 12 天
+ * 以前是一列竖排的表：900px 宽的页面里，名字挤在左边、结论飘在最右，
+ * 中间一大片空，节点一多整块被拉得很长，而且看不出时间上的远近。
  *
  * 状态的判定在 core/review.ts 的 milestoneMarks，这里只负责画。
  */
 
-import { Fragment } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { MotionConfig, motion } from "motion/react";
 import type { MilestoneMark, MilestoneState } from "../core/review";
-import { dayToDate, dayToIso } from "../gantt/time";
+import { dateToDay, dayToDate, dayToIso } from "../gantt/time";
 import type { Person } from "../db/api";
-import { Avatar } from "./Avatar";
-
-const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
 const LATE = "#f43f5e";
 const EARLY = "#10b981";
 
-/** 今年的省掉年份 —— 左列很窄，每个字都占地方 */
+/** 今年的省掉年份 */
 const shortDay = (day: number, thisYear: number) =>
   dayToDate(day).getUTCFullYear() === thisYear ? dayToIso(day).slice(5) : dayToIso(day);
 
-interface Verdict {
-  text: string;
-  color: string;
-  /** 实心底：只给「逾期未达成」—— 整块里唯一需要立刻有人站出来解释的 */
-  solid?: boolean;
-}
-
-function verdictOf(s: MilestoneState): Verdict {
-  switch (s.kind) {
-    case "hit":
-      return s.delta === 0
-        ? { text: "准时达成", color: EARLY }
-        : s.delta > 0
-          ? { text: `晚 ${s.delta} 天达成`, color: LATE }
-          : { text: `早 ${-s.delta} 天达成`, color: EARLY };
-    case "undated":
-      return { text: "已完成 · 未记实施日", color: "var(--text-dim)" };
-    case "overdue":
-      return { text: `逾期 ${s.days} 天 · 未达成`, color: LATE, solid: true };
-    case "upcoming":
-      return s.days === 0
-        ? { text: "就是今天", color: "var(--accent)" }
-        : { text: `还有 ${s.days} 天`, color: "var(--text-dim)" };
-  }
-}
-
 const reached = (s: MilestoneState) => s.kind === "hit" || s.kind === "undated";
 
-export function MilestoneTrack({
-  marks,
-  today,
-  people,
-  onOpen,
-}: {
+/** 节点实际落在轴上的哪一天：达成了的画在实际日，其余画在计划日 */
+const landDay = (m: MilestoneMark) => (m.state.kind === "hit" && m.actual ? m.actual.startDay : m.plan.startDay);
+
+interface Props {
   marks: MilestoneMark[];
   today: number;
   people: Person[];
   onOpen: (taskId: number) => void;
-}) {
-  const thisYear = dayToDate(today).getUTCFullYear();
-  // 今天那道线插在第一个「计划日不早于今天」的节点前面（marks 已按计划日排好）
-  const todayAt = (() => {
-    const i = marks.findIndex((m) => m.plan.startDay >= today);
-    return i === -1 ? marks.length : i;
-  })();
+}
 
-  const count = (k: MilestoneState["kind"]) => marks.filter((m) => m.state.kind === k).length;
-  const hit = count("hit") + count("undated");
-  const overdue = count("overdue");
-  const upcoming = count("upcoming");
+export function MilestoneTrack({ marks, today, people, onOpen }: Props) {
+  const thisYear = dayToDate(today).getUTCFullYear();
+  const done = marks.filter((m) => reached(m.state));
+  const overdue = marks.filter((m) => m.state.kind === "overdue");
+  const upcoming = marks.filter((m) => m.state.kind === "upcoming");
+  const onTime = done.filter((m) => m.state.kind === "hit" && m.state.delta <= 0).length;
+  const person = (m: MilestoneMark) => people.find((p) => p.id === m.task.personId) ?? null;
 
   return (
     <MotionConfig reducedMotion="user">
-      <div className="rounded-xl border border-[var(--rule)] bg-[var(--surface-alt)] px-4 pb-2 pt-3">
-        {/* 一行读完全局：几个到了、几个该到没到、几个还在前面 */}
-        <div className="mb-3 flex items-center gap-3 border-b border-[var(--rule)] pb-3">
-          <span className="font-mono text-[22px] font-semibold leading-none tabular-nums text-[var(--text)]">
-            {hit}
-            <span className="text-[13px] font-normal text-[var(--text-dim)]"> / {marks.length}</span>
+      <div className="overflow-hidden rounded-xl border border-[var(--rule)] bg-[var(--surface)]">
+        {/* —— 一行读完全局 —— */}
+        <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 px-4 pt-3.5">
+          <span className="flex items-baseline gap-1.5">
+            <span className="font-mono text-[26px] font-semibold leading-none tabular-nums text-[var(--text)]">
+              {done.length}
+            </span>
+            <span className="font-mono text-[13px] tabular-nums text-[var(--text-dim)]">/ {marks.length}</span>
+            <span className="ml-1 text-[11px] text-[var(--text-dim)]">个节点已达成</span>
           </span>
-          <span className="text-[11px] text-[var(--text-dim)]">个节点已达成</span>
-          <span className="ml-auto flex items-center gap-3 text-[10px] text-[var(--text-dim)]">
-            {overdue > 0 && (
-              <Legend color={LATE} label={`逾期 ${overdue}`} strong />
-            )}
-            {upcoming > 0 && <Legend color="var(--milestone)" label={`待到 ${upcoming}`} hollow />}
-          </span>
+          {done.length > 0 && (
+            <span className="text-[11px] text-[var(--text-dim)]">
+              其中按时 <b className="font-mono font-semibold tabular-nums text-[var(--text)]">{onTime}</b> 个
+            </span>
+          )}
+          {overdue.length > 0 && (
+            <span className="text-[11px] font-semibold" style={{ color: LATE }}>
+              {overdue.length} 个逾期未达成
+            </span>
+          )}
         </div>
 
-        <ol className="relative">
-          {marks.map((m, i) => (
-            <Fragment key={m.task.id}>
-              {i === todayAt && <TodayLine day={today} thisYear={thisYear} first={i === 0} />}
-              <Stop
-                mark={m}
-                index={i}
-                first={i === 0 && todayAt !== 0}
-                last={i === marks.length - 1 && todayAt !== marks.length}
-                future={m.plan.startDay >= today}
-                thisYear={thisYear}
-                person={people.find((p) => p.id === m.task.personId) ?? null}
-                onOpen={() => onOpen(m.task.id)}
-              />
-            </Fragment>
-          ))}
-          {todayAt === marks.length && <TodayLine day={today} thisYear={thisYear} last />}
-        </ol>
+        <Axis marks={marks} today={today} thisYear={thisYear} onOpen={onOpen} />
+
+        {/* —— 三栏：已达成 / 该到没到 / 接下来 —— */}
+        <div className="grid grid-cols-1 border-t border-[var(--rule)] sm:grid-cols-3 sm:divide-x sm:divide-[var(--rule)]">
+          <Column title="已达成" count={done.length} color={EARLY} empty="还没有达成的节点">
+            {done.map((m) => (
+              <Row key={m.task.id} m={m} thisYear={thisYear} person={person(m)} onOpen={onOpen} />
+            ))}
+          </Column>
+          <Column title="该到没到" count={overdue.length} color={LATE} empty="没有逾期的节点" alert>
+            {overdue.map((m) => (
+              <Row key={m.task.id} m={m} thisYear={thisYear} person={person(m)} onOpen={onOpen} />
+            ))}
+          </Column>
+          <Column title="接下来" count={upcoming.length} color="var(--milestone)" empty="后面没有节点了">
+            {upcoming.map((m) => (
+              <Row key={m.task.id} m={m} thisYear={thisYear} person={person(m)} onOpen={onOpen} />
+            ))}
+          </Column>
+        </div>
       </div>
     </MotionConfig>
   );
 }
 
-/* 三列的宽度：日期 / 轨道 / 正文。TodayLine 要和 Stop 对齐，共用这一份 */
-const GRID = "grid grid-cols-[76px_28px_minmax(0,1fr)] items-stretch";
+/* ------------------------------------------------------------------ */
+/* 时间轴                                                              */
+/* ------------------------------------------------------------------ */
 
-function Stop({
-  mark,
-  index,
-  first,
-  last,
-  future,
+const LANES = 3;
+const LANE_H = 19;
+const AXIS_Y = LANES * LANE_H + 18;
+const AXIS_H = AXIS_Y + 34;
+const SIDE = 20;
+const LABEL_MAX = 10;
+
+/** 11px 字号下的大致宽度：中文一个字 ≈ 11px，ASCII ≈ 6.4px。只用来避让，不用很准 */
+const textWidth = (s: string) => [...s].reduce((w, c) => w + (c.charCodeAt(0) < 256 ? 6.4 : 11), 0);
+const clip = (s: string) => ([...s].length > LABEL_MAX ? [...s].slice(0, LABEL_MAX - 1).join("") + "…" : s);
+
+interface Placed {
+  m: MilestoneMark;
+  x: number;
+  planX: number;
+  /** 标签所在的行，null = 挤不下，只留菱形（悬停看名字） */
+  lane: number | null;
+  left: number;
+  text: string;
+}
+
+/**
+ * 标签分行：从左到右，每个标签放进离轴最近、还放得下的那一行。
+ * 三行都挤满了就不写字 —— 菱形还在，悬停有名字，下面三栏里也有。
+ */
+function placeLabels(marks: MilestoneMark[], x: (day: number) => number, width: number): Placed[] {
+  const lanes: [number, number][][] = Array.from({ length: LANES }, () => []);
+  return [...marks]
+    .sort((a, b) => landDay(a) - landDay(b))
+    .map((m) => {
+      const px = x(landDay(m));
+      const text = clip(m.task.name || "未命名");
+      const w = textWidth(text) + 4;
+      // 默认从菱形往右写；贴右边了就往左写
+      const left = px + w > width - 4 ? px - w + 4 : px - 4;
+      const lane = lanes.findIndex((spans) => spans.every(([l, r]) => left > r + 8 || left + w < l - 8));
+      if (lane >= 0) lanes[lane].push([left, left + w]);
+      return { m, x: px, planX: x(m.plan.startDay), lane: lane >= 0 ? lane : null, left, text };
+    });
+}
+
+/** 月份刻度（每月 1 号）。跨得太久就隔几个月标一次，最多八个 */
+function monthTicks(from: number, to: number) {
+  const start = dayToDate(from);
+  const months: Date[] = [];
+  for (let i = 1; ; i++) {
+    const d = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + i, 1));
+    if (dateToDay(d) > to) break;
+    months.push(d);
+  }
+  const every = Math.max(1, Math.ceil(months.length / 8));
+  return months
+    .filter((_, i) => i % every === 0)
+    .map((d) => ({
+      day: dateToDay(d),
+      label: d.getUTCMonth() === 0 ? `${d.getUTCFullYear()} 年 1 月` : `${d.getUTCMonth() + 1} 月`,
+    }));
+}
+
+function Axis({
+  marks,
+  today,
   thisYear,
-  person,
   onOpen,
 }: {
-  mark: MilestoneMark;
-  index: number;
-  first: boolean;
-  last: boolean;
-  /** 计划日还没到：轨道画虚线 */
-  future: boolean;
+  marks: MilestoneMark[];
+  today: number;
   thisYear: number;
-  person: Person | null;
-  onOpen: () => void;
+  onOpen: (taskId: number) => void;
 }) {
-  const { state, plan, actual } = mark;
-  const verdict = verdictOf(state);
-  const slipped = state.kind === "hit" && state.delta !== 0 && actual != null;
-  const planDay = plan.startDay;
+  const box = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(860);
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const read = () => el.clientWidth > 0 && setWidth(el.clientWidth);
+    read();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(read);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const { from, to } = useMemo(() => {
+    const days = marks.flatMap((m) => [m.plan.startDay, landDay(m)]).concat(today);
+    const lo = Math.min(...days);
+    const hi = Math.max(...days);
+    const pad = Math.max(3, Math.round((hi - lo) * 0.04));
+    return { from: lo - pad, to: hi + pad };
+  }, [marks, today]);
+
+  const inner = width - SIDE * 2;
+  const x = (day: number) => SIDE + ((day - from) / Math.max(1, to - from)) * inner;
+  const placed = useMemo(() => placeLabels(marks, x, width), [marks, width, from, to]); // eslint-disable-line react-hooks/exhaustive-deps
+  const ticks = useMemo(() => monthTicks(from, to), [from, to]);
+  const tx = x(today);
 
   return (
-    <motion.li
-      initial={{ opacity: 0, x: -6 }}
-      animate={{ opacity: 1, x: 0 }}
-      transition={{ duration: 0.28, delay: Math.min(index, 10) * 0.04, ease: [0.22, 1, 0.36, 1] }}
-    >
-      <button
-        onClick={onOpen}
-        title="打开这个里程碑的详情"
-        className={`${GRID} group w-full rounded-lg text-left transition-colors hover:bg-[var(--row-hover)]`}
+    <div ref={box} className="relative mx-0 select-none" style={{ height: AXIS_H }} aria-label="里程碑时间轴">
+      {/* 月份刻度 */}
+      {ticks.map((t) => (
+        <span key={t.day} className="absolute" style={{ left: x(t.day), top: AXIS_Y - 4, height: 8 }}>
+          <span className="absolute left-0 top-0 h-2 w-px bg-[var(--rule)]" />
+          <span className="absolute left-1 top-3 whitespace-nowrap text-[9.5px] text-[var(--text-dim)] opacity-80">
+            {t.label}
+          </span>
+        </span>
+      ))}
+
+      {/* 轴：走过的一段实线，还没到的一段虚线 */}
+      <span
+        className="absolute h-[1.5px] bg-[color-mix(in_srgb,var(--text-dim)_55%,transparent)]"
+        style={{ left: SIDE, width: Math.max(0, tx - SIDE), top: AXIS_Y }}
+      />
+      <span
+        className="absolute border-t-[1.5px] border-dashed border-[color-mix(in_srgb,var(--text-dim)_35%,transparent)]"
+        style={{ left: tx, width: Math.max(0, width - SIDE - tx), top: AXIS_Y }}
+      />
+
+      {/* 今天 */}
+      <span className="pointer-events-none absolute w-px" style={{ left: tx, top: 4, height: AXIS_Y + 6, background: LATE, opacity: 0.55 }} />
+      <span
+        className="pointer-events-none absolute -translate-x-1/2 whitespace-nowrap rounded-full px-1.5 font-mono text-[9.5px] font-semibold tabular-nums text-white"
+        style={{ left: tx, top: AXIS_Y + 16, background: LATE }}
       >
-        {/* —— 日期 —— */}
-        <span className="flex flex-col items-end justify-center py-2.5 pr-1 font-mono tabular-nums">
-          <span
-            className={`text-[12px] leading-tight ${
-              slipped ? "text-[var(--text-dim)] line-through decoration-1" : "font-semibold text-[var(--text)]"
-            }`}
-          >
-            {shortDay(planDay, thisYear)}
-          </span>
-          {slipped ? (
-            <span className="text-[12px] font-semibold leading-tight" style={{ color: verdict.color }}>
-              {shortDay(actual.startDay, thisYear)}
-            </span>
-          ) : (
-            <span className="text-[9px] leading-tight text-[var(--text-dim)]">
-              {WEEKDAYS[dayToDate(planDay).getUTCDay()]}
-            </span>
-          )}
-        </span>
+        今天 {shortDay(today, thisYear)}
+      </span>
 
-        {/* —— 轨道 + 节点 —— */}
-        <span className="relative flex items-center justify-center">
-          <Rail top={!first} bottom={!last} futureTop={future} futureBottom={future} />
-          <Node state={state} />
-        </span>
-
-        {/* —— 正文 —— */}
-        <span className="flex min-w-0 items-center gap-2 py-2.5 pl-1.5 pr-2">
-          <span className="min-w-0 flex-1">
-            <span
-              className={`block truncate text-[13px] leading-tight ${
-                reached(state) ? "text-[var(--text)]" : "font-medium text-[var(--text)]"
-              }`}
-            >
-              {mark.task.name || "未命名"}
-            </span>
-            <span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-[var(--text-dim)]">
-              {person && <Avatar person={person} size={12} placeholder={false} />}
-              {person?.name}
-              {slipped && (
-                <span className="font-mono tabular-nums">
-                  {person ? "· " : ""}计划 {shortDay(planDay, thisYear)} → 实际{" "}
-                  {shortDay(actual.startDay, thisYear)}
-                </span>
-              )}
-            </span>
-          </span>
-          <span
-            className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium tabular-nums"
-            style={
-              verdict.solid
-                ? { background: verdict.color, color: "#fff" }
-                : {
-                    color: verdict.color,
-                    background: `color-mix(in srgb, ${verdict.color} 11%, transparent)`,
-                  }
-            }
-          >
-            {verdict.text}
-          </span>
-          <span className="w-2 shrink-0 text-[11px] text-[var(--text-dim)] opacity-0 transition-opacity group-hover:opacity-100">
-            ›
-          </span>
-        </span>
-      </button>
-    </motion.li>
+      {placed.map((p, i) => (
+        <Mark key={p.m.task.id} p={p} index={i} thisYear={thisYear} onOpen={() => onOpen(p.m.task.id)} />
+      ))}
+    </div>
   );
 }
 
-/** 一格里的竖线，上下两半分开画 —— 今天那道线把同一格的上下切成实线和虚线 */
-function Rail({
-  top,
-  bottom,
-  futureTop,
-  futureBottom,
-}: {
-  top: boolean;
-  bottom: boolean;
-  futureTop: boolean;
-  futureBottom: boolean;
-}) {
-  const seg = (future: boolean) =>
-    future
-      ? "border-l-[1.5px] border-dashed border-[var(--rule)]"
-      : "border-l-[1.5px] border-solid border-[color-mix(in_srgb,var(--text-dim)_45%,transparent)]";
+function Mark({ p, index, thisYear, onOpen }: { p: Placed; index: number; thisYear: number; onOpen: () => void }) {
+  const { m, x, planX } = p;
+  const s = m.state;
+  const overdue = s.kind === "overdue";
+  const color = overdue ? LATE : "var(--milestone)";
+  const slip = s.kind === "hit" && s.delta !== 0;
+  const slipColor = slip && s.delta > 0 ? LATE : EARLY;
+  const labelTop = AXIS_Y - 14 - (p.lane ?? 0) * LANE_H - 12;
+  const title = `${m.task.name || "未命名"} · 计划 ${shortDay(m.plan.startDay, thisYear)}${
+    slip && m.actual ? ` · 实际 ${shortDay(m.actual.startDay, thisYear)}` : ""
+  }`;
+
   return (
     <>
-      {top && <span className={`absolute left-1/2 top-0 h-1/2 -translate-x-[0.75px] ${seg(futureTop)}`} />}
-      {bottom && (
-        <span className={`absolute bottom-0 left-1/2 h-1/2 -translate-x-[0.75px] ${seg(futureBottom)}`} />
+      {/* 计划日到实际日那一截：晚了红、早了绿，计划位置留一个空心的影子 */}
+      {slip && (
+        <>
+          <span
+            className="absolute h-[3px] rounded-full"
+            style={{ left: Math.min(x, planX), width: Math.abs(x - planX), top: AXIS_Y - 0.75, background: slipColor, opacity: 0.55 }}
+          />
+          <span
+            className="absolute size-[7px] -translate-x-1/2 -translate-y-1/2 rotate-45 rounded-[1px] border-[1.5px] bg-[var(--surface)]"
+            style={{ left: planX, top: AXIS_Y + 0.75, borderColor: slipColor }}
+          />
+        </>
       )}
+
+      {/* 引线 + 标签 */}
+      {p.lane != null && (
+        <>
+          <span
+            className="absolute w-px bg-[var(--rule)]"
+            style={{ left: x, top: labelTop + 14, height: AXIS_Y - labelTop - 20 }}
+          />
+          <button
+            onClick={onOpen}
+            title={title}
+            className="absolute whitespace-nowrap rounded bg-[var(--surface)] px-0.5 text-left text-[11px] leading-[14px] transition-colors hover:text-[var(--accent)]"
+            style={{
+              left: p.left,
+              top: labelTop,
+              color: overdue ? LATE : reached(s) ? "var(--text-dim)" : "var(--text)",
+              fontWeight: overdue ? 600 : 400,
+            }}
+          >
+            {p.text}
+          </button>
+        </>
+      )}
+
+      {/* 菱形：实心 = 到了；空心 = 还没到；红 + 呼吸光圈 = 该到没到 */}
+      <motion.button
+        onClick={onOpen}
+        title={title}
+        aria-label={title}
+        initial={{ scale: 0, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        transition={{ duration: 0.3, delay: 0.05 + Math.min(index, 12) * 0.04, ease: [0.22, 1, 0.36, 1] }}
+        className="group absolute grid size-5 -translate-x-1/2 -translate-y-1/2 place-items-center"
+        style={{ left: x, top: AXIS_Y + 0.75 }}
+      >
+        {overdue && (
+          <motion.span
+            className="absolute size-[11px] rotate-45 rounded-[2px]"
+            style={{ background: LATE }}
+            animate={{ scale: [1, 2], opacity: [0.35, 0] }}
+            transition={{ duration: 1.6, repeat: Infinity, ease: "easeOut" }}
+          />
+        )}
+        <span
+          className="relative size-[11px] rotate-45 rounded-[2px] transition-transform group-hover:scale-125"
+          style={{
+            background: reached(s) || overdue ? color : "var(--surface)",
+            border: `2px solid ${color}`,
+            opacity: s.kind === "undated" ? 0.55 : 1,
+          }}
+        />
+      </motion.button>
     </>
   );
 }
 
-/**
- * 菱形节点，和甘特图上里程碑同一个形状、同一个颜色（--milestone）：
- *   实心 = 到了；空心 = 还没到；红框 + 呼吸光圈 = 该到没到
- */
-function Node({ state }: { state: MilestoneState }) {
-  const overdue = state.kind === "overdue";
-  const filled = reached(state);
-  const color = overdue ? LATE : "var(--milestone)";
-  return (
-    <span className="relative grid size-4 place-items-center">
-      {overdue && (
-        <motion.span
-          className="absolute inset-0 rotate-45 rounded-[3px]"
-          style={{ background: LATE }}
-          animate={{ scale: [1, 1.9], opacity: [0.35, 0] }}
-          transition={{ duration: 1.6, repeat: Infinity, ease: "easeOut" }}
-        />
-      )}
-      <span
-        className="relative size-[11px] rotate-45 rounded-[2.5px] transition-transform group-hover:scale-110"
-        style={{
-          background: filled ? color : "var(--surface-alt)",
-          border: `2px solid ${color}`,
-          opacity: state.kind === "undated" ? 0.6 : 1,
-        }}
-      />
-    </span>
-  );
-}
+/* ------------------------------------------------------------------ */
+/* 三栏                                                                */
+/* ------------------------------------------------------------------ */
 
-function TodayLine({
-  day,
-  thisYear,
-  first,
-  last,
-}: {
-  day: number;
-  thisYear: number;
-  first?: boolean;
-  last?: boolean;
-}) {
-  return (
-    <li aria-label="今天" className={`${GRID} h-6`}>
-      <span className="flex items-center justify-end pr-1 font-mono text-[10px] font-semibold tabular-nums text-[var(--today,#f43f5e)]">
-        今天 {shortDay(day, thisYear).slice(-5)}
-      </span>
-      <span className="relative flex items-center justify-center">
-        <Rail top={!first} bottom={!last} futureTop={false} futureBottom />
-        <span className="relative size-[7px] rounded-full bg-[var(--today,#f43f5e)] ring-[3px] ring-[var(--surface-alt)]" />
-      </span>
-      <span className="flex items-center pl-1.5 pr-2">
-        <span className="h-px flex-1 bg-[linear-gradient(to_right,var(--today,#f43f5e),transparent)] opacity-50" />
-      </span>
-    </li>
-  );
-}
-
-function Legend({
+function Column({
+  title,
+  count,
   color,
-  label,
-  hollow,
-  strong,
+  empty,
+  alert,
+  children,
 }: {
+  title: string;
+  count: number;
   color: string;
-  label: string;
-  hollow?: boolean;
-  strong?: boolean;
+  empty: string;
+  alert?: boolean;
+  children: React.ReactNode;
 }) {
+  const hot = alert && count > 0;
   return (
-    <span className="flex items-center gap-1.5" style={strong ? { color, fontWeight: 600 } : undefined}>
-      <span
-        className="size-[7px] rotate-45 rounded-[1.5px]"
-        style={{ background: hollow ? "transparent" : color, border: `1.5px solid ${color}` }}
-      />
-      {label}
-    </span>
+    <section
+      className="min-w-0 border-t border-[var(--rule)] px-2 pb-2.5 pt-3 first:border-t-0 sm:border-t-0"
+      style={hot ? { background: `color-mix(in srgb, ${LATE} 4%, transparent)` } : undefined}
+    >
+      <h4 className="mb-1.5 flex items-center gap-2 px-2 text-[11px] font-semibold text-[var(--text)]">
+        <span className="h-3 w-[3px] rounded-full" style={{ background: color }} />
+        <span style={hot ? { color: LATE } : undefined}>{title}</span>
+        <span className="font-mono text-[10px] font-normal tabular-nums text-[var(--text-dim)]">{count}</span>
+      </h4>
+      {count === 0 ? (
+        <p className="px-2 py-1.5 text-[11px] text-[var(--text-dim)]">{empty}</p>
+      ) : (
+        <ul className="space-y-px">{children}</ul>
+      )}
+    </section>
+  );
+}
+
+function verdictOf(s: MilestoneState): { text: string; color: string; strong?: boolean } {
+  switch (s.kind) {
+    case "hit":
+      return s.delta === 0
+        ? { text: "准时", color: EARLY }
+        : s.delta > 0
+          ? { text: `晚 ${s.delta} 天`, color: LATE, strong: true }
+          : { text: `早 ${-s.delta} 天`, color: EARLY };
+    case "undated":
+      return { text: "未记实施日", color: "var(--text-dim)" };
+    case "overdue":
+      return { text: `逾期 ${s.days} 天`, color: LATE, strong: true };
+    case "upcoming":
+      return s.days === 0
+        ? { text: "就是今天", color: "var(--accent)", strong: true }
+        : { text: `还有 ${s.days} 天`, color: "var(--text-dim)" };
+  }
+}
+
+function Row({
+  m,
+  thisYear,
+  person,
+  onOpen,
+}: {
+  m: MilestoneMark;
+  thisYear: number;
+  person: Person | null;
+  onOpen: (taskId: number) => void;
+}) {
+  const v = verdictOf(m.state);
+  const slipped = m.state.kind === "hit" && m.state.delta !== 0 && m.actual != null;
+  return (
+    <li>
+      <button
+        onClick={() => onOpen(m.task.id)}
+        title="打开这个里程碑的详情"
+        className="group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-[var(--row-hover)]"
+      >
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[12px] leading-tight text-[var(--text)]">{m.task.name || "未命名"}</span>
+          <span className="mt-0.5 flex items-center gap-1.5 font-mono text-[10px] tabular-nums text-[var(--text-dim)]">
+            {slipped ? (
+              <>
+                <span className="line-through decoration-1 opacity-70">{shortDay(m.plan.startDay, thisYear)}</span>
+                <span>→ {shortDay(m.actual!.startDay, thisYear)}</span>
+              </>
+            ) : (
+              <span>{shortDay(m.plan.startDay, thisYear)}</span>
+            )}
+            {person && <span className="font-sans">· {person.name}</span>}
+          </span>
+        </span>
+        <span
+          className="shrink-0 font-mono text-[11px] tabular-nums"
+          style={{ color: v.color, fontWeight: v.strong ? 600 : 400 }}
+        >
+          {v.text}
+        </span>
+      </button>
+    </li>
   );
 }

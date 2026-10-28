@@ -30,6 +30,7 @@ import {
   shortDate,
   sortItems,
   type ItemFilter,
+  type ItemStatus,
   type ItemRow,
 } from "../core/items";
 import { MenuDivider, MenuItem, Popover } from "./Popover";
@@ -181,7 +182,8 @@ export function ItemsView() {
   const filtering = hasFilter(filter);
   // 未关闭里一条都没命中、而已关闭里有：直接摊开。不然用户看到的是「没有」，
   // 而答案其实就折在下面
-  const showClosed = closedOpen || (filtering && open.length === 0 && closed.length > 0);
+  const onlyClosed = filter.status === "closed";
+  const showClosed = closedOpen || onlyClosed || (filtering && open.length === 0 && closed.length > 0);
 
   return (
     // reducedMotion="user"：系统开了「减弱动态效果」时，位移和缩放全部停掉，只留淡入淡出
@@ -263,7 +265,7 @@ export function ItemsView() {
 
       {/* layoutScroll：行的位移动画要把这个容器的滚动量算进去，否则滚过之后再排序会从错的位置飞进来 */}
       <motion.div layoutScroll className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
-        {open.length === 0 && (
+        {open.length === 0 && !(onlyClosed && closed.length > 0) && (
           <motion.div
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
@@ -422,11 +424,11 @@ export function ItemsView() {
  * 和 Linear / GitHub Issues 一样：找一条记得大概说了什么的事项，是比
  * 「按维度收窄」更常见的动作，它不该排在三个 chip 后面、缩成一个小框。
  *
- * ## 为什么没有「仅未关闭」
+ * ## 状态：全部 / 未关闭 / 已关闭
  *
- * 已关闭的本来就折在列表底部，不点开就看不到 —— 那个开关做的事和折叠
- * 一模一样，却还会把「有筛选」的状态点亮，让空状态说出「这些筛选条件下
- * 没有事项」这种误导的话。
+ * 默认「全部」：已关闭的本来就折在列表底部。选「已关闭」是在翻旧账
+ * （「上次那个怎么解决的」），已关闭区直接摊开；选「未关闭」则连折叠的
+ * 那一栏也不出现，导出的也只有还没解决的。
  */
 function Filters({
   filter,
@@ -486,6 +488,8 @@ function Filters({
           </button>
         )}
       </label>
+
+      <StatusToggle value={filter.status ?? null} onChange={(status) => onChange({ ...filter, status })} />
 
       <span className="mx-0.5 h-3.5 w-px bg-[var(--rule)]" aria-hidden />
 
@@ -552,6 +556,51 @@ function Filters({
         </span>
       )}
     </div>
+  );
+}
+
+const STATUS_OPTIONS: { value: ItemStatus | null; label: string }[] = [
+  { value: null, label: "全部" },
+  { value: "open", label: "未关闭" },
+  { value: "closed", label: "已关闭" },
+];
+
+/** 三段的状态开关。只有两个状态，用不着弹出层 */
+function StatusToggle({
+  value,
+  onChange,
+}: {
+  value: ItemStatus | null;
+  onChange: (v: ItemStatus | null) => void;
+}) {
+  return (
+    <span
+      role="radiogroup"
+      aria-label="状态"
+      className="inline-flex h-6 items-center gap-px rounded-full border border-[var(--rule)] p-px"
+    >
+      {STATUS_OPTIONS.map((o) => {
+        const on = value === o.value;
+        return (
+          <button
+            key={o.label}
+            role="radio"
+            aria-checked={on}
+            onClick={() => onChange(o.value)}
+            className="h-full rounded-full px-2 text-[10px] font-medium transition-colors"
+            style={
+              on && o.value != null
+                ? { color: "var(--accent)", background: "color-mix(in srgb, var(--accent) 10%, transparent)" }
+                : on
+                  ? { color: "var(--text)", background: "var(--row-hover)" }
+                  : { color: "var(--text-dim)" }
+            }
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </span>
   );
 }
 
@@ -2042,6 +2091,7 @@ function describeFilter(
 ): string {
   const parts: string[] = [];
   if (f.query.trim()) parts.push(`搜索「${f.query.trim()}」`);
+  if (f.status) parts.push(`状态：${f.status === "open" ? "未关闭" : "已关闭"}`);
   // 文件会被转发、隔很久再看 —— 写全年份，不用屏幕上那种省略年份的短写
   if (f.range)
     parts.push(

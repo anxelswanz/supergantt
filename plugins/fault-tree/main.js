@@ -10,6 +10,12 @@
  *           ├ 基本事件 ○（拆到底了，可以直接验证）
  *           └ 未展开事件 ◇（暂时不拆：信息不够，或不值得拆）
  *
+ * 每个事件另有一个**角色**：现象 / 原因 / 对策。现象和原因都是事件，参与推导；
+ * 对策不是事件，是处理措施 —— 它也挂在树上往下画（绿色虚线、不经过门），
+ * 但推导、割集、结构都跳过它：「发图前复核」挂在「用了旧版图纸」下面，
+ * 不是说复核导致了用旧版图纸。根因不用手选：已确认、拆到底、又在成立的
+ * 那条因果链上的，自动打角标。
+ *
  * 光画出来不够 —— 故障树的价值在于**推**：
  *
  *   · 基本事件逐个标「已确认 / 已排除」，按门的逻辑往上推，画布直接染出
@@ -40,8 +46,16 @@ export const KIND_LABELS = {
 };
 export const GATE_LABELS = { or: "或门", and: "与门" };
 export const STATUS_LABELS = { open: "待验证", confirmed: "已确认", ruled: "已排除" };
+export const ROLE_LABELS = { phenomenon: "现象", cause: "原因", action: "对策" };
+export const ACTION_LABELS = { todo: "待做", doing: "进行中", done: "已完成", ineffective: "无效" };
 
-export const isLeaf = (n) => n.kind === "basic" || n.kind === "undeveloped";
+/** 角色。老数据没有 role：顶事件当现象，其余当原因 */
+export const roleOf = (n) => n.role ?? (n.kind === "top" ? "phenomenon" : "cause");
+export const isAction = (n) => roleOf(n) === "action";
+/** 结构上的叶子（基本 / 未展开）。对策不算 */
+export const isLeaf = (n) => !isAction(n) && (n.kind === "basic" || n.kind === "undeveloped");
+/** 参与推导的子事件 —— 去掉对策 */
+export const causeKids = (tree, n) => n.children.filter((c) => tree.nodes[c] && !isAction(tree.nodes[c]));
 
 export function emptyStore() {
   return { version: 1, trees: [] };
@@ -112,7 +126,9 @@ const withNodes = (tree, nodes, extra = {}) => ({ ...tree, ...extra, nodes });
  */
 export function addChild(tree, parentId, init = {}, index = null) {
   const parent = tree.nodes[parentId];
-  if (!parent) return { tree, id: null };
+  // 对策下面不再挂东西
+  if (!parent || isAction(parent)) return { tree, id: null };
+  const action = init.role === "action";
   const seq = tree.seq + 1;
   const id = `n${seq}`;
   const children = [...parent.children];
@@ -120,12 +136,17 @@ export function addChild(tree, parentId, init = {}, index = null) {
   const nextParent = {
     ...parent,
     children,
-    ...(isLeaf(parent) ? { kind: "intermediate", status: "open" } : {}),
+    // 挂对策不改变结构：一个基本事件有了对策，仍然是拆到底的那个基本事件
+    ...(isLeaf(parent) && !action ? { kind: "intermediate", status: "open" } : {}),
   };
   return {
     tree: withNodes(
       tree,
-      { ...tree.nodes, [parentId]: nextParent, [id]: node(id, init) },
+      {
+        ...tree.nodes,
+        [parentId]: nextParent,
+        [id]: node(id, action ? { actionStatus: "todo", due: null, ...init } : init),
+      },
       { seq },
     ),
     id,
@@ -136,17 +157,31 @@ export function addChild(tree, parentId, init = {}, index = null) {
 export function addSibling(tree, id, init = {}) {
   const parent = parentOf(tree, id);
   if (!parent) return addChild(tree, id, init);
-  return addChild(tree, parent.id, init, parent.children.indexOf(id) + 1);
+  const like = isAction(tree.nodes[id]) ? { role: "action", ...init } : init;
+  return addChild(tree, parent.id, like, parent.children.indexOf(id) + 1);
 }
 
 export function updateNode(tree, id, patch) {
   const n = tree.nodes[id];
   if (!n) return tree;
   const next = { ...n, ...patch };
+  const causes = causeKids(tree, n).length;
   // 有子事件的不能改成叶子；顶事件永远是顶事件
   if (n.kind === "top") next.kind = "top";
-  else if (n.children.length > 0) next.kind = "intermediate";
+  else if (causes > 0) next.kind = "intermediate";
   else if (next.kind === "intermediate" || next.kind === "top") next.kind = "basic";
+
+  // 角色：顶事件、下面有原因的、下面挂着对策的都不能变成对策
+  if (patch.role === "action" && !isAction(n)) {
+    if (id === tree.root || n.children.length > 0) return tree;
+    next.actionStatus = n.actionStatus ?? "todo";
+    next.due = n.due ?? null;
+    next.kind = "basic";
+  }
+  if (patch.role && patch.role !== "action" && isAction(n)) {
+    delete next.actionStatus;
+    delete next.due;
+  }
   return withNodes(tree, { ...tree.nodes, [id]: next });
 }
 
@@ -171,10 +206,11 @@ export function removeNode(tree, id) {
   for (const x of subtreeIds(tree, id)) delete nodes[x];
   if (parent) {
     const children = parent.children.filter((c) => c !== id);
+    const causes = children.filter((c) => !isAction(nodes[c]));
     nodes[parent.id] = {
       ...parent,
       children,
-      ...(children.length === 0 && parent.kind === "intermediate" ? { kind: "basic" } : {}),
+      ...(causes.length === 0 && parent.kind === "intermediate" ? { kind: "basic" } : {}),
     };
   }
   return withNodes(tree, nodes);
@@ -206,10 +242,11 @@ export function evaluate(tree) {
     const n = tree.nodes[id];
     if (!n) return "open";
     let s;
-    if (isLeaf(n) || n.children.length === 0) {
+    const causes = causeKids(tree, n);
+    if (isLeaf(n) || causes.length === 0) {
       s = isLeaf(n) ? n.status : "open";
     } else {
-      const kids = n.children.map(walk);
+      const kids = causes.map(walk);
       const all = (v) => kids.every((k) => k === v);
       const any = (v) => kids.some((k) => k === v);
       s =
@@ -247,8 +284,9 @@ export function minimalCutSets(tree, limit = 200) {
   const walk = (id) => {
     const n = tree.nodes[id];
     if (!n) return [];
-    if (isLeaf(n) || n.children.length === 0) return [[id]];
-    const kids = n.children.map(walk);
+    const causes = causeKids(tree, n);
+    if (isLeaf(n) || causes.length === 0) return [[id]];
+    const kids = causes.map(walk);
     if (n.gate === "and") {
       return kids.reduce(
         (acc, sets) => cap(acc.flatMap((a) => sets.map((b) => [...new Set([...a, ...b])]))),
@@ -260,7 +298,7 @@ export function minimalCutSets(tree, limit = 200) {
 
   // 顶事件自己还没拆，就没有割集可言
   const root = tree.nodes[tree.root];
-  if (!root || root.children.length === 0) return { sets: [], truncated: false };
+  if (!root || causeKids(tree, root).length === 0) return { sets: [], truncated: false };
 
   const order = Object.fromEntries(Object.keys(tree.nodes).map((id, i) => [id, i]));
   const raw = walk(tree.root).map((s) => [...s].sort((a, b) => order[a] - order[b]));
@@ -280,6 +318,33 @@ export function cutSetStatus(tree, set) {
   if (st.includes("ruled")) return "ruled";
   if (st.every((s) => s === "confirmed")) return "confirmed";
   return "open";
+}
+
+/**
+ * 根因：已确认、拆到底（叶子），而且从它到顶事件一路都成立 ——
+ * 也就是红色那条因果链最底下的那几个。排除掉了角标自然消失。
+ */
+export function rootCauses(tree, ev = evaluate(tree)) {
+  const out = new Set();
+  const walk = (id) => {
+    const n = tree.nodes[id];
+    if (!n || ev[id] !== "confirmed") return;
+    if (isLeaf(n)) out.add(id);
+    else causeKids(tree, n).forEach(walk);
+  };
+  walk(tree.root);
+  return out;
+}
+
+/** 对策统计：共几条、完成几条、过了截止日还没做完的几条。today 是 YYYY-MM-DD */
+export function actionStats(tree, today) {
+  const acts = Object.values(tree.nodes).filter(isAction);
+  const finished = (a) => a.actionStatus === "done" || a.actionStatus === "ineffective";
+  return {
+    total: acts.length,
+    done: acts.filter((a) => a.actionStatus === "done").length,
+    overdue: acts.filter((a) => !finished(a) && a.due && a.due < today).length,
+  };
 }
 
 /** 这棵树关联到的任务：顺着每个事件挂的事项找。byRef 是 itemRef → 事项行 */
@@ -316,6 +381,11 @@ export function outline(tree) {
     const n = tree.nodes[id];
     if (!n) return;
     const head = depth === 0 ? "" : `${prefix}${last ? "└─ " : "├─ "}`;
+    if (isAction(n)) {
+      const due = n.due ? `，截止 ${n.due}` : "";
+      lines.push(`${head}→ 对策：${n.label || "（未填写）"}（${ACTION_LABELS[n.actionStatus ?? "todo"]}${due}）`);
+      return;
+    }
     const kind = isLeaf(n) ? (n.kind === "basic" ? "○" : "◇") : `[${GATE_LABELS[n.gate]}]`;
     const status = isLeaf(n) && n.status !== "open" ? `（${STATUS_LABELS[n.status]}）` : "";
     const label = n.label || "（未填写）";
@@ -572,7 +642,7 @@ export function onload(api) {
             key: o.value,
             role: "radio",
             "aria-checked": value === o.value,
-            disabled,
+            disabled: disabled || o.disabled,
             title: o.title,
             className: `ft-seg-btn${value === o.value ? " ft-on" : ""}`,
             style: value === o.value && o.color ? { color: o.color } : undefined,
@@ -755,6 +825,18 @@ export function onload(api) {
       for (const c of n.children) {
         const q = layout.pos[c];
         if (!q) continue;
+        if (isAction(tree.nodes[c])) {
+          // 对策：从框底偏右单独拉一根绿色虚线下来，不经过门，也不接原因那条汇流线
+          const ax = p.x + NODE_W / 2 - 18;
+          const abus = p.y + LEVEL_H - 30;
+          edges.push({
+            key: `${n.id}-${c}`,
+            d: `M${ax},${p.y + BOX_H} V${abus} H${q.x} V${q.y}`,
+            s: "action",
+            dim: hl && !hl.has(c),
+          });
+          continue;
+        }
         edges.push({
           key: `${n.id}-${c}`,
           d: `M${p.x},${from} V${bus} H${q.x} V${q.y}`,
@@ -763,11 +845,13 @@ export function onload(api) {
         });
       }
     }
-    const rank = { ruled: 0, open: 1, confirmed: 2 };
+    const rank = { action: -1, ruled: 0, open: 1, confirmed: 2 };
     edges.sort((a, b) => rank[a.s] - rank[b.s]);
 
     const nodes = Object.values(tree.nodes).filter((n) => layout.pos[n.id]);
     const r = box.current?.getBoundingClientRect();
+    const roots = rootCauses(tree, ev);
+    const today = localDay();
 
     return h(
       "div",
@@ -799,13 +883,14 @@ export function onload(api) {
               key: e.key,
               d: e.d,
               fill: "none",
-              stroke: color(e.s),
+              stroke: e.s === "action" ? "var(--ft-act)" : color(e.s),
               strokeWidth: e.s === "confirmed" ? 2 : 1.25,
-              strokeDasharray: e.s === "ruled" ? "4 3" : undefined,
+              strokeDasharray: e.s === "ruled" ? "4 3" : e.s === "action" ? "5 3" : undefined,
               opacity: e.dim ? 0.25 : 1,
             }),
           ),
           nodes.map((n) => {
+            if (isAction(n)) return null;
             const p = layout.pos[n.id];
             const t = p.y + BOX_H + STEM;
             const s = ev[n.id];
@@ -849,6 +934,9 @@ export function onload(api) {
             n,
             pos: layout.pos[n.id],
             status: ev[n.id],
+            rootCause: roots.has(n.id),
+            temporary: isAction(n) && parentOf(tree, n.id)?.id === tree.root,
+            today,
             selected: selected === n.id,
             editing: editing === n.id,
             dim: hl && !hl.has(n.id),
@@ -875,19 +963,40 @@ export function onload(api) {
     );
   }
 
-  function NodeCard({ tree, n, pos, status, selected, editing, dim, onSelect, setEditing, ops, candidates }) {
+  function NodeCard({
+    tree,
+    n,
+    pos,
+    status,
+    rootCause,
+    temporary,
+    today,
+    selected,
+    editing,
+    dim,
+    onSelect,
+    setEditing,
+    ops,
+    candidates,
+  }) {
     const top = n.kind === "top";
+    const action = isAction(n);
+    const role = roleOf(n);
+    const act = n.actionStatus ?? "todo";
+    const late = action && n.due && n.due < today && act !== "done" && act !== "ineffective";
     const cls = [
       "ft-node",
       top && "ft-node-top",
+      action && `ft-node-action ft-act-${act}`,
+      role === "phenomenon" && !top && "ft-node-phen",
       selected && "ft-sel",
-      status === "confirmed" && "ft-hot",
-      status === "ruled" && "ft-ruled",
+      !action && status === "confirmed" && "ft-hot",
+      !action && status === "ruled" && "ft-ruled",
       dim && "ft-faded",
     ]
       .filter(Boolean)
       .join(" ");
-    const tag = top ? KIND_LABELS.top : isLeaf(n) ? KIND_LABELS[n.kind] : `${KIND_LABELS.intermediate}`;
+    const tag = action ? (temporary ? "临时措施" : "根本对策") : ROLE_LABELS[role];
     return h(
       "div",
       {
@@ -909,25 +1018,36 @@ export function onload(api) {
         "div",
         { className: "ft-node-head" },
         h("span", { className: "ft-node-kind" }, tag),
+        rootCause && h("span", { className: "ft-node-root", title: "已确认、拆到底，并且在成立的因果链上" }, "根因"),
         n.itemRef && h("span", { className: "ft-node-link", title: "关联了一条事项" }, "事项"),
         h("span", { className: "ft-grow" }),
-        status !== "open" &&
-          h("span", { className: `ft-node-st ft-st-${status}` }, STATUS_LABELS[status]),
-        h("span", { className: "ft-node-at" }, shortDay(nodeDay(tree, n))),
+        action
+          ? h("span", { className: `ft-node-st ft-act-st-${act}` }, ACTION_LABELS[act])
+          : status !== "open" &&
+              !rootCause &&
+              h("span", { className: `ft-node-st ft-st-${status}` }, STATUS_LABELS[status]),
+        action
+          ? n.due &&
+              h(
+                "span",
+                { className: `ft-node-at${late ? " ft-late" : ""}`, title: late ? "过了截止日还没做完" : "截止日期" },
+                `截止 ${shortDay(n.due)}`,
+              )
+          : h("span", { className: "ft-node-at" }, shortDay(nodeDay(tree, n))),
       ),
       editing
         ? h(DraftText, {
             value: n.label,
             className: "ft-node-edit",
             autoFocus: true,
-            placeholder: top ? "不希望发生的那件事" : "这个原因是什么？",
+            placeholder: action ? "要做什么？" : top ? "不希望发生的那件事" : "这个原因是什么？",
             onCommit: (label) => ops.update(n.id, { label }),
             rows: 2,
           })
         : h(
             "div",
             { className: `ft-node-label${n.label ? "" : " ft-empty"}` },
-            n.label || (top ? "写下顶事件…" : "双击写下这个原因…"),
+            n.label || (action ? "双击写下要做什么…" : top ? "写下顶事件…" : "双击写下这个原因…"),
           ),
       editing && h(EditCloser, { onDone: () => setEditing(null) }),
       selected &&
@@ -935,15 +1055,22 @@ export function onload(api) {
         h(
           "div",
           { className: "ft-tools", onClick: (e) => e.stopPropagation() },
-          h("button", { title: "往下拆一层（Tab）", onClick: () => ops.addChild(n.id) }, "＋ 子原因"),
-          !top && h("button", { title: "加一个并列的原因（↵）", onClick: () => ops.addSibling(n.id) }, "＋ 同级"),
-          h(ItemPicker, {
-            items: candidates,
-            className: "ft-tool-pick",
-            placeholder: "＋ 从事项",
-            title: "挑一条事项，作为这个事件的子原因",
-            onPick: (it) => ops.addChild(n.id, { label: it.title, itemRef: itemRef(it), at: it.day }),
-          }),
+          !action && h("button", { title: "往下拆一层（Tab）", onClick: () => ops.addChild(n.id) }, "＋ 子原因"),
+          !top && h("button", { title: action ? "再加一条对策（↵）" : "加一个并列的原因（↵）", onClick: () => ops.addSibling(n.id) }, "＋ 同级"),
+          !action &&
+            h(
+              "button",
+              { className: "ft-tool-act", title: top ? "先止血的临时措施" : "针对这个原因的对策", onClick: () => ops.addAction(n.id) },
+              "＋ 对策",
+            ),
+          !action &&
+            h(ItemPicker, {
+              items: candidates,
+              className: "ft-tool-pick",
+              placeholder: "＋ 从事项",
+              title: "挑一条事项，作为这个事件的子原因",
+              onPick: (it) => ops.addChild(n.id, { label: it.title, itemRef: itemRef(it), at: it.day }),
+            }),
           !top && h("button", { className: "ft-danger", title: "删掉这个事件和它下面的整枝（⌫）", onClick: () => ops.remove(n.id) }, "删除"),
         ),
     );
@@ -972,11 +1099,12 @@ export function onload(api) {
     const byRef = useMemo(() => new Map(items.map((it) => [itemRef(it), it])), [items]);
 
     const leaves = Object.values(tree.nodes).filter(isLeaf);
+    const acts = actionStats(tree, localDay());
     const counts = { open: 0, confirmed: 0, ruled: 0 };
     for (const l of leaves) counts[l.status] += 1;
     const topState = ev[tree.root];
     const verdict =
-      tree.nodes[tree.root].children.length === 0
+      causeKids(tree, tree.nodes[tree.root]).length === 0
         ? { text: "还没开始拆", tone: "open" }
         : topState === "confirmed"
           ? { text: "因果链成立", tone: "confirmed" }
@@ -997,21 +1125,77 @@ export function onload(api) {
             "div",
             { className: "ft-sec-head" },
             h(KindChip, { n }),
-            h("span", { className: `ft-pill ft-st-${ev[n.id]}` }, STATUS_LABELS[ev[n.id]]),
+            isAction(n)
+              ? h("span", { className: `ft-pill ft-act-st-${n.actionStatus ?? "todo"}` }, ACTION_LABELS[n.actionStatus ?? "todo"])
+              : h("span", { className: `ft-pill ft-st-${ev[n.id]}` }, STATUS_LABELS[ev[n.id]]),
           ),
           h(DraftText, {
             value: n.label,
             rows: 1,
             grow: true,
             className: "ft-title-input",
-            placeholder: n.kind === "top" ? "不希望发生的那件事" : "这个原因是什么？",
+            placeholder: isAction(n) ? "要做什么？" : n.kind === "top" ? "不希望发生的那件事" : "这个原因是什么？",
             onCommit: (label) => ops.update(n.id, { label }),
           }),
           h(
             "div",
             { className: "ft-props" },
+            h(
+              Prop,
+              { label: "角色" },
+              h(Seg, {
+                value: roleOf(n),
+                onChange: (role) => ops.update(n.id, { role }),
+                options: [
+                  { value: "phenomenon", label: "现象", title: "看得见的结果" },
+                  { value: "cause", label: "原因", title: "导致上层发生的原因" },
+                  {
+                    value: "action",
+                    label: "对策",
+                    title:
+                      n.kind === "top"
+                        ? "顶事件不能是对策"
+                        : n.children.length > 0
+                          ? "下面还挂着东西，不能改成对策"
+                          : "处理措施，不参与推导",
+                    disabled: n.kind === "top" || (!isAction(n) && n.children.length > 0),
+                  },
+                ],
+              }),
+            ),
+            isAction(n) &&
+              h(
+                Prop,
+                { label: "状态" },
+                h(Seg, {
+                  value: n.actionStatus ?? "todo",
+                  onChange: (actionStatus) => ops.update(n.id, { actionStatus }),
+                  options: [
+                    { value: "todo", label: "待做" },
+                    { value: "doing", label: "进行中" },
+                    { value: "done", label: "已完成", color: "var(--ft-act)" },
+                    { value: "ineffective", label: "无效", title: "做了，问题还在 —— 回头重查原因" },
+                  ],
+                }),
+              ),
+            isAction(n) &&
+              h(
+                Prop,
+                { label: "截止" },
+                h(
+                  "div",
+                  { className: "ft-date-row" },
+                  h("input", {
+                    type: "date",
+                    className: "ft-date",
+                    value: n.due ?? "",
+                    onChange: (e) => ops.update(n.id, { due: e.target.value || null }),
+                  }),
+                  n.due && h("button", { className: "ft-x", title: "清除截止日期", onClick: () => ops.update(n.id, { due: null }) }, "×"),
+                ),
+              ),
             !isLeaf(n) &&
-              n.children.length > 0 &&
+              causeKids(tree, n).length > 0 &&
               h(
                 Prop,
                 { label: "门" },
@@ -1126,6 +1310,16 @@ export function onload(api) {
             h("span", null, `排除 ${counts.ruled}`),
             h("span", null, `待验证 ${counts.open}`),
           ),
+        acts.total > 0 &&
+          h(
+            "div",
+            { className: "ft-acts" },
+            h("span", { className: "ft-acts-mark" }),
+            "对策 ",
+            h("b", null, `${acts.done}/${acts.total}`),
+            " 完成",
+            acts.overdue > 0 && h("span", { className: "ft-late" }, ` · ${acts.overdue} 条逾期`),
+          ),
         cuts.sets.length > 0 &&
           h(
             React.Fragment,
@@ -1176,11 +1370,15 @@ export function onload(api) {
         h(Legend, { kind: "gate-and", name: "与门", text: "所有输入同时发生，才导致上层" }),
         h(Legend, { kind: "basic", name: "基本事件", text: "拆到底了，可以直接验证" }),
         h(Legend, { kind: "undeveloped", name: "未展开事件", text: "暂不往下拆：信息不够或不值得" }),
+        h(Legend, { kind: "action", name: "对策", text: "处理措施，不参与推导" }),
       ),
     );
   }
 
   function KindChip({ n }) {
+    if (isAction(n)) {
+      return h("span", { className: "ft-kind ft-kind-action" }, h(Glyph, { kind: "action", size: 14 }), ROLE_LABELS.action);
+    }
     const k = kindOf(n);
     return h(
       "span",
@@ -1229,6 +1427,13 @@ export function onload(api) {
           : kind === "undeveloped"
             ? symbolPath("undeveloped", null, 13, 1)
             : null;
+    if (kind === "action") {
+      return h(
+        "svg",
+        { width: size, height: size, viewBox: "0 0 26 24", "aria-hidden": true, className: "ft-glyph ft-glyph-act" },
+        h("rect", { x: 3, y: 5, width: 20, height: 14, rx: 5, fill: "none", stroke: "currentColor", strokeWidth: 1.5, strokeDasharray: "3 2" }),
+      );
+    }
     return h(
       "svg",
       { width: size, height: size, viewBox: "0 0 26 24", "aria-hidden": true, className: "ft-glyph" },
@@ -1296,6 +1501,7 @@ export function onload(api) {
       return {
         addChild: (nid, init) => addWith((t) => addChild(t, nid, { at: localDay(), ...init })),
         addSibling: (nid, init) => addWith((t) => addSibling(t, nid, { at: localDay(), ...init })),
+        addAction: (nid) => addWith((t) => addChild(t, nid, { at: localDay(), role: "action" })),
         update: (nid, patch) => mutateTree(id, (t) => updateNode(t, nid, patch)),
         move: (nid, d) => mutateTree(id, (t) => moveNode(t, nid, d)),
         remove: (nid) => {

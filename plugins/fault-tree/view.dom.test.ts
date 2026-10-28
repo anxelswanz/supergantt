@@ -163,4 +163,33 @@ describe("故障树", () => {
     render(React.createElement(again.View));
     expect(screen.getAllByText("图纸错").length).toBeGreaterThan(0);
   });
+
+  it("画布上加对策：绿色对策卡，不改变推导；改角色", async () => {
+    const { View, action } = setup();
+    await act(async () => {});
+    await act(async () => action.run(ITEM));
+    render(React.createElement(View));
+    key("Tab");
+    await type("图纸错");
+
+    // 选中「图纸错」，工具条上点「＋ 对策」
+    fireEvent.click(document.querySelector('[data-node="n2"]')!);
+    fireEvent.click(screen.getByRole("button", { name: "＋ 对策" }));
+    await type("发图前复核");
+    const card = document.querySelector('[data-node="n3"]')!;
+    expect(card.className).toContain("ft-node-action");
+    expect(card.textContent).toContain("根本对策");
+    // 对策不算待验证
+    expect(screen.getByText(/还有 1 个待验证/)).toBeTruthy();
+    expect(screen.getByText(/0\/1/)).toBeTruthy();
+
+    // 确认「图纸错」→ 根因角标
+    fireEvent.click(document.querySelector('[data-node="n2"]')!);
+    fireEvent.click(screen.getByRole("radio", { name: "已确认" }));
+    expect(document.querySelector('[data-node="n2"]')!.textContent).toContain("根因");
+
+    // 把「图纸错」改成现象
+    fireEvent.click(screen.getByRole("radio", { name: "现象" }));
+    expect(document.querySelector('[data-node="n2"]')!.className).toContain("ft-node-phen");
+  });
 });

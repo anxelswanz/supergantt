@@ -470,12 +470,17 @@ export interface ItemFilter {
   people: (number | null)[];
   /** 关联任务 id；null = 筛「未关联任务」。空数组 = 不筛 */
   tasks: (number | null)[];
+  /** 旧字段，界面上已经没有了；新的是 status */
   onlyOpen: boolean;
+  /** 关闭状态："open" 只看未关闭，"closed" 只看已关闭。null / 缺省 = 不筛 */
+  status?: ItemStatus | null;
   /** 搜索词，对标题和结论做大小写无关的包含匹配 */
   query: string;
   /** 记录日期落在这段里（首尾都含）。按年、按月也是一段。null / 缺省 = 不筛 */
   range?: DayRange | null;
 }
+
+export type ItemStatus = "open" | "closed";
 
 export const EMPTY_FILTER: ItemFilter = {
   kinds: [],
@@ -483,6 +488,7 @@ export const EMPTY_FILTER: ItemFilter = {
   people: [],
   tasks: [],
   onlyOpen: false,
+  status: null,
   query: "",
   range: null,
 };
@@ -504,6 +510,8 @@ export function filterItems(rows: ItemRow[], f: ItemFilter): ItemRow[] {
   const q = f.query.trim().toLowerCase();
   return rows.filter((r) => {
     if (f.onlyOpen && r.closed) return false;
+    if (f.status === "open" && r.closed) return false;
+    if (f.status === "closed" && !r.closed) return false;
     if (f.kinds.length > 0 && !f.kinds.includes(r.kind)) return false;
     if (f.priorities.length > 0 && (r.priority == null || !f.priorities.includes(r.priority)))
       return false;
@@ -524,6 +532,7 @@ export const hasFilter = (f: ItemFilter): boolean =>
   f.people.length > 0 ||
   (f.tasks?.length ?? 0) > 0 ||
   f.range != null ||
+  f.status != null ||
   f.onlyOpen ||
   f.query.trim() !== "";
 

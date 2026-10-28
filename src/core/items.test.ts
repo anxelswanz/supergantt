@@ -273,6 +273,15 @@ describe("filterItems", () => {
     ]);
   });
 
+  it("按关闭状态筛：未关闭 / 已关闭", () => {
+    const open = keys(filterItems(rows, { ...EMPTY_FILTER, status: "open" }));
+    const closed = keys(filterItems(rows, { ...EMPTY_FILTER, status: "closed" }));
+    expect(open.sort()).toEqual(["note:1", "note:2"]);
+    expect(closed.length).toBe(rows.length - 2);
+    expect(closed.some((k) => open.includes(k))).toBe(false);
+    expect(hasFilter({ ...EMPTY_FILTER, status: "closed" })).toBe(true);
+  });
+
   it("几维可以叠加", () => {
     const out = filterItems(rows, {
       ...EMPTY_FILTER,

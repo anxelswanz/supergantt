@@ -10,6 +10,9 @@
   --ft-line: color-mix(in srgb, var(--text-dim) 70%, transparent);
   --ft-dim: color-mix(in srgb, var(--text-dim) 38%, transparent);
   --ft-amber: #d97706;
+  /* 对策：绿色。和红（成立）、琥珀（顶事件 / 事项）都分得开 */
+  --ft-act: #059669;
+  --ft-act-soft: color-mix(in srgb, #059669 9%, var(--surface));
   --ft-mono: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", monospace;
 
   display: flex;
@@ -261,6 +264,73 @@
   opacity: 0.3;
 }
 
+/* 现象（非顶事件）：琥珀色的左边线，和原因区分开 */
+.ft-node-phen {
+  border-left: 3px solid var(--ft-amber);
+  padding-left: 7px;
+}
+.ft-node-phen .ft-node-kind {
+  color: var(--ft-amber);
+  font-weight: 700;
+}
+
+/* 对策：圆角、虚线、绿 —— 一眼看出它不是事件 */
+.ft-node-action {
+  border: 1.25px dashed color-mix(in srgb, var(--ft-act) 70%, transparent);
+  border-radius: 12px;
+  background: var(--ft-act-soft);
+  box-shadow: none;
+}
+.ft-node-action:hover {
+  border-color: var(--ft-act);
+}
+.ft-node-action .ft-node-kind {
+  color: var(--ft-act);
+  font-weight: 700;
+}
+.ft-node-action.ft-act-done {
+  border-style: solid;
+  border-color: var(--ft-act);
+}
+.ft-node-action.ft-act-ineffective {
+  border-color: var(--ft-dim);
+  background: var(--surface);
+}
+.ft-node-action.ft-act-ineffective .ft-node-label {
+  color: var(--text-dim);
+  text-decoration: line-through;
+}
+.ft-act-st-todo {
+  color: var(--text-dim);
+}
+.ft-act-st-doing {
+  color: var(--accent);
+}
+.ft-act-st-done {
+  color: var(--ft-act);
+}
+.ft-act-st-ineffective {
+  color: var(--ft-amber);
+}
+.ft-pill.ft-act-st-done {
+  background: var(--ft-act-soft);
+}
+.ft-late {
+  color: var(--ft-hot) !important;
+  font-weight: 700;
+}
+
+/* 根因角标：实心红 */
+.ft-node-root {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--ft-hot);
+  color: #fff;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
 .ft-node-head {
   display: flex;
   align-items: center;
@@ -361,6 +431,9 @@
   font: inherit;
   font-size: 10.5px;
 }
+.ft-tools .ft-tool-act {
+  color: var(--ft-act);
+}
 .ft-tools select:disabled {
   opacity: 0.4;
   cursor: default;
@@ -457,8 +530,14 @@
 .ft-kind-top {
   color: var(--ft-amber);
 }
+.ft-kind-action {
+  color: var(--ft-act);
+}
 .ft-glyph {
   flex-shrink: 0;
+}
+.ft-glyph-act {
+  color: var(--ft-act);
 }
 .ft-pill {
   margin-left: auto;
@@ -590,8 +669,12 @@
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
-.ft-seg-btn:hover {
+.ft-seg-btn:hover:not(:disabled) {
   color: var(--text);
+}
+.ft-seg-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 .ft-seg-btn.ft-on {
   background: var(--surface);
@@ -705,6 +788,29 @@
   font-family: var(--ft-mono);
   font-size: 10px;
   color: var(--text-dim);
+}
+.ft-acts {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.ft-acts b {
+  font-family: var(--ft-mono);
+  color: var(--ft-act);
+}
+.ft-acts-mark {
+  width: 10px;
+  height: 7px;
+  margin-right: 3px;
+  border: 1.25px dashed var(--ft-act);
+  border-radius: 3px;
+}
+.ft-date-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 .ft-sub {
   display: flex;
