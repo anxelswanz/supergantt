@@ -99,7 +99,7 @@ describe("故障树", () => {
     // 选中「图纸错」，标成已确认 → 或门推到顶
     fireEvent.click(document.querySelector('[data-node="n2"]')!);
     fireEvent.click(screen.getByRole("radio", { name: "已确认" }));
-    expect(screen.getByText(/因果链已经成立/)).toBeTruthy();
+    expect(screen.getByText(/因果链成立/)).toBeTruthy();
     expect(document.querySelector('[data-node="n1"]')!.className).toContain("ft-hot");
 
     // 撤销 → 回到待验证
@@ -117,5 +117,28 @@ describe("故障树", () => {
     expect(screen.getByText(/建故障树分析/)).toBeTruthy();
     fireEvent.click(screen.getByText("直接新建一棵"));
     expect(screen.getByLabelText("故障树画布")).toBeTruthy();
+  });
+
+  it("列表里能看到全部树；标签上的红叉删树", async () => {
+    const { View, action } = setup();
+    await act(async () => {});
+    await act(async () => action.run(ITEM));
+    render(React.createElement(View));
+    fireEvent.click(screen.getByText("＋ 新建"));
+
+    fireEvent.click(screen.getByRole("button", { name: /列表/ }));
+    const list = screen.getByRole("dialog", { name: "故障树列表" });
+    expect(list.querySelectorAll(".ft-list-row").length).toBe(2);
+    fireEvent.change(screen.getByLabelText("按任务筛选"), { target: { value: "none" } });
+    expect(list.querySelectorAll(".ft-list-row").length).toBe(2);
+    fireEvent.change(screen.getByLabelText("起始日期"), { target: { value: "2099-01-01" } });
+    expect(screen.getByText("没有符合条件的故障树")).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    fireEvent.click(screen.getByRole("button", { name: "删除「夹具尺寸不对」" }));
+    expect(confirm).toHaveBeenCalled();
+    expect(screen.queryByRole("tab", { name: /夹具尺寸不对/ })).toBeNull();
+    confirm.mockRestore();
   });
 });

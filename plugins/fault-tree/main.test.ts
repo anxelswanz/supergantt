@@ -7,11 +7,13 @@ import {
   addSibling,
   cutSetStatus,
   evaluate,
+  filterTrees,
   itemRef,
   layoutTree,
   minimalCutSets,
   moveNode,
   newTree,
+  nodeDay,
   outline,
   parseStore,
   removeNode,
@@ -145,6 +147,32 @@ describe("其他", () => {
   it("事项按 noteId 认，分拣改类型也还是同一条", () => {
     expect(itemRef({ key: "risk:7", noteId: 3 })).toBe("note:3");
     expect(itemRef({ key: "blocker:2/b1", noteId: null })).toBe("blocker:2/b1");
+  });
+
+  it("事件的时间：有 at 用 at，老数据退回建树那天", () => {
+    const t = newTree({ id: "t", projectId: 1, at: "2026-10-20", now: "2026-10-28T08:00:00" });
+    expect(nodeDay(t, t.nodes.n1)).toBe("2026-10-20");
+    const r = addChild(t, "n1", { label: "x" });
+    expect(nodeDay(r.tree, r.tree.nodes[r.id])).toBe("2026-10-28");
+  });
+
+  it("列表按建树日期、按关联任务筛，新的在前", () => {
+    const mk = (id: string, now: string, ref: string | null) =>
+      newTree({ id, projectId: 1, ref, now });
+    const trees = [
+      mk("a", "2026-09-03T08:00:00", "note:1"),
+      mk("b", "2026-10-15T08:00:00", "note:2"),
+      mk("c", "2026-10-20T08:00:00", null),
+    ];
+    const byRef = new Map([
+      ["note:1", { taskId: 7 }],
+      ["note:2", { taskId: 8 }],
+    ]);
+    const ids = (f: object) => filterTrees(trees, f, byRef).map((t) => t.id);
+    expect(ids({})).toEqual(["c", "b", "a"]);
+    expect(ids({ from: "2026-10-01", to: "2026-10-15" })).toEqual(["b"]);
+    expect(ids({ task: "7" })).toEqual(["a"]);
+    expect(ids({ task: "none" })).toEqual(["c"]);
   });
 
   it("坏文件当空的", () => {

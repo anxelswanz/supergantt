@@ -69,10 +69,22 @@ const node = (id, over = {}) => ({
   note: "",
   children: [],
   itemRef: null,
+  /** 这个事件的时间（YYYY-MM-DD）：从事项来的取事项记录日，手写的取加进来那天 */
+  at: null,
   ...over,
 });
 
-export function newTree({ id, projectId, label = "", ref = null, now }) {
+/** 本地日期 YYYY-MM-DD。日期框、筛选都按用户所在时区的「那一天」算 */
+export function localDay(d = new Date()) {
+  if (Number.isNaN(d.getTime())) return "";
+  const p = (x) => String(x).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** 老数据没有 at，退回到建树那天 */
+export const nodeDay = (tree, n) => n.at || localDay(new Date(tree.createdAt));
+
+export function newTree({ id, projectId, label = "", ref = null, at = null, now }) {
   return {
     id,
     projectId,
@@ -80,7 +92,7 @@ export function newTree({ id, projectId, label = "", ref = null, now }) {
     updatedAt: now,
     seq: 1,
     root: "n1",
-    nodes: { n1: node("n1", { label, kind: "top", itemRef: ref }) },
+    nodes: { n1: node("n1", { label, kind: "top", itemRef: ref, at }) },
   };
 }
 
@@ -269,6 +281,33 @@ export function cutSetStatus(tree, set) {
   return "open";
 }
 
+/** 这棵树关联到的任务：顺着每个事件挂的事项找。byRef 是 itemRef → 事项行 */
+export function treeTasks(tree, byRef) {
+  const out = new Set();
+  for (const n of Object.values(tree.nodes)) {
+    const it = n.itemRef && byRef.get(n.itemRef);
+    if (it && it.taskId != null) out.add(it.taskId);
+  }
+  return out;
+}
+
+/**
+ * 故障树列表的筛选。from / to 是建树日期（含两端），task 是 "" 全部、
+ * "none" 没挂任务的、或者某个 taskId。新建的排前面。
+ */
+export function filterTrees(trees, { from = "", to = "", task = "" }, byRef) {
+  return trees
+    .filter((t) => {
+      const day = localDay(new Date(t.createdAt));
+      if (from && day < from) return false;
+      if (to && day > to) return false;
+      if (task === "") return true;
+      const tasks = treeTasks(t, byRef);
+      return task === "none" ? tasks.size === 0 : tasks.has(Number(task));
+    })
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0));
+}
+
 /** 树 → 缩进大纲，复制出去贴进周报、邮件 */
 export function outline(tree) {
   const lines = [];
@@ -340,6 +379,9 @@ export function layoutTree(tree) {
 /* ------------------------------------------------------------------ */
 /* 视图                                                                */
 /* ------------------------------------------------------------------ */
+
+/** 今年的省掉年份 —— 事件框很窄 */
+const shortDay = (iso) => (iso && iso.slice(0, 4) === String(new Date().getFullYear()) ? iso.slice(5) : iso);
 
 const uid = () => `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
@@ -437,13 +479,20 @@ export function onload(api) {
   const treeWithTop = (ref, projectId) =>
     treesOf(projectId).find((t) => t.nodes[t.root]?.itemRef === ref) ?? null;
 
-  const createTree = (label, ref) => {
+  const createTree = (label, ref, at = localDay()) => {
     const project = api.data.project();
     if (!project) return null;
-    const tree = newTree({ id: uid(), projectId: project.id, label, ref, now: new Date().toISOString() });
+    const tree = newTree({ id: uid(), projectId: project.id, label, ref, at, now: new Date().toISOString() });
     state.activeTree = tree.id;
     setStore({ ...state.store, trees: [...state.store.trees, tree] });
     return tree;
+  };
+
+  const deleteTree = (tree) => {
+    if (!window.confirm(`删除故障树「${treeTitle(tree)}」？关联的事项不受影响。`)) return;
+    setStore({ ...state.store, trees: state.store.trees.filter((t) => t.id !== tree.id) });
+    if (state.activeTree === tree.id) state.activeTree = null;
+    notify();
   };
 
   void api.storage
@@ -475,7 +524,7 @@ export function onload(api) {
         state.activeTree = existing.id;
         notify();
       } else {
-        createTree(item.title, itemRef(item));
+        createTree(item.title, itemRef(item), item.day);
       }
       api.act.setActiveView("fault-tree.view");
     },
@@ -529,10 +578,19 @@ export function onload(api) {
   }
 
   /** 失焦才提交的输入框 —— 打字过程中不写盘、不进撤销栈 */
-  function DraftText({ value, onCommit, placeholder, rows = 2, className = "ft-input", autoFocus }) {
+  function DraftText({ value, onCommit, placeholder, rows = 2, className = "ft-input", autoFocus, grow }) {
     const [draft, setDraft] = useState(value);
+    const ref = useRef(null);
     useEffect(() => setDraft(value), [value]);
+    // grow：高度跟着字走，标题一行就一行高
+    useLayoutEffect(() => {
+      const el = ref.current;
+      if (!grow || !el) return;
+      el.style.height = "auto";
+      el.style.height = `${el.scrollHeight + 2}px`;
+    }, [grow, draft]);
     return h("textarea", {
+      ref,
       className,
       rows,
       value: draft,
@@ -557,7 +615,7 @@ export function onload(api) {
 
   /* ---------------- 画布 ---------------- */
 
-  function Canvas({ tree, selected, onSelect, editing, setEditing, highlight, ops }) {
+  function Canvas({ tree, selected, onSelect, editing, setEditing, highlight, ops, candidates }) {
     const box = useRef(null);
     const [view, setView] = useState({ x: 0, y: 0, k: 1 });
     const drag = useRef(null);
@@ -790,6 +848,7 @@ export function onload(api) {
             onSelect,
             setEditing,
             ops,
+            candidates,
           }),
         ),
       ),
@@ -809,7 +868,7 @@ export function onload(api) {
     );
   }
 
-  function NodeCard({ tree, n, pos, status, selected, editing, dim, onSelect, setEditing, ops }) {
+  function NodeCard({ tree, n, pos, status, selected, editing, dim, onSelect, setEditing, ops, candidates }) {
     const top = n.kind === "top";
     const cls = [
       "ft-node",
@@ -844,8 +903,10 @@ export function onload(api) {
         { className: "ft-node-head" },
         h("span", { className: "ft-node-kind" }, tag),
         n.itemRef && h("span", { className: "ft-node-link", title: "关联了一条事项" }, "事项"),
+        h("span", { className: "ft-grow" }),
         status !== "open" &&
           h("span", { className: `ft-node-st ft-st-${status}` }, STATUS_LABELS[status]),
+        h("span", { className: "ft-node-at" }, shortDay(nodeDay(tree, n))),
       ),
       editing
         ? h(DraftText, {
@@ -869,6 +930,13 @@ export function onload(api) {
           { className: "ft-tools", onClick: (e) => e.stopPropagation() },
           h("button", { title: "往下拆一层（Tab）", onClick: () => ops.addChild(n.id) }, "＋ 子原因"),
           !top && h("button", { title: "加一个并列的原因（↵）", onClick: () => ops.addSibling(n.id) }, "＋ 同级"),
+          h(ItemPicker, {
+            items: candidates,
+            className: "ft-tool-pick",
+            placeholder: "＋ 从事项",
+            title: "挑一条事项，作为这个事件的子原因",
+            onPick: (it) => ops.addChild(n.id, { label: it.title, itemRef: itemRef(it), at: it.day }),
+          }),
           !top && h("button", { className: "ft-danger", title: "删掉这个事件和它下面的整枝（⌫）", onClick: () => ops.remove(n.id) }, "删除"),
         ),
     );
@@ -888,12 +956,13 @@ export function onload(api) {
 
   /* ---------------- 右栏：属性 + 分析 ---------------- */
 
-  function Inspector({ tree, selected, items, onSelect, setHighlight, ops }) {
+  const kindOf = (n) => (n.kind === "top" ? "top" : isLeaf(n) ? n.kind : "intermediate");
+
+  function Inspector({ tree, selected, items, candidates, onSelect, setHighlight, ops }) {
     const n = selected ? tree.nodes[selected] : null;
     const ev = useMemo(() => evaluate(tree), [tree]);
     const cuts = useMemo(() => minimalCutSets(tree), [tree]);
     const byRef = useMemo(() => new Map(items.map((it) => [itemRef(it), it])), [items]);
-    const usedRefs = new Set(Object.values(tree.nodes).map((x) => x.itemRef).filter(Boolean));
 
     const leaves = Object.values(tree.nodes).filter(isLeaf);
     const counts = { open: 0, confirmed: 0, ruled: 0 };
@@ -901,69 +970,70 @@ export function onload(api) {
     const topState = ev[tree.root];
     const verdict =
       tree.nodes[tree.root].children.length === 0
-        ? { text: "还没开始拆。选中顶事件按 Tab，写下第一层可能的原因。", tone: "" }
+        ? { text: "还没开始拆", tone: "open" }
         : topState === "confirmed"
-          ? { text: "因果链已经成立：红色那条路就是顶事件发生的原因。", tone: "hot" }
+          ? { text: "因果链成立", tone: "confirmed" }
           : topState === "ruled"
-            ? { text: "所有分支都被排除了 —— 真正的原因还不在这棵树上，回到上层补分支。", tone: "warn" }
-            : { text: `还有 ${counts.open} 个基本 / 未展开事件待验证。先查阶数低的割集。`, tone: "" };
+            ? { text: "全部排除 · 原因不在树上", tone: "ruled" }
+            : { text: `还有 ${counts.open} 个待验证`, tone: "open" };
 
     const linked = n?.itemRef ? byRef.get(n.itemRef) : null;
-    const candidates = items.filter((it) => !usedRefs.has(itemRef(it)));
 
     return h(
       "aside",
       { className: "ft-side" },
-      n
-        ? h(
-            "section",
-            { className: "ft-card" },
-            h(
-              "div",
-              { className: "ft-card-head" },
-              h("span", { className: "ft-card-title" }, n.kind === "top" ? KIND_LABELS.top : isLeaf(n) ? KIND_LABELS[n.kind] : KIND_LABELS.intermediate),
-              h("span", { className: `ft-pill ft-st-${ev[n.id]}` }, STATUS_LABELS[ev[n.id]]),
-            ),
-            h(DraftText, {
-              key: `label-${n.id}`,
-              value: n.label,
-              rows: 3,
-              placeholder: n.kind === "top" ? "不希望发生的那件事" : "这个原因是什么？",
-              onCommit: (label) => ops.update(n.id, { label }),
-            }),
-
-            !isLeaf(n) && n.children.length > 0 &&
+      n &&
+        h(
+          "section",
+          { className: "ft-sec", key: n.id },
+          h(
+            "div",
+            { className: "ft-sec-head" },
+            h(KindChip, { n }),
+            h("span", { className: `ft-pill ft-st-${ev[n.id]}` }, STATUS_LABELS[ev[n.id]]),
+          ),
+          h(DraftText, {
+            value: n.label,
+            rows: 1,
+            grow: true,
+            className: "ft-title-input",
+            placeholder: n.kind === "top" ? "不希望发生的那件事" : "这个原因是什么？",
+            onCommit: (label) => ops.update(n.id, { label }),
+          }),
+          h(
+            "div",
+            { className: "ft-props" },
+            !isLeaf(n) &&
+              n.children.length > 0 &&
               h(
-                Field,
-                { label: "门", hint: n.gate === "and" ? "所有输入同时发生，才导致这一层" : "任一输入发生，就导致这一层" },
+                Prop,
+                { label: "门" },
                 h(Seg, {
                   value: n.gate,
                   onChange: (gate) => ops.update(n.id, { gate }),
                   options: [
-                    { value: "or", label: "或门 OR" },
-                    { value: "and", label: "与门 AND" },
+                    { value: "or", label: "或门", title: "任一输入发生，就导致上层" },
+                    { value: "and", label: "与门", title: "所有输入同时发生，才导致上层" },
                   ],
                 }),
               ),
-
             isLeaf(n) &&
               h(
-                Field,
-                { label: "事件类型", hint: n.kind === "basic" ? "拆到底了，可以直接去验证" : "暂时不往下拆：信息不够，或者不值得拆" },
+                Prop,
+                { label: "类型" },
                 h(Seg, {
                   value: n.kind,
                   onChange: (kind) => ops.update(n.id, { kind }),
                   options: [
-                    { value: "basic", label: "○ 基本事件" },
-                    { value: "undeveloped", label: "◇ 未展开" },
+                    { value: "basic", label: "○ 基本", title: "拆到底了，可以直接验证" },
+                    { value: "undeveloped", label: "◇ 未展开", title: "暂时不往下拆：信息不够，或不值得拆" },
                   ],
                 }),
               ),
-
             isLeaf(n) &&
               h(
-                Field,
-                { label: "验证", hint: "确认或排除后，上层按门的逻辑自动推出结论" },
+                Prop,
+                { label: "验证" },
                 h(Seg, {
                   value: n.status,
                   onChange: (status) => ops.update(n.id, { status }),
@@ -974,83 +1044,92 @@ export function onload(api) {
                   ],
                 }),
               ),
-
             h(
-              Field,
-              { label: "证据 / 验证方法" },
-              h(DraftText, {
-                key: `note-${n.id}`,
-                value: n.note,
-                rows: 3,
-                placeholder: "怎么验证的、看到了什么、谁确认的",
-                onCommit: (note) => ops.update(n.id, { note }),
+              Prop,
+              { label: "时间" },
+              h("input", {
+                type: "date",
+                className: "ft-date",
+                value: nodeDay(tree, n),
+                onChange: (e) => e.target.value && ops.update(n.id, { at: e.target.value }),
               }),
             ),
-
             h(
-              Field,
-              { label: "关联事项" },
+              Prop,
+              { label: "事项" },
               n.itemRef
                 ? h(
                     "div",
                     { className: "ft-linked" },
                     h(
                       "span",
-                      { className: "ft-linked-text" },
+                      { className: "ft-linked-text", title: linked?.title },
                       linked
-                        ? h(React.Fragment, null, h("b", null, linked.kindLabel), " ", linked.title, linked.closed ? "（已关闭）" : "")
+                        ? h(React.Fragment, null, h("b", null, linked.kindLabel), " ", linked.title)
                         : "那条事项已经不在了",
                     ),
-                    h("button", { className: "ft-link-btn", onClick: () => ops.update(n.id, { itemRef: null }) }, "解除"),
+                    h(
+                      "button",
+                      { className: "ft-x", title: "解除关联", onClick: () => ops.update(n.id, { itemRef: null }) },
+                      "×",
+                    ),
                   )
                 : h(ItemPicker, {
                     items: candidates,
-                    placeholder: "把一条事项关联到这个事件…",
+                    placeholder: "关联一条事项…",
                     onPick: (it) => ops.update(n.id, { itemRef: itemRef(it), label: n.label || it.title }),
                   }),
             ),
-
             h(
-              "div",
-              { className: "ft-actions" },
-              h("button", { onClick: () => ops.addChild(n.id) }, "＋ 子原因"),
-              n.kind !== "top" && h("button", { onClick: () => ops.addSibling(n.id) }, "＋ 同级"),
-              n.kind !== "top" && h("button", { className: "ft-danger", onClick: () => ops.remove(n.id) }, "删除"),
-              h(ItemPicker, {
-                items: candidates,
-                placeholder: "＋ 从事项添加子原因…",
-                onPick: (it) => ops.addChild(n.id, { label: it.title, itemRef: itemRef(it) }),
+              Prop,
+              { label: "备注", top: true },
+              h(DraftText, {
+                value: n.note,
+                rows: 2,
+                placeholder: "证据、验证方法…",
+                onCommit: (note) => ops.update(n.id, { note }),
               }),
             ),
-          )
-        : h(
-            "section",
-            { className: "ft-card ft-card-hint" },
-            "点选一个事件编辑它。双击直接改名，Tab 往下拆一层。",
           ),
+        ),
 
       h(
         "section",
-        { className: "ft-card" },
-        h("div", { className: "ft-card-head" }, h("span", { className: "ft-card-title" }, "分析")),
-        h("p", { className: `ft-verdict${verdict.tone ? ` ft-verdict-${verdict.tone}` : ""}` }, verdict.text),
+        { className: "ft-sec" },
+        h("div", { className: "ft-sec-head" }, h("span", { className: "ft-sec-title" }, "分析")),
         h(
           "div",
-          { className: "ft-tally" },
-          h("span", null, h("b", null, leaves.length), " 个叶子事件"),
-          h("span", { className: "ft-st-confirmed" }, `已确认 ${counts.confirmed}`),
-          h("span", { className: "ft-st-ruled" }, `已排除 ${counts.ruled}`),
-          h("span", null, `待验证 ${counts.open}`),
+          { className: `ft-verdict ft-verdict-${verdict.tone}` },
+          h("span", { className: "ft-verdict-mark" }),
+          verdict.text,
         ),
-        h(
-          "div",
-          { className: "ft-sub" },
-          "最小割集",
-          h("span", { className: "ft-sub-hint" }, "能单独导致顶事件的最小原因组合，阶数越低越该先查"),
-        ),
-        cuts.sets.length === 0
-          ? h("p", { className: "ft-muted" }, "拆出第一层原因之后，这里列出割集。")
-          : h(
+        leaves.length > 0 &&
+          h(
+            "div",
+            { className: "ft-meter", "aria-hidden": true },
+            ["confirmed", "ruled", "open"].map((k) =>
+              counts[k] > 0 && h("span", { key: k, className: `ft-meter-${k}`, style: { flexGrow: counts[k] } }),
+            ),
+          ),
+        leaves.length > 0 &&
+          h(
+            "div",
+            { className: "ft-tally" },
+            h("span", { className: "ft-st-confirmed" }, `确认 ${counts.confirmed}`),
+            h("span", null, `排除 ${counts.ruled}`),
+            h("span", null, `待验证 ${counts.open}`),
+          ),
+        cuts.sets.length > 0 &&
+          h(
+            React.Fragment,
+            null,
+            h(
+              "div",
+              { className: "ft-sub", title: "能单独导致顶事件的最小原因组合，阶数越低越该先查" },
+              "最小割集",
+              h("span", { className: "ft-sub-n" }, cuts.truncated ? `前 ${cuts.sets.length}` : cuts.sets.length),
+            ),
+            h(
               "ol",
               { className: "ft-cuts", onPointerLeave: () => setHighlight(null) },
               cuts.sets.map((set) => {
@@ -1062,9 +1141,8 @@ export function onload(api) {
                     className: `ft-cut ft-cut-${st}`,
                     onPointerEnter: () => setHighlight(set),
                     onClick: () => onSelect(set[0]),
-                    title: "悬停在画布上高亮，点一下选中",
                   },
-                  h("span", { className: "ft-cut-order" }, `${set.length} 阶`),
+                  h("span", { className: "ft-cut-order" }, `${set.length}阶`),
                   h(
                     "span",
                     { className: "ft-cut-body" },
@@ -1081,50 +1159,61 @@ export function onload(api) {
                 );
               }),
             ),
-        cuts.truncated && h("p", { className: "ft-muted" }, `组合太多，只列出前 ${cuts.sets.length} 个。`),
+          ),
       ),
 
       h(
         "section",
-        { className: "ft-card ft-legend" },
-        h(Legend, { kind: "gate-or", text: "或门：任一输入发生即导致上层" }),
-        h(Legend, { kind: "gate-and", text: "与门：所有输入同时发生才导致" }),
-        h(Legend, { kind: "basic", text: "基本事件：拆到底、可直接验证" }),
-        h(Legend, { kind: "undeveloped", text: "未展开事件：暂不往下拆" }),
+        { className: "ft-sec ft-legend" },
+        h(Legend, { kind: "gate-or", name: "或门", text: "任一输入发生，就导致上层" }),
+        h(Legend, { kind: "gate-and", name: "与门", text: "所有输入同时发生，才导致上层" }),
+        h(Legend, { kind: "basic", name: "基本事件", text: "拆到底了，可以直接验证" }),
+        h(Legend, { kind: "undeveloped", name: "未展开事件", text: "暂不往下拆：信息不够或不值得" }),
       ),
     );
   }
 
-  function Field({ label, hint, children }) {
+  function KindChip({ n }) {
+    const k = kindOf(n);
     return h(
-      "div",
-      { className: "ft-field" },
-      h("div", { className: "ft-field-label" }, label, hint && h("span", { className: "ft-field-hint" }, hint)),
-      children,
+      "span",
+      { className: `ft-kind ft-kind-${k}` },
+      h(Glyph, { kind: k === "basic" ? "basic" : k === "undeveloped" ? "undeveloped" : `gate-${n.gate}`, size: 14 }),
+      KIND_LABELS[k],
     );
   }
 
-  function ItemPicker({ items, onPick, placeholder }) {
+  function Prop({ label, top, children }) {
+    return h(
+      "div",
+      { className: `ft-prop${top ? " ft-prop-top" : ""}` },
+      h("span", { className: "ft-prop-label" }, label),
+      h("div", { className: "ft-prop-value" }, children),
+    );
+  }
+
+  function ItemPicker({ items, onPick, placeholder, className = "ft-picker", title }) {
     return h(
       "select",
       {
-        className: "ft-picker",
+        className,
         value: "",
         disabled: items.length === 0,
-        title: items.length === 0 ? "这个项目里没有还没用上的事项" : undefined,
+        title: items.length === 0 ? "没有还没用上的事项" : title,
         onChange: (e) => {
           const it = items.find((x) => x.key === e.target.value);
           if (it) onPick(it);
         },
       },
-      h("option", { value: "" }, items.length === 0 ? "（没有可关联的事项）" : placeholder),
+      h("option", { value: "" }, placeholder),
       items.map((it) =>
         h("option", { key: it.key, value: it.key }, `[${it.kindLabel}] ${it.title}${it.closed ? "（已关闭）" : ""}`),
       ),
     );
   }
 
-  function Legend({ kind, text }) {
+  /** 门 / 事件的小符号，和画布上同一套路径 */
+  function Glyph({ kind, size = 24 }) {
     const path =
       kind === "gate-or"
         ? symbolPath("intermediate", "or", 13, 1)
@@ -1134,15 +1223,20 @@ export function onload(api) {
             ? symbolPath("undeveloped", null, 13, 1)
             : null;
     return h(
+      "svg",
+      { width: size, height: size, viewBox: "0 0 26 24", "aria-hidden": true, className: "ft-glyph" },
+      path
+        ? h("path", { d: path, fill: "none", stroke: "currentColor", strokeWidth: 1.5, strokeLinejoin: "round" })
+        : h("circle", { cx: 13, cy: 12, r: 10, fill: "none", stroke: "currentColor", strokeWidth: 1.5 }),
+    );
+  }
+
+  function Legend({ kind, name, text }) {
+    return h(
       "div",
       { className: "ft-legend-row" },
-      h(
-        "svg",
-        { width: 26, height: 24, "aria-hidden": true },
-        path
-          ? h("path", { d: path, fill: "none", stroke: "currentColor", strokeWidth: 1.4 })
-          : h("circle", { cx: 13, cy: 12, r: 10, fill: "none", stroke: "currentColor", strokeWidth: 1.4 }),
-      ),
+      h(Glyph, { kind, size: 20 }),
+      h("b", null, name),
       h("span", null, text),
     );
   }
@@ -1159,6 +1253,7 @@ export function onload(api) {
     const [editing, setEditing] = useState(null);
     const [highlight, setHighlight] = useState(null);
     const [copied, setCopied] = useState(false);
+    const [listOpen, setListOpen] = useState(false);
 
     const project = api.data.project();
     const trees = project ? treesOf(project.id) : [];
@@ -1192,8 +1287,8 @@ export function onload(api) {
         if (!r.tree.nodes[r.id].label) setEditing(r.id);
       };
       return {
-        addChild: (nid, init) => addWith((t) => addChild(t, nid, init)),
-        addSibling: (nid, init) => addWith((t) => addSibling(t, nid, init)),
+        addChild: (nid, init) => addWith((t) => addChild(t, nid, { at: localDay(), ...init })),
+        addSibling: (nid, init) => addWith((t) => addSibling(t, nid, { at: localDay(), ...init })),
         update: (nid, patch) => mutateTree(id, (t) => updateNode(t, nid, patch)),
         move: (nid, d) => mutateTree(id, (t) => moveNode(t, nid, d)),
         remove: (nid) => {
@@ -1218,30 +1313,60 @@ export function onload(api) {
       return h("div", { className: "ft-root ft-center" }, "正在读取…");
     }
 
+    const open = (id) => {
+      state.activeTree = id;
+      notify();
+    };
+
     const header = h(
       "header",
       { className: "ft-bar" },
       h("span", { className: "ft-h1" }, "故障树"),
       h(
+        "button",
+        {
+          className: `ft-btn ft-list-btn${listOpen ? " ft-on" : ""}`,
+          title: "查看这个项目的全部故障树，按时间或任务筛选",
+          "aria-expanded": listOpen,
+          onClick: () => setListOpen((v) => !v),
+        },
+        h("span", { className: "ft-list-icon", "aria-hidden": true }),
+        "列表",
+        h("span", { className: "ft-count" }, trees.length),
+      ),
+      h(
         "div",
         { className: "ft-tabs", role: "tablist" },
         trees.map((t) => {
           const ev = evaluate(t)[t.root];
+          const on = tree?.id === t.id;
           return h(
-            "button",
+            "div",
             {
               key: t.id,
               role: "tab",
-              "aria-selected": tree?.id === t.id,
-              className: `ft-tab${tree?.id === t.id ? " ft-on" : ""}`,
+              tabIndex: 0,
+              "aria-selected": on,
+              className: `ft-tab${on ? " ft-on" : ""}`,
               title: treeTitle(t),
-              onClick: () => {
-                state.activeTree = t.id;
-                notify();
-              },
+              onClick: () => open(t.id),
+              onKeyDown: (e) => e.key === "Enter" && open(t.id),
             },
             h("span", { className: `ft-tab-dot ft-dot-${ev}` }),
             h("span", { className: "ft-tab-text" }, treeTitle(t)),
+            h(
+              "button",
+              {
+                className: "ft-tab-x",
+                title: "删除这棵树",
+                "aria-label": `删除「${treeTitle(t)}」`,
+                onClick: (e) => {
+                  e.stopPropagation();
+                  deleteTree(t);
+                },
+              },
+              "×",
+            ),
           );
         }),
         h(
@@ -1249,9 +1374,7 @@ export function onload(api) {
           {
             className: "ft-tab ft-tab-new",
             title: "不从事项出发，直接写一个顶事件",
-            onClick: () => {
-              createTree("", null);
-            },
+            onClick: () => createTree("", null),
           },
           "＋ 新建",
         ),
@@ -1277,20 +1400,19 @@ export function onload(api) {
             },
             copied ? "✓ 已复制" : "复制大纲",
           ),
-          h(
-            "button",
-            {
-              className: "ft-btn ft-danger",
-              onClick: () => {
-                if (!window.confirm(`删除故障树「${treeTitle(tree)}」？关联的事项不受影响。`)) return;
-                setStore({ ...state.store, trees: state.store.trees.filter((t) => t.id !== tree.id) });
-                state.activeTree = null;
-                notify();
-              },
-            },
-            "删除这棵树",
-          ),
         ),
+      listOpen &&
+        h(TreeList, {
+          trees,
+          items,
+          activeId: tree?.id,
+          onOpen: (id) => {
+            open(id);
+            setListOpen(false);
+          },
+          onDelete: deleteTree,
+          onClose: () => setListOpen(false),
+        }),
     );
 
     if (!tree) {
@@ -1315,6 +1437,8 @@ export function onload(api) {
       );
     }
 
+    const usedRefs = new Set(Object.values(tree.nodes).map((x) => x.itemRef).filter(Boolean));
+    const candidates = items.filter((it) => !usedRefs.has(itemRef(it)));
     const topRef = tree.nodes[tree.root].itemRef;
     const topItem = topRef ? items.find((it) => itemRef(it) === topRef) : null;
 
@@ -1350,15 +1474,118 @@ export function onload(api) {
           },
           highlight,
           ops,
+          candidates,
         }),
         h(Inspector, {
           tree,
           selected,
           items,
+          candidates,
           onSelect: setSelected,
           setHighlight,
           ops,
         }),
+      ),
+    );
+  }
+
+  /** 全部故障树：按建树日期、按关联任务筛 */
+  function TreeList({ trees, items, activeId, onOpen, onDelete, onClose }) {
+    const [f, setF] = useState({ from: "", to: "", task: "" });
+    const byRef = useMemo(() => new Map(items.map((it) => [itemRef(it), it])), [items]);
+    const tasks = useMemo(() => {
+      const names = new Map(items.filter((it) => it.taskId != null).map((it) => [it.taskId, it.taskName]));
+      const used = new Set(trees.flatMap((t) => [...treeTasks(t, byRef)]));
+      return [...used].map((id) => ({ id, name: names.get(id) || `任务 ${id}` }));
+    }, [trees, items, byRef]);
+    const rows = filterTrees(trees, f, byRef);
+    const filtered = f.from || f.to || f.task;
+    const set = (patch) => setF((x) => ({ ...x, ...patch }));
+
+    useEffect(() => {
+      const onKey = (e) => e.key === "Escape" && onClose();
+      document.addEventListener("keydown", onKey);
+      return () => document.removeEventListener("keydown", onKey);
+    }, [onClose]);
+
+    return h(
+      React.Fragment,
+      null,
+      h("div", { className: "ft-scrim", onClick: onClose }),
+      h(
+        "div",
+        { className: "ft-list", role: "dialog", "aria-label": "故障树列表" },
+        h(
+          "div",
+          { className: "ft-list-filters" },
+          h(
+            "label",
+            { className: "ft-filter" },
+            h("span", null, "加入时间"),
+            h("input", { type: "date", className: "ft-date", value: f.from, max: f.to || undefined, onChange: (e) => set({ from: e.target.value }), "aria-label": "起始日期" }),
+            h("span", { className: "ft-filter-dash" }, "–"),
+            h("input", { type: "date", className: "ft-date", value: f.to, min: f.from || undefined, onChange: (e) => set({ to: e.target.value }), "aria-label": "结束日期" }),
+          ),
+          h(
+            "label",
+            { className: "ft-filter" },
+            h("span", null, "任务"),
+            h(
+              "select",
+              { className: "ft-picker", value: f.task, onChange: (e) => set({ task: e.target.value }), "aria-label": "按任务筛选" },
+              h("option", { value: "" }, "全部任务"),
+              tasks.map((t) => h("option", { key: t.id, value: String(t.id) }, t.name)),
+              h("option", { value: "none" }, "没关联任务的"),
+            ),
+          ),
+          filtered && h("button", { className: "ft-clear", onClick: () => setF({ from: "", to: "", task: "" }) }, "清除"),
+        ),
+        rows.length === 0
+          ? h("p", { className: "ft-list-empty" }, trees.length === 0 ? "还没有故障树" : "没有符合条件的故障树")
+          : h(
+              "ul",
+              { className: "ft-list-rows" },
+              rows.map((t) => {
+                const st = evaluate(t)[t.root];
+                const taskNames = [...treeTasks(t, byRef)].map((id) => tasks.find((x) => x.id === id)?.name).filter(Boolean);
+                const count = Object.keys(t.nodes).length;
+                return h(
+                  "li",
+                  {
+                    key: t.id,
+                    className: `ft-list-row${t.id === activeId ? " ft-on" : ""}`,
+                    onClick: () => onOpen(t.id),
+                  },
+                  h("span", { className: `ft-tab-dot ft-dot-${st}` }),
+                  h(
+                    "span",
+                    { className: "ft-list-main" },
+                    h("span", { className: "ft-list-title" }, treeTitle(t)),
+                    h(
+                      "span",
+                      { className: "ft-list-meta" },
+                      h("span", { className: "ft-mono" }, localDay(new Date(t.createdAt))),
+                      taskNames.length > 0 && h("span", null, taskNames.join("、")),
+                      h("span", null, `${count} 个事件`),
+                    ),
+                  ),
+                  h("span", { className: `ft-list-st ft-st-${st}` }, st === "confirmed" ? "已成立" : st === "ruled" ? "已排除" : "分析中"),
+                  h(
+                    "button",
+                    {
+                      className: "ft-tab-x ft-list-x",
+                      title: "删除这棵树",
+                      "aria-label": `删除「${treeTitle(t)}」`,
+                      onClick: (e) => {
+                        e.stopPropagation();
+                        onDelete(t);
+                      },
+                    },
+                    "×",
+                  ),
+                );
+              }),
+            ),
       ),
     );
   }
