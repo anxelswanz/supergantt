@@ -7,6 +7,7 @@ import {
   blockerRef,
   closePolicy,
   filterItems,
+  hasFilter,
   kindLabel,
   mergeItems,
   parseBlockerRef,
@@ -290,6 +291,29 @@ describe("filterItems", () => {
       today: TODAY,
     });
     expect(filterItems(withRisk, { ...EMPTY_FILTER, priorities: [0, 1, 2, 3] })).toHaveLength(0);
+  });
+
+  it("按记录日期筛：首尾两天都算在内，按月就是月初到月末的一段", () => {
+    const dated = mergeItems({
+      notes: [
+        note({ id: 1, createdAt: unix("2026-09-30") }),
+        note({ id: 2, createdAt: unix("2026-10-01") + 3600 * 23 }),
+        note({ id: 3, createdAt: unix("2026-10-31") }),
+        note({ id: 4, createdAt: unix("2026-11-01") }),
+      ],
+      tasks: [],
+      risks: [],
+      today: TODAY,
+    });
+    const october = { from: isoToDay("2026-10-01"), to: isoToDay("2026-10-31") };
+    expect(keys(filterItems(dated, { ...EMPTY_FILTER, range: october })).sort()).toEqual([
+      "note:2",
+      "note:3",
+    ]);
+    expect(hasFilter({ ...EMPTY_FILTER, range: october })).toBe(true);
+    // 旧状态里没有 range 这一维 —— 当作不筛
+    const { range: _drop, ...legacy } = EMPTY_FILTER;
+    expect(filterItems(dated, legacy as typeof EMPTY_FILTER)).toHaveLength(4);
   });
 
   it("搜索对标题做大小写无关的包含匹配", () => {

@@ -3,7 +3,7 @@ import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import { useAppStore } from "../store/useAppStore";
 import { resolve, type Priority, type ResolvedTask } from "../gantt/model";
 import { columnOf, isInProgress } from "../core/board";
-import { today } from "../gantt/time";
+import { dayToIso, today } from "../gantt/time";
 import { PRIORITY_COLORS, PRIORITY_LABELS } from "../gantt/theme";
 import { withAlpha } from "../gantt/coloring";
 import { RISK_LEVELS } from "../core/risks";
@@ -21,6 +21,7 @@ import {
   filterItems,
   frequentKinds,
   hasFilter,
+  itemDay,
   kindColor,
   kindLabel,
   mergeItems,
@@ -38,6 +39,7 @@ import type { ItemKind, Person } from "../db/api";
 import { BlockedDetail } from "./BlockedDetail";
 import { PromoteDialog, type PromoteTarget } from "./PromoteDialog";
 import { ExportButton } from "./ExportButton";
+import { RangeFilter } from "./RangeFilter";
 import { itemViewer } from "../plugins/registry";
 import { useRegistry } from "../plugins/usePlugins";
 
@@ -247,6 +249,7 @@ export function ItemsView() {
           kinds={kinds}
           people={people}
           tasks={tasks}
+          rows={rows}
           matched={visible.length}
         />
       </div>
@@ -431,6 +434,7 @@ function Filters({
   kinds,
   people,
   tasks,
+  rows,
   matched,
 }: {
   filter: ItemFilter;
@@ -438,6 +442,8 @@ function Filters({
   kinds: ItemKind[];
   people: { id: number; name: string; color: string }[];
   tasks: ResolvedTask[];
+  /** 全部事项（筛之前）—— 日历上给记过事项的那些天打点 */
+  rows: ItemRow[];
   /** 筛完还剩几条（含已关闭）。只在有筛选时显示 */
   matched: number;
 }) {
@@ -450,6 +456,7 @@ function Filters({
 
   // 旧状态里可能还留着 onlyOpen（界面上已经没有开关了）—— 当作没开
   const active = hasFilter({ ...filter, onlyOpen: false });
+  const marked = useMemo(() => new Set(rows.map(itemDay)), [rows]);
 
   return (
     <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
@@ -523,6 +530,14 @@ function Filters({
         selected={filter.tasks ?? []}
         onChange={(sel) => onChange({ ...filter, tasks: sel })}
         width={240}
+      />
+      {/* 按记录日期筛：整年、整月，或任意连续的几天 */}
+      <RangeFilter
+        value={filter.range ?? null}
+        onChange={(range) => onChange({ ...filter, range })}
+        marked={marked}
+        granular
+        align="left"
       />
 
       {active && (
@@ -2027,6 +2042,11 @@ function describeFilter(
 ): string {
   const parts: string[] = [];
   if (f.query.trim()) parts.push(`搜索「${f.query.trim()}」`);
+  // 文件会被转发、隔很久再看 —— 写全年份，不用屏幕上那种省略年份的短写
+  if (f.range)
+    parts.push(
+      `记录日期：${dayToIso(f.range.from)}${f.range.to === f.range.from ? "" : ` 至 ${dayToIso(f.range.to)}`}`,
+    );
   if (f.kinds.length) parts.push(`类型：${f.kinds.map((k) => kindLabel(k, ctx.kinds)).join("、")}`);
   if (f.priorities.length)
     parts.push(`优先级：${f.priorities.map((p) => `P${p}`).join("、")}`);

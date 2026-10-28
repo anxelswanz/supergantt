@@ -30,6 +30,7 @@ import type { ItemKind, ItemNote, Risk } from "../db/api";
 import { daysOf, describeBlocked, type BlockedPeriod } from "./blocked";
 import { dayToIso, isoToDay } from "../gantt/time";
 import type { Priority } from "../gantt/model";
+import type { DayRange } from "./timeline";
 
 /* ------------------------------------------------------------------ */
 /* 类型清单                                                            */
@@ -472,6 +473,8 @@ export interface ItemFilter {
   onlyOpen: boolean;
   /** 搜索词，对标题和结论做大小写无关的包含匹配 */
   query: string;
+  /** 记录日期落在这段里（首尾都含）。按年、按月也是一段。null / 缺省 = 不筛 */
+  range?: DayRange | null;
 }
 
 export const EMPTY_FILTER: ItemFilter = {
@@ -481,7 +484,15 @@ export const EMPTY_FILTER: ItemFilter = {
   tasks: [],
   onlyOpen: false,
   query: "",
+  range: null,
 };
+
+/**
+ * 一条事项「记在哪天」—— 日期筛选比的就是它。
+ * 和列表上显示的日期（shortDate）同一个换算，不然筛出来的和看到的对不上。
+ */
+export const itemDay = (row: ItemRow): number =>
+  isoToDay(new Date(row.createdAt * 1000).toISOString().slice(0, 10));
 
 /**
  * 可叠加的筛选。每一维空着就是不筛那一维。
@@ -499,6 +510,7 @@ export function filterItems(rows: ItemRow[], f: ItemFilter): ItemRow[] {
     if (f.people.length > 0 && !f.people.includes(r.personId)) return false;
     // 旧状态里可能没有 tasks 这一维 —— 当作不筛
     if (f.tasks?.length > 0 && !f.tasks.includes(r.taskId)) return false;
+    if (f.range && (itemDay(r) < f.range.from || itemDay(r) > f.range.to)) return false;
     // 结论也搜：「上次那个怎么解决的」是翻已关闭事项的主要理由
     if (q && !r.title.toLowerCase().includes(q) && !(r.resolution ?? "").toLowerCase().includes(q))
       return false;
@@ -511,6 +523,7 @@ export const hasFilter = (f: ItemFilter): boolean =>
   f.priorities.length > 0 ||
   f.people.length > 0 ||
   (f.tasks?.length ?? 0) > 0 ||
+  f.range != null ||
   f.onlyOpen ||
   f.query.trim() !== "";
 
