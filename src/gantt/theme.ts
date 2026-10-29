@@ -80,16 +80,11 @@ export function getTheme(isDark: boolean): Theme {
   return isDark ? dark : light;
 }
 
-/** 紧急程度色标（DESIGN.md §1.7）：只画条子左端 3px 竖标，不整条染色。 */
+/** 紧急程度色标：只画条子左端 3px 竖标，不整条染色 */
 export const PRIORITY_COLORS = ["#b23a32", "#c2693a", "#3f7da0", "#8a9a9c"];
 export const PRIORITY_LABELS = ["P0 紧急", "P1 高", "P2 中", "P3 低"];
 
-/**
- * 行高档位。
- *
- * 不做成任意数值的滑块：行高只有「一屏能看多少行」和「点得准不准」两个诉求，
- * 三档已经覆盖，而连续可调会让用户在 31px 和 32px 之间纠结。
- */
+/** 行高三档：一屏看多少行、点得准不准，三档够用 */
 export const ROW_HEIGHTS = { compact: 26, normal: 32, roomy: 42 } as const;
 export type RowHeightKey = keyof typeof ROW_HEIGHTS;
 export const ROW_HEIGHT_LABELS: Record<RowHeightKey, string> = {
@@ -98,16 +93,13 @@ export const ROW_HEIGHT_LABELS: Record<RowHeightKey, string> = {
   roomy: "宽松",
 };
 
-/** 默认行高。仍然导出常量，是因为很多地方只需要一个合理初值 */
+/** 默认行高 */
 export const ROW_HEIGHT = ROW_HEIGHTS.normal;
 
-/**
- * 甘特条的高度随行高走 —— 行高改了条子不跟着变，行距会显得空旷失衡。
- * 父任务条固定比叶子任务细一半，这个比例在各档位下都成立。
- */
+/** 条高随行高走；父任务条固定是叶子的一半 */
 export function barHeights(rowHeight: number): { leaf: number; parent: number } {
   const leaf = Math.max(10, Math.min(26, rowHeight - 14));
   return { leaf, parent: Math.max(6, Math.round(leaf / 2)) };
 }
-/** 时间轴高度。三条信息：上下文（月/年）、星期、日期 —— 星期那行只在日视图出现 */
+/** 时间轴高度：上下文、星期、日期三层 */
 export const AXIS_HEIGHT = 60;

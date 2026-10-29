@@ -75,7 +75,7 @@ export function AiReviewView() {
 
   return (
     <div className="flex min-h-0 flex-1">
-      {/* —— 历次复盘 ——
+      {/* 历次复盘
           阶段复盘和结项复盘并存，所以是一张清单而不是「当前这一份」 */}
       <aside className="flex w-56 shrink-0 flex-col border-r border-[var(--rule)]">
         <div className="p-3">
@@ -201,15 +201,13 @@ function BackgroundForm({ projectId, projectName }: { projectId: number; project
       <div>
         <h2 className="text-lg font-semibold text-[var(--text)]">AI 复盘</h2>
         <p className="mt-1 text-xs leading-relaxed text-[var(--text-dim)]">
-          Claude 会先读这个项目的排期、受阻、风险和记录，问你 10 道题（7 道 + 根据回答追问 3
-          道），再写出一份复盘文档：目标与结果、过程回顾、根因分析、可沉淀的 SOP 与避坑清单。
+          Claude 读完项目的排期、受阻、风险和记录后问你 10 道题，再写成一份复盘文档。
         </p>
       </div>
 
       {available === false && (
         <Notice tone="warn">
-          没有找到 <code>claude</code>。AI 复盘需要本机装有 Claude Code 并已登录 ——
-          装好之后重新打开这个视图。已有的复盘文档仍然可以查看和导出。
+          没有找到 <code>claude</code>。安装并登录 Claude Code 后重新打开这个视图。已有的复盘仍可查看和导出。
         </Notice>
       )}
 
@@ -367,7 +365,7 @@ function PaneHeader({ review }: { review: Review }) {
           className="w-full truncate bg-transparent text-lg font-semibold text-[var(--text)] outline-none"
         />
         <div className="mt-0.5 text-[10px] text-[var(--text-dim)]">
-          {REVIEW_KIND_LABEL[review.background.kind]} · 数据截至 {review.snapshot.takenOn} ·{" "}
+          {REVIEW_KIND_LABEL[review.background.kind]}，数据截至 {review.snapshot.takenOn}，共{" "}
           {review.snapshot.summary.leafCount} 条任务
         </div>
       </div>
@@ -508,7 +506,7 @@ function QuestionPane({ review }: { review: Review }) {
           />
         </div>
         <span className="text-[10px] text-[var(--text-dim)]">
-          {round === 1 ? "首轮" : "追问"} · {q.topic}
+          {round === 1 ? "首轮" : "追问"}：{q.topic}
         </span>
       </div>
 

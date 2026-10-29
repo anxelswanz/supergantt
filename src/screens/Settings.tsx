@@ -168,7 +168,7 @@ function PluginsPane() {
   return (
     <Section
       title="插件"
-      desc="插件是插件目录里的一个文件夹，能往工具条上加视图，也能改任务数据（可撤销）。改完代码点插件卡片上的「重新加载」即可生效。"
+      desc="插件可以添加视图，也可以修改任务数据（可撤销）。改完代码后点「重新加载」生效。"
     >
       <div className="mb-3 break-all rounded-lg border border-[var(--rule)] bg-[var(--surface-alt)] p-2.5 font-mono text-[10px] text-[var(--text-dim)]">
         {dir || "读取中…"}
@@ -529,7 +529,7 @@ function ViewsPane() {
   return (
     <Section
       title="启用哪些视图"
-      desc="关掉的视图从工具条移除，快捷键编号依次前移。这是全局设置，不随项目走。"
+      desc="关掉的视图从工具条移除，快捷键编号依次前移。所有项目通用。"
     >
       <ViewToggles />
 
@@ -886,21 +886,21 @@ function AppearancePane() {
   const setColorBy = useAppStore((s) => s.setColorBy);
 
   const hints: Record<ColorBy, string> = {
-    stage: "顶层任务拿一个基色，它的每个后代拿一个同色系变体 —— 每一行都不重样，但一眼看得出同属一族。",
-    assignee: "用每个人自己的颜色，和设置里的头像底色一致。未指派走中性灰。",
-    priority: "固定映射，P0 永远是红的 —— 不会因为项目里恰好没有 P0 就让 P1 变红。",
-    none: "全部用项目强调色。导出 PDF 或灰度打印时，彩色反而是干扰。",
+    stage: "每个顶层任务一个颜色，子任务用同色系的深浅变化。",
+    assignee: "用负责人的头像颜色，未指派显示灰色。",
+    priority: "按紧急程度着色，P0 始终是红色。",
+    none: "全部用项目颜色，适合打印。",
   };
 
   return (
     <Section
       title="主题"
-      desc="默认跟随系统。选了浅色或深色就一直用那一套，不再随系统切换 —— 排期的人常常希望几点打开都是同一副面孔。"
+      desc="选浅色或深色后，不再随系统切换。"
     >
       <ThemePicker />
 
       <div className="mt-8">
-      <Section title="甘特条着色" desc="颜色由数据决定，不由行号决定 —— 这样每一个颜色都能被解释。">
+      <Section title="甘特条着色" desc="选择按什么给甘特条上色。">
         <div className="grid grid-cols-2 gap-2">
           {(Object.keys(COLOR_BY_LABELS) as ColorBy[]).map((mode) => (
             <button
@@ -1080,7 +1080,7 @@ function PeoplePane() {
   return (
     <Section
       title="负责人"
-      desc="全局共享，不按项目隔离 —— 同一个人通常同时出现在多个项目里。照片会压到 128px 存进数据库，所以复制那一个文件就是完整备份。"
+      desc="所有项目共用这份名单。"
     >
       <div className="mb-3 flex gap-2">
         <input
@@ -1337,14 +1337,9 @@ function DataPane() {
       <IntegrityCheck />
 
       <p className="mt-4 text-[10px] leading-relaxed text-[var(--text-dim)]">
-        每次启动会自动备份到 <code>backups/</code>，保留最近 10 份。
-        备份走 SQLite 的在线备份接口，包含尚未 checkpoint 的 WAL 内容 ——
-        直接复制 .db 文件会漏掉最近的提交。
+        每次启动自动备份到 <code>backups/</code>，保留最近 10 份。
         <br />
-        头像也存在这个文件里，所以复制它一份就是完整的数据副本。
-        <br />
-        换电脑（包括 Mac 和 Windows 之间）：点「导出数据库…」，把得到的 .db 拷过去，
-        在那边的项目列表点「导入项目」选中它即可。本机独有的项目不会被抹掉。
+        换电脑：点「导出数据库…」，在新电脑的项目列表点「导入项目」选中它。那边已有的项目不会被覆盖。
       </p>
     </Section>
   );
@@ -1395,9 +1390,7 @@ function IntegrityCheck() {
       )}
 
       <p className="mt-2 text-[10px] leading-relaxed text-[var(--text-dim)]">
-        检查跨项目的父子引用、孤儿任务、自引用、越界日期和外键破损。
-        其中跨项目引用最危险 —— 它会让删除一个项目的任务连带删掉另一个项目的子树，
-        所以每次启动都会自动降级修复一遍。
+        检查任务层级、日期和引用是否损坏。每次启动也会自动修复一遍。
       </p>
     </div>
   );
