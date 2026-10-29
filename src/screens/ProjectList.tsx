@@ -10,6 +10,8 @@ import {
   type ProjectSummary,
 } from "../db/api";
 import { REVEAL_LABEL, shortcut } from "../core/keys";
+import { Icon } from "../brand/Icon";
+import { BrandLockup } from "../brand/Brand";
 import { PROJECT_COLORS, useAppStore } from "../store/useAppStore";
 import { DbImportDialog } from "./DbImportDialog";
 import { ImportDialog } from "./ImportDialog";
@@ -170,10 +172,8 @@ export function ProjectList() {
       <div className="mx-auto max-w-6xl px-10 pt-12 pb-16">
         <header className="flex items-end gap-4 border-b border-[var(--rule)] pb-5">
           <div>
-            <div className="text-[11px] font-medium tracking-[0.14em] text-[var(--text-dim)]">
-              SUPERGANTT
-            </div>
-            <h1 className="mt-1.5 text-[26px] leading-none font-semibold tracking-[-0.02em] text-[var(--text)]">
+            <BrandLockup fontSize={15} />
+            <h1 className="mt-2.5 text-[26px] leading-none font-semibold tracking-[-0.02em] text-[var(--text)]">
               我的项目
             </h1>
           </div>
@@ -187,10 +187,10 @@ export function ProjectList() {
               title="导入 .ganttproj，或另一台电脑的 .db；也可以把文件拖进窗口"
               className="btn h-7 px-3"
             >
-              {reading ? "读取中…" : "↧ 导入项目"}
+              {reading ? "读取中…" : <><Icon name="import" />导入项目</>}
             </button>
             <button onClick={() => setCreating(true)} className="btn btn-primary h-7 px-3">
-              + 新建项目
+              <Icon name="plus" />新建项目
             </button>
           </div>
         </header>
@@ -419,9 +419,10 @@ function NoticeBanner({
       )}
       <button
         onClick={onClose}
-        className="shrink-0 rounded-lg px-1.5 py-1 text-[11px] text-[var(--text-dim)] hover:text-[var(--text)]"
+        title="关闭"
+        className="shrink-0 rounded-[var(--r-s)] p-1 text-[var(--text-dim)] hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
       >
-        ✕
+        <Icon name="close" size={13} />
       </button>
     </motion.div>
   );
@@ -439,9 +440,10 @@ function ErrorBanner({ message, onClose }: { message: string; onClose: () => voi
       <div className="min-w-0 flex-1 text-xs leading-relaxed text-[var(--text)]">{message}</div>
       <button
         onClick={onClose}
-        className="shrink-0 rounded-lg px-1.5 py-1 text-[11px] text-[var(--text-dim)] hover:text-[var(--text)]"
+        title="关闭"
+        className="shrink-0 rounded-[var(--r-s)] p-1 text-[var(--text-dim)] hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
       >
-        ✕
+        <Icon name="close" size={13} />
       </button>
     </motion.div>
   );
@@ -619,7 +621,7 @@ function ProjectCard({
           title={`${REVEAL_LABEL}数据文件所在目录`}
           className="rounded-[var(--r-s)] px-2 py-1 text-[10px] font-medium text-[var(--text-dim)] hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
         >
-          数据目录
+          <Icon name="folder" size={12} />数据目录
         </span>
         {/*
           「导出」在这里而不在工作区的工具条上。工具条那两个导出
@@ -638,7 +640,7 @@ function ProjectCard({
           title="导出 .ganttproj，可在另一台电脑导入"
           className="rounded-[var(--r-s)] px-2 py-1 text-[10px] font-medium text-[var(--text-dim)] hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
         >
-          ⤴ 导出
+          <Icon name="export" size={12} />导出
         </span>
         <span
           role="button"

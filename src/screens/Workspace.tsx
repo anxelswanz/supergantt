@@ -15,6 +15,8 @@ import { ZOOM_PRESETS, type ZoomPreset, type Viewport } from "../gantt/viewport"
 import { today } from "../gantt/time";
 import { useAppStore } from "../store/useAppStore";
 import { isMod, shortcut } from "../core/keys";
+import { Icon } from "../brand/Icon";
+import { BrandMark } from "../brand/Brand";
 import { canEdit, VIEW_LABELS, type ViewMode } from "../core/viewMode";
 import { APP_VIEWS, applyViewOrder, moveView, type BuiltinView } from "../core/views";
 import { useViews, ViewRenderer, type ViewEntry } from "../plugins/usePlugins";
@@ -401,12 +403,12 @@ export function Workspace() {
           title="返回项目列表"
           className="grid size-7 place-items-center rounded-[var(--r-m)] text-[var(--text-dim)] transition-colors hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
         >
-          <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
-            <path d="M8.5 3 4.5 7l4 4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
+          <Icon name="back" size={14} />
         </button>
 
-        {/* 项目身份：色条 + 名字，色条是这条工具栏唯一的彩色 */}
+        <BrandMark size={18} title="SuperGantt" />
+        <span className="mx-0.5 h-4 w-px bg-[var(--rule)]" />
+        {/* 项目色条：这条工具栏唯一的彩色 */}
         <span className="h-4 w-[3px] shrink-0 rounded-full" style={{ background: accent }} />
         <span className="max-w-[240px] truncate text-[13px] font-semibold tracking-[-0.01em] text-[var(--text)]">
           {project.name}
@@ -482,18 +484,14 @@ export function Workspace() {
             title={stack?.undoLabel ? `撤销「${stack.undoLabel}」` : "撤销"}
             onClick={() => useAppStore.getState().undo()}
           >
-            <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
-              <path d="M5 3.5 2.5 6 5 8.5M2.5 6h5.2A3.3 3.3 0 0 1 11 9.3v1.2" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
+            <Icon name="undo" size={14} />
           </ToolButton>
           <ToolButton
             disabled={!stack?.canRedo}
             title={stack?.redoLabel ? `重做「${stack.redoLabel}」` : "重做"}
             onClick={() => useAppStore.getState().redo()}
           >
-            <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
-              <path d="M9 3.5 11.5 6 9 8.5M11.5 6H6.3A3.3 3.3 0 0 0 3 9.3v1.2" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
+            <Icon name="redo" size={14} />
           </ToolButton>
         </div>
 
@@ -539,10 +537,7 @@ export function Workspace() {
           title="设置"
           className="grid size-7 place-items-center rounded-[var(--r-m)] text-[var(--text-dim)] transition-colors hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
         >
-          <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.3">
-            <circle cx="8" cy="8" r="2.2" />
-            <path d="M8 1.6v1.6M8 12.8v1.6M1.6 8h1.6M12.8 8h1.6M3.5 3.5l1.1 1.1M11.4 11.4l1.1 1.1M12.5 3.5l-1.1 1.1M4.6 11.4l-1.1 1.1" strokeLinecap="round" />
-          </svg>
+          <Icon name="settings" size={15} />
         </button>
 
         <SaveIndicator error={saveError} />
@@ -726,9 +721,7 @@ function NewTaskButton({ selectedId }: { selectedId: number | null }) {
         aria-label="更多新建方式"
         className="grid w-6 place-items-center transition-colors hover:bg-black/10"
       >
-        <svg width="8" height="8" viewBox="0 0 8 8" aria-hidden="true">
-          <path d="M1.5 3 4 5.5 6.5 3" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+        <Icon name="chevron-down" size={11} />
       </button>
 
       <Popover anchor={anchor} open={open} onClose={() => setOpen(false)} width={176}>
