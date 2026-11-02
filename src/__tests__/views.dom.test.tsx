@@ -11,7 +11,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 const invoke = vi.fn();
-vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
+vi.mock("@tauri-apps/api/core", async () => {
+  const { withSession } = await import("../test/ipc");
+  return { invoke: withSession((...a: unknown[]) => invoke(...a)) };
+});
 
 const ISO_START = "2026-08-03";
 const ISO_END = "2026-08-14";

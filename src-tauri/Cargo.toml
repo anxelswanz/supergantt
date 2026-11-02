@@ -32,4 +32,9 @@ rusqlite = { version = "0.40.1", features = ["backup", "bundled"] }
 # 所以「加一列迁移」只发生在一个地方，两边永远不会分叉。
 gantt-core = { path = "../gantt-core" }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "charset", "macos-system-configuration"] }
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3.27.0"
 

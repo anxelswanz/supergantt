@@ -14,7 +14,10 @@ import { REVEAL_LABEL } from "../core/keys";
  */
 
 const invoke = vi.fn();
-vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
+vi.mock("@tauri-apps/api/core", async () => {
+  const { withSession } = await import("../test/ipc");
+  return { invoke: withSession((...a: unknown[]) => invoke(...a)) };
+});
 
 const pick = vi.fn();
 vi.mock("@tauri-apps/plugin-dialog", () => ({
@@ -42,6 +45,8 @@ const summary = {
   leafCount: 40,
   overdueCount: 0,
   progress: 0.4,
+  role: "owner",
+  memberCount: 1,
 };
 
 const side = (name: string, tasks: number, updatedAt: string) => ({

@@ -23,15 +23,17 @@ import { useViews, ViewRenderer, type ViewEntry } from "../plugins/usePlugins";
 import { BoardView } from "./BoardView";
 import { TimelineView } from "./TimelineView";
 import { ReviewView } from "./ReviewView";
-import { AiReviewView } from "./AiReviewView";
 import { ItemsView } from "./ItemsView";
 import { MilestoneView } from "./MilestoneView";
 import { QuickNote } from "./QuickNote";
+import { PluginMarketHost } from "./PluginMarket";
 import { api } from "../db/api";
 import { Settings } from "./Settings";
 import { TaskDetail } from "./TaskDetail";
 import { MenuItem, Popover } from "./Popover";
 import { ExportButton } from "./ExportButton";
+import { AccountMenu, ShareDialog } from "./Accounts";
+import { Avatar } from "./Avatar";
 import { AnimatePresence } from "motion/react";
 
 const PRESET_LABELS: Record<ZoomPreset, string> = {
@@ -79,16 +81,16 @@ const BUILTIN_BODIES: Record<string, ComponentType> = {
   board: BoardView,
   timeline: TimelineView,
   review: ReviewView,
-  "ai-review": AiReviewView,
   items: ItemsView,
   milestone: MilestoneView,
 };
 
 /**
- * 这个视图里有没有「增删任务」这回事。事项和 AI 复盘里看不到任务表，
- * 工具条的「+ 任务」、状态栏的 Enter / ⌫ 提示、对应的快捷键都跟着收起来。
+ * 这个视图里有没有「增删任务」这回事。事项和插件视图（故障树、飞书、AI 复盘……）里看不到任务表，
+ * 工具条的「+ 任务」、状态栏的 Enter / ⌫ 提示、对应的快捷键都跟着收起来 ——
+ * 否则点完插件里的一个按钮顺手按 Enter，甘特里会凭空多出一条任务
  */
-const hasTaskOps = (view: string): boolean => view !== "items" && view !== "ai-review";
+const hasTaskOps = (view: string): boolean => view !== "items" && APP_VIEWS.some((v) => v.key === view);
 
 /** ⌘1–⌘9 切视图。九个够用了；再多工具的快捷键就比工具本身还重要了 */
 const VIEW_HOTKEY_MAX = 9;
@@ -297,10 +299,13 @@ export function Workspace() {
         return;
       }
       if (inInput) return;
+      // 插件市场盖住了整个工作区：点过列表行之后焦点在按钮上，
+      // 这时的 ↵ / ⌫ 不该落到背后看不见的甘特上
+      if (store.pluginMarketOpen) return;
 
       // 增删任务、缩进这些结构性操作只属于计划表 —— 事项视图里也不响应：
       // 那里看不到任务，选中行还是从甘特带过来的，按 ⌫ 会删掉一条看不见的活。
-      // AI 复盘同理，而且更容易中招：点完一个选项焦点在按钮上，顺手按 Enter
+      // 插件视图同理（例如 AI 复盘），而且更容易中招：点完一个选项焦点在按钮上，顺手按 Enter
       // 想进下一题，结果是甘特里多出一条空任务
       if (!canEdit("structure", store.viewMode) || !hasTaskOps(store.activeView)) {
         const structural =
@@ -533,6 +538,17 @@ export function Workspace() {
         )}
 
         <button
+          onClick={() => useAppStore.getState().setPluginMarketOpen(true)}
+          title="插件市场"
+          aria-label="插件市场"
+          className="grid size-7 place-items-center rounded-[var(--r-m)] text-[var(--text-dim)] transition-colors hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
+        >
+          <Icon name="plugin" size={15} />
+        </button>
+
+        <ShareButton />
+
+        <button
           onClick={() => openSettings("appearance")}
           title="设置"
           className="grid size-7 place-items-center rounded-[var(--r-m)] text-[var(--text-dim)] transition-colors hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
@@ -541,6 +557,7 @@ export function Workspace() {
         </button>
 
         <SaveIndicator error={saveError} />
+        <AccountMenu compact />
       </div>
 
       <div ref={bodyRef} className="flex min-h-0 flex-1">
@@ -588,6 +605,7 @@ export function Workspace() {
           <Settings initialTab={settingsTab} onClose={closeSettings} />
         )}
       </AnimatePresence>
+      <PluginMarketHost />
 
       {/* ⌘K 在所有视图下都能用，所以挂在根层 */}
       <QuickNote />
@@ -640,8 +658,6 @@ function HintsFor({ view, viewMode }: { view: ViewEntry; viewMode: ViewMode }) {
       return <span>拖卡片改状态，双击看详情</span>;
     case "review":
       return <span className="ml-auto">只读，按计划与实施的差值统计</span>;
-    case "ai-review":
-      return <span>每答一题即存，可随时离开</span>;
     case "items":
       return <span>点类型标签分拣，点圆圈关闭，拖动调整顺序</span>;
     case "milestone":
@@ -845,4 +861,33 @@ function useTabDrag(onDrop: (from: string, to: string, place: "before" | "after"
   };
 
   return { dragKey, over, tabRef, start, consumeJustDragged };
+}
+
+/** 工具条上的「共享」：显示成员头像叠在一起，点开是成员与共享对话框。 */
+function ShareButton() {
+  const members = useAppStore((s) => s.members);
+  const [open, setOpen] = useState(false);
+  const shared = members.length > 1;
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        title={shared ? `${members.length} 个成员` : "共享给这台电脑上的其他账号"}
+        className="flex h-7 items-center gap-1 rounded-[var(--r-m)] px-1.5 text-[var(--text-dim)] transition-colors hover:bg-[var(--row-hover)] hover:text-[var(--text)]"
+      >
+        {shared ? (
+          <span className="flex -space-x-1.5">
+            {members.slice(0, 3).map((m) => (
+              <span key={m.accountId} className="rounded-full ring-2 ring-[var(--surface)]">
+                <Avatar person={m} size={18} />
+              </span>
+            ))}
+          </span>
+        ) : (
+          <Icon name="share" size={15} />
+        )}
+      </button>
+      <AnimatePresence>{open && <ShareDialog onClose={() => setOpen(false)} />}</AnimatePresence>
+    </>
+  );
 }

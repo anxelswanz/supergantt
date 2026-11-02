@@ -27,6 +27,7 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/012_risk_priority.sql"),
     include_str!("../migrations/013_ai_reviews.sql"),
     include_str!("../migrations/014_milestones.sql"),
+    include_str!("../migrations/015_accounts.sql"),
 ];
 
 /// 打开（必要时创建）数据库，跑完迁移再自愈一遍。
@@ -49,6 +50,12 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     for (i, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
         conn.execute_batch(sql)?;
         conn.pragma_update(None, "user_version", (i + 1) as i64)?;
+        // 015 建出来的默认账号叫「我」，SQL 里拿不到系统用户名，这里补上
+        if i == 14 {
+            if let Err(e) = crate::account::name_default_account(conn) {
+                eprintln!("[migrate] 默认账号改名失败：{e}");
+            }
+        }
     }
     repair(conn)
 }
@@ -287,7 +294,8 @@ mod tests {
     /// 写成 `len() - 1` 的话下一次加迁移就把这条测试悄悄挪到了别的内容上。
     #[test]
     fn ai_review_view_is_enabled_for_existing_users_once() {
-        let target = MIGRATIONS.len() - 2;
+        let target = 12;
+        assert!(MIGRATIONS[target].contains("ai_reviews"));
         let run = |saved: Option<&str>| -> Option<String> {
             let conn = Connection::open_in_memory().unwrap();
             conn.pragma_update(None, "foreign_keys", "ON").unwrap();
@@ -320,7 +328,8 @@ mod tests {
     /// 所以测一遍「没存过的不动 / 已有的补上 / 已有的不重复 / 坏 JSON 不碰」就够。
     #[test]
     fn milestone_view_is_enabled_for_existing_users_once() {
-        let target = MIGRATIONS.len() - 1;
+        let target = 13;
+        assert!(MIGRATIONS[target].contains("milestones"));
         let run = |saved: Option<&str>| -> Option<String> {
             let conn = Connection::open_in_memory().unwrap();
             conn.pragma_update(None, "foreign_keys", "ON").unwrap();
@@ -795,7 +804,7 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO people (id, name, color, created_at) VALUES (1, '张三', '#4f46e5', '0')",
+            "INSERT INTO people (id, project_id, name, color, created_at) VALUES (1, 1, '张三', '#4f46e5', '0')",
             [],
         )
         .unwrap();
@@ -820,20 +829,129 @@ mod tests {
         assert_eq!(person, None);
     }
 
+    /// 重名只在项目内挡：两个项目各有一个「张三」是常态。
     #[test]
-    fn people_names_must_be_unique() {
+    fn people_names_are_unique_per_project() {
         let conn = mem();
-        conn.execute(
-            "INSERT INTO people (name, color, created_at) VALUES ('张三', '#000000', '0')",
-            [],
+        conn.execute_batch(
+            "INSERT INTO projects (id, name, created_at, updated_at) VALUES (1, 'A', '0', '0'), (2, 'B', '0', '0');
+             INSERT INTO people (project_id, name, color, created_at) VALUES (1, '张三', '#000000', '0');",
         )
         .unwrap();
         assert!(conn
             .execute(
-                "INSERT INTO people (name, color, created_at) VALUES ('张三', '#111111', '0')",
+                "INSERT INTO people (project_id, name, color, created_at) VALUES (1, '张三', '#111111', '0')",
                 [],
             )
             .is_err());
+        conn.execute(
+            "INSERT INTO people (project_id, name, color, created_at) VALUES (2, '张三', '#111111', '0')",
+            [],
+        )
+        .unwrap();
+    }
+
+    /// 015 是第二次动用户既有人员数据的迁移（第一次是 002），逐条验：
+    /// 一个人用在两个项目里要拆成两行、任务和事项各自指向本项目那一份、
+    /// 没用过的人不迁、项目和设置归默认账号、折叠状态搬到默认账号名下。
+    #[test]
+    fn migration_015_splits_people_per_project_and_assigns_default_account() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        for sql in &MIGRATIONS[..14] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO projects (id, name, created_at, updated_at) VALUES (1, 'A', '0', '0'), (2, 'B', '0', '0');
+             INSERT INTO people (id, name, color, created_at) VALUES (1, '张三', '#111111', '0'), (2, '李四', '#222222', '0'), (3, '闲人', '#333333', '0');
+             INSERT INTO tasks (id, project_id, name, start_date, end_date, person_id, collapsed, created_at, updated_at)
+             VALUES (1, 1, 'a', '2026-08-03', '2026-08-07', 1, 1, '0', '0'),
+                    (2, 2, 'b', '2026-08-03', '2026-08-07', 1, 0, '0', '0'),
+                    (3, 2, 'c', '2026-08-03', '2026-08-07', NULL, 0, '0', '0');
+             INSERT INTO item_notes (project_id, name, person_id, created_at, updated_at) VALUES (2, '记一笔', 2, 0, 0);
+             INSERT INTO comments (task_id, content, created_at) VALUES (1, '嗯', 0);
+             INSERT INTO settings (key, value) VALUES ('bar_color_by', 'assignee');",
+        )
+        .unwrap();
+
+        conn.execute_batch(MIGRATIONS[14]).unwrap();
+
+        let fk_on: i64 = conn.pragma_query_value(None, "foreign_keys", |r| r.get(0)).unwrap();
+        assert_eq!(fk_on, 1, "迁移结束必须把外键开回来");
+        let violations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(violations, 0);
+
+        // 张三用在两个项目 → 两行；李四只在项目 2 的事项上 → 一行；闲人不迁
+        let rows: Vec<(i64, String)> = conn
+            .prepare("SELECT project_id, name FROM people ORDER BY project_id, name")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![(1, "张三".to_string()), (2, "张三".to_string()), (2, "李四".to_string())]
+        );
+
+        // 每个任务指向**本项目**的那个张三
+        let cross: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks t JOIN people p ON p.id = t.person_id WHERE p.project_id <> t.project_id",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cross, 0);
+        let assigned: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tasks WHERE person_id IS NOT NULL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(assigned, 2, "迁移不能弄丢任何一个任务的负责人");
+        let note_person: String = conn
+            .query_row(
+                "SELECT p.name FROM item_notes n JOIN people p ON p.id = n.person_id",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(note_person, "李四");
+
+        let owners: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM project_members WHERE account_id = 1 AND role = 'owner'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(owners, 2);
+
+        let setting: String = conn
+            .query_row(
+                "SELECT value FROM account_settings WHERE account_id = 1 AND key = 'bar_color_by'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(setting, "assignee");
+
+        let collapsed: i64 = conn
+            .query_row("SELECT COUNT(*) FROM task_view_state WHERE account_id = 1 AND task_id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(collapsed, 1);
+
+        let author: i64 = conn
+            .query_row("SELECT author_id FROM comments", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(author, 1);
+
+        // 项目名不再全库唯一（改由应用层按账号可见范围检查）
+        conn.execute(
+            "INSERT INTO projects (name, created_at, updated_at) VALUES ('A', '0', '0')",
+            [],
+        )
+        .unwrap();
     }
 
     #[test]

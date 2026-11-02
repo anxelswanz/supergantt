@@ -182,14 +182,14 @@ export async function exportItems(
 }
 
 /**
- * AI 复盘文档 → Markdown 或 Word。内容由调用方传入，不从 store 取：
+ * 一份 Markdown 文档 → .md 或 Word（插件的 api.export.document）。内容由调用方传入，不从 store 取：
  * 用户可能正改到一半，导出的必须是他眼前那一版。
  */
-export async function exportAiReview(
+export async function exportMarkdownDocument(
   format: "md" | "docx",
-  input: { projectName: string; title: string; markdown: string },
+  input: { projectName: string; title: string; markdown: string; fileName?: string },
 ): Promise<ExportResult> {
-  const { buildReviewDocx, reviewFileName } = await import("./aiReview");
+  const { buildReviewDocx, reviewFileName } = await import("./markdownDoc");
   const exportedAt = new Date();
 
   // 同另外几条路：先生成再弹对话框
@@ -202,7 +202,9 @@ export async function exportAiReview(
   }
 
   const path = await save({
-    defaultPath: reviewFileName(input.projectName, input.title, exportedAt, format),
+    defaultPath: input.fileName?.trim()
+      ? `${input.fileName.trim().replace(/[\\/:*?"<>|]/g, "_").slice(0, 80)}.${format}`
+      : reviewFileName(input.projectName, input.title, exportedAt, format),
     filters: [
       format === "md"
         ? { name: "Markdown", extensions: ["md"] }

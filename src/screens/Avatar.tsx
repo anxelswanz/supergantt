@@ -40,7 +40,8 @@ function textOn(hex: string): string {
 }
 
 interface Props {
-  person: Person | null | undefined;
+  /** 人员或账号都行：只用到名字、颜色、头像三样 */
+  person: Pick<Person, "name" | "color" | "avatar"> | null | undefined;
   size?: number;
   /** 未指派时显示一个虚线圈占位，保持行内元素对齐 */
   placeholder?: boolean;

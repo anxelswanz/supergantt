@@ -101,6 +101,18 @@ pub struct Person {
     /// base64 data URI；为 None 时前端回退到首字母头像
     pub avatar: Option<String>,
     pub sort_order: f64,
+    /// 所属项目。人员从 015 起归项目，见 migrations/015_accounts.sql
+    #[serde(default)]
+    pub project_id: i64,
+    /// 绑定的本机账号；None = 没有账号的人
+    #[serde(default)]
+    pub account_id: Option<i64>,
+    /// 记住的账号 uuid。绑定时等于账号的 uuid；导入后本机没有这个账号时
+    /// account_id 为空，但这里留着，以后能认出是谁
+    #[serde(default)]
+    pub account_uuid: Option<String>,
+    #[serde(default)]
+    pub uuid: String,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -110,7 +122,10 @@ pub struct ProjectData {
     pub tasks: Vec<TaskRow>,
     pub dependencies: Vec<DependencyRow>,
     pub baselines: Vec<BaselineRow>,
+    /// 本项目的人员名册
     pub people: Vec<Person>,
+    /// 当前账号在这个项目里的角色：'owner' | 'editor'。界面据此收起所有者才有的入口
+    pub role: String,
     /**
      * 全局下一个可用的任务 id。
      *
@@ -132,6 +147,10 @@ pub struct ProjectSummary {
     pub leaf_count: i64,
     pub overdue_count: i64,
     pub progress: f64,
+    /// 当前账号在这个项目里的角色：'owner' | 'editor'
+    pub role: String,
+    /// 成员数。大于 1 就是共享项目，卡片上要标出来
+    pub member_count: i64,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -165,6 +184,8 @@ pub struct Comment {
     pub task_id: i64,
     pub content: String,
     pub created_at: i64,
+    /// 写的人。None = 账号已删除
+    pub author_id: Option<i64>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -187,6 +208,7 @@ pub struct DailyNote {
     /// 什么时候写的。和 day 不是一回事 —— 周五补记周三的事，两者相差两天
     pub created_at: i64,
     pub updated_at: i64,
+    pub author_id: Option<i64>,
 }
 
 /* ------------------------------------------------------------------ */
@@ -224,6 +246,8 @@ pub struct ItemNote {
     pub resolution: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    #[serde(default)]
+    pub author_id: Option<i64>,
 }
 
 /**
@@ -244,6 +268,14 @@ pub struct ItemKind {
     /// 内置行：可改名改色，不可删
     pub builtin: bool,
     pub sort_order: f64,
+    /// 当前账号能不能改、删它。内置的人人能改；自定义的只有创建者能。
+    /// 别人共享项目里用到的类型也会列出来（否则显示不出标签），但这里是 false
+    #[serde(default = "yes")]
+    pub editable: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /**
@@ -268,6 +300,8 @@ pub struct AiReview {
     /// Unix 秒
     pub created_at: i64,
     pub updated_at: i64,
+    #[serde(default)]
+    pub author_id: Option<i64>,
 }
 
 /**
@@ -292,4 +326,71 @@ pub struct Milestone {
     /// Unix 秒
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/* ------------------------------------------------------------------ */
+/* 账号                                                                */
+/* ------------------------------------------------------------------ */
+
+/// 一个本机账号。密码哈希永远不出库，界面只需要知道「有没有设密码」。
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Account {
+    pub id: i64,
+    pub uuid: String,
+    pub name: String,
+    pub color: String,
+    pub avatar: Option<String>,
+    pub has_password: bool,
+    pub sort_order: f64,
+}
+
+/// 项目成员：一个能打开这个项目的账号。
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Member {
+    pub account_id: i64,
+    pub name: String,
+    pub color: String,
+    pub avatar: Option<String>,
+    /// 'owner' | 'editor'
+    pub role: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRef {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedProjectRef {
+    pub id: i64,
+    pub name: String,
+    /// 除自己以外的成员 —— 接手人只能从这里选
+    pub members: Vec<Member>,
+}
+
+/// 删除账号前给用户看的清单。
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteAccountPlan {
+    pub last_account: bool,
+    /// 只有自己的项目：随账号一起删除
+    pub solo_projects: Vec<ProjectRef>,
+    /// 已共享出去的项目：每个都要指定一位成员接手
+    pub shared_projects: Vec<SharedProjectRef>,
+}
+
+/// 共享前的预检。
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SharePreview {
+    pub already_member: bool,
+    /// 对方已经能看到一个同名项目 —— 共享会被拒绝
+    pub name_clash: bool,
+    /// 名册里和对方同名、还没绑定账号的人员。界面要问「是不是同一个人」
+    pub same_name_person: Option<Person>,
 }

@@ -16,7 +16,8 @@ type Result<T> = std::result::Result<T, String>;
 /// 两台机器版本不同是主线场景，单整数版本号会让加个字段就锁死旧机器。
 pub const FORMAT_MAJOR: u32 = 1;
 /// 1.1 相对 1.0 全是新增字段：itemNotes / itemKinds，risks 的 id/priority/resolvedAt/resolution，tasks.autoRollover。
-pub const FORMAT_MINOR: u32 = 1;
+/// 1.2：people.json 的 accountUuid（人员绑定的账号，见 migrations/015）。
+pub const FORMAT_MINOR: u32 = 2;
 
 pub const EXT: &str = "ganttproj";
 
@@ -187,6 +188,10 @@ pub struct FilePerson {
     /// 头像不是标准 data URI 时的兜底：原样带走，不能静默丢
     pub avatar_inline: Option<String>,
     pub sort_order: f64,
+    /// 1.2 新增：绑定的账号 uuid。只带 uuid —— 账号的名字、密码、成员关系都不出本机。
+    /// 导入方本机有这个账号就重新绑定，没有就记着（DESIGN.md §13）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_uuid: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -521,20 +526,25 @@ pub fn collect(conn: &Connection, project_id: i64) -> rusqlite::Result<(Bundle, 
         baselines.push(FileBaseline { name, created_at, tasks: bt });
     }
 
-    // 人员：只带本项目用到的，people 是全局表
-    let used: HashSet<&str> = tasks.iter().filter_map(|t| t.person.as_deref()).collect();
+    // 人员：本项目的整份名册（人员从 015 起归项目，名册本身就是项目的一部分）。
+    // 账号 uuid 优先取当前绑定的账号，没绑定时取记着的那个
     let mut people: Vec<FilePerson> = Vec::new();
     let mut avatars: HashMap<String, Vec<u8>> = HashMap::new();
 
-    let all: Vec<(String, String, Option<String>, f64)> = conn
-        .prepare("SELECT name, color, avatar, sort_order FROM people ORDER BY sort_order, id")?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+    #[allow(clippy::type_complexity)]
+    let all: Vec<(String, String, Option<String>, f64, Option<String>)> = conn
+        .prepare(
+            "SELECT p.name, p.color, p.avatar, p.sort_order, COALESCE(a.uuid, p.account_uuid)
+               FROM people p LEFT JOIN accounts a ON a.id = p.account_id
+              WHERE p.project_id = ?1
+              ORDER BY p.sort_order, p.id",
+        )?
+        .query_map(params![project_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
         .collect::<rusqlite::Result<_>>()?;
 
-    for (name, color, avatar, sort_order) in all {
-        if !used.contains(name.as_str()) {
-            continue;
-        }
+    for (name, color, avatar, sort_order, account_uuid) in all {
         let mut avatar_file = None;
         let mut avatar_inline = None;
         if let Some(uri) = avatar {
@@ -551,7 +561,7 @@ pub fn collect(conn: &Connection, project_id: i64) -> rusqlite::Result<(Bundle, 
                 None => avatar_inline = Some(uri.clone()),
             }
         }
-        people.push(FilePerson { name, color, avatar_file, avatar_inline, sort_order });
+        people.push(FilePerson { name, color, avatar_file, avatar_inline, sort_order, account_uuid });
     }
 
     /* ---- 事项 ---- */
@@ -1114,9 +1124,28 @@ fn version_gate(a: &Archive) -> (Vec<String>, Vec<String>) {
     (problems, warnings)
 }
 
-pub fn preview(conn: &Connection, a: &Archive) -> rusqlite::Result<ImportPreview> {
-    let (mut problems, warnings) = version_gate(a);
+/**
+ * 预检。多账号下对号规则多了一层：只有**自己是所有者**的项目能被覆盖。
+ *
+ * - uuid 命中、自己是所有者 → 覆盖
+ * - uuid 命中、但项目不归自己（别的账号的，或自己只是编辑者）→ 作为新项目导入，
+ *   并说明原因。新项目会拿一个新 uuid（apply_in），因为 uuid 全库唯一
+ * - 名字兜底只在自己拥有的项目里找；和自己看得见的其他项目撞名就请用户改名
+ */
+pub fn preview(conn: &Connection, a: &Archive, me: i64) -> rusqlite::Result<ImportPreview> {
+    let (mut problems, mut warnings) = version_gate(a);
     problems.extend(validate(a));
+
+    let owned = |id: i64| -> rusqlite::Result<bool> {
+        Ok(conn
+            .query_row(
+                "SELECT 1 FROM project_members WHERE project_id = ?1 AND account_id = ?2 AND role = 'owner'",
+                params![id, me],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    };
 
     // uuid 优先、名字兜底
     let by_uuid: Option<i64> = conn
@@ -1127,11 +1156,29 @@ pub fn preview(conn: &Connection, a: &Archive) -> rusqlite::Result<ImportPreview
         )
         .optional()?;
     let matched = match by_uuid {
-        Some(id) => Some((id, "uuid")),
+        Some(id) if owned(id)? => Some((id, "uuid")),
+        Some(id) => {
+            let member = conn
+                .query_row(
+                    "SELECT 1 FROM project_members WHERE project_id = ?1 AND account_id = ?2",
+                    params![id, me],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            warnings.push(if member {
+                "本机已有这个项目，但你不是它的所有者，不能覆盖它。将作为一个新项目导入。".to_string()
+            } else {
+                "这台电脑上的另一个账号已有这个项目。将作为你的一个新项目导入，两份互不影响。".to_string()
+            });
+            None
+        }
         None => conn
             .query_row(
-                "SELECT id FROM projects WHERE name = ?1",
-                params![a.bundle.project.name],
+                "SELECT p.id FROM projects p
+                   JOIN project_members m ON m.project_id = p.id AND m.account_id = ?2 AND m.role = 'owner'
+                  WHERE p.name = ?1",
+                params![a.bundle.project.name, me],
                 |r| r.get::<_, i64>(0),
             )
             .optional()?
@@ -1143,20 +1190,27 @@ pub fn preview(conn: &Connection, a: &Archive) -> rusqlite::Result<ImportPreview
     let mut name_conflict = false;
     let mut existing = None;
 
+    // 名字只需在「自己看得见的项目」里唯一（migrations/015）
+    let visible_clash = |exclude: i64| -> rusqlite::Result<bool> {
+        Ok(conn
+            .query_row(
+                "SELECT 1 FROM projects p JOIN project_members m ON m.project_id = p.id
+                  WHERE m.account_id = ?3 AND p.name = ?1 AND p.id <> ?2",
+                params![file.name, exclude, me],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    };
     if let Some((id, _)) = matched {
         let local = local_summary(conn, id)?;
         if local.name != file.name {
             rename_to = Some(file.name.clone());
-            name_conflict = conn
-                .query_row(
-                    "SELECT 1 FROM projects WHERE name = ?1 AND id <> ?2",
-                    params![file.name, id],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some();
+            name_conflict = visible_clash(id)?;
         }
         existing = Some(local);
+    } else {
+        name_conflict = visible_clash(-1)?;
     }
 
     Ok(ImportPreview {
@@ -1216,9 +1270,10 @@ pub fn apply(
     target_id: Option<i64>,
     name: &str,
     backup_path: Option<String>,
+    me: i64,
 ) -> Result<ImportOutcome> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let (project_id, new_people) = apply_in(&tx, a, target_id, name)?;
+    let (project_id, new_people) = apply_in(&tx, a, target_id, name, me)?;
     tx.commit().map_err(|e| e.to_string())?;
 
     Ok(ImportOutcome {
@@ -1232,69 +1287,36 @@ pub fn apply(
 }
 
 /// 把一份项目写进库，不开也不提交事务（调用方决定边界）。返回（项目 id, 新建的负责人）。
+///
+/// 新建的项目归 `me` 所有；覆盖只允许覆盖 `me` 拥有的项目（调用方已在预检里保证，
+/// 这里再挡一次：这是写库前的最后一道门）。
 pub(crate) fn apply_in(
     tx: &Connection,
     a: &Archive,
     target_id: Option<i64>,
     name: &str,
+    me: i64,
 ) -> Result<(i64, Vec<String>)> {
     let ts = now_secs().to_string();
-
-    // ---- 人员：同名即同人，本地优先，头像缺失才补 ----
-    let mut person_id: HashMap<&str, i64> = HashMap::new();
-    let mut new_people = Vec::new();
-    for p in &a.people {
-        let avatar = p
-            .avatar_file
-            .as_ref()
-            .and_then(|f| a.avatars.get(f).map(|bytes| (f, bytes)))
-            .map(|(f, bytes)| format!("data:{};base64,{}", mime_for(f), encode_base64(bytes)))
-            .or_else(|| p.avatar_inline.clone());
-
-        let found: Option<(i64, Option<String>)> = tx
-            .query_row(
-                "SELECT id, avatar FROM people WHERE name = ?1",
-                params![p.name],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()
-            .map_err(|e| e.to_string())?;
-
-        match found {
-            Some((id, existing_avatar)) => {
-                // 颜色一律不动：people 是全局表，改了会连带改掉本机其他项目。头像只在本机为空时补
-                if existing_avatar.is_none() {
-                    if let Some(uri) = &avatar {
-                        tx.execute(
-                            "UPDATE people SET avatar = ?2 WHERE id = ?1",
-                            params![id, uri],
-                        )
-                        .map_err(|e| e.to_string())?;
-                    }
-                }
-                person_id.insert(p.name.as_str(), id);
-            }
-            None => {
-                tx.execute(
-                    "INSERT INTO people (name, color, avatar, sort_order, created_at)
-                     VALUES (?1, ?2, ?3,
-                             (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM people), ?4)",
-                    params![p.name, p.color, avatar, ts],
-                )
-                .map_err(|e| e.to_string())?;
-                person_id.insert(p.name.as_str(), tx.last_insert_rowid());
-                new_people.push(p.name.clone());
-            }
-        }
-    }
 
     // ---- 项目行 ----
     let project_id = match target_id {
         Some(id) => {
+            gantt_core::account::require_owner(tx, id, me)?;
+            // uuid 已被别的项目占着时（例如本机另一个账号有同一个项目）保留本机原 uuid
+            let uuid_free = tx
+                .query_row(
+                    "SELECT 1 FROM projects WHERE uuid = ?1 AND id <> ?2",
+                    params![a.bundle.project.uuid, id],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?
+                .is_none();
             tx.execute(
                 "UPDATE projects
                     SET name = ?2, color = ?3, work_days = ?4, holidays = ?5,
-                        uuid = ?6, updated_at = ?7
+                        uuid = CASE WHEN ?8 THEN ?6 ELSE uuid END, updated_at = ?7
                   WHERE id = ?1",
                 params![
                     id,
@@ -1304,11 +1326,13 @@ pub(crate) fn apply_in(
                     a.bundle.project.holidays,
                     a.bundle.project.uuid,
                     a.bundle.project.updated_at,
+                    uuid_free,
                 ],
             )
             .map_err(|e| name_taken(e, name))?;
 
-            // 旧内容清空。risks / comments 靠 tasks 的 ON DELETE CASCADE 跟着走
+            // 旧内容清空。risks / comments 靠 tasks 的 ON DELETE CASCADE 跟着走。
+            // 人员名册不清：同名的沿用本机那一行（绑定关系、头像都留着），见下
             for sql in [
                 "DELETE FROM dependencies WHERE project_id = ?1",
                 "DELETE FROM baselines WHERE project_id = ?1",
@@ -1322,6 +1346,18 @@ pub(crate) fn apply_in(
             id
         }
         None => {
+            // uuid 全库唯一。本机已有同一个 uuid（别的账号的那一份）时给新项目一个新 uuid ——
+            // 空串交给触发器生成（migrations/007）
+            let uuid_taken = tx
+                .query_row(
+                    "SELECT 1 FROM projects WHERE uuid = ?1",
+                    params![a.bundle.project.uuid],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?
+                .is_some();
+            let uuid = if uuid_taken { String::new() } else { a.bundle.project.uuid.clone() };
             tx.execute(
                 "INSERT INTO projects (name, color, uuid, work_days, holidays,
                                        sort_order, created_at, updated_at)
@@ -1330,7 +1366,7 @@ pub(crate) fn apply_in(
                 params![
                     name,
                     a.bundle.project.color,
-                    a.bundle.project.uuid,
+                    uuid,
                     a.bundle.project.work_days,
                     a.bundle.project.holidays,
                     a.bundle.project.created_at,
@@ -1338,9 +1374,67 @@ pub(crate) fn apply_in(
                 ],
             )
             .map_err(|e| name_taken(e, name))?;
-            tx.last_insert_rowid()
+            let id = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT INTO project_members (project_id, account_id, role, added_at) VALUES (?1, ?2, 'owner', ?3)",
+                params![id, me, ts],
+            )
+            .map_err(|e| e.to_string())?;
+            id
         }
     };
+
+    // ---- 人员：项目内同名即同人，本地优先，头像缺失才补 ----
+    let mut person_id: HashMap<&str, i64> = HashMap::new();
+    let mut new_people = Vec::new();
+    for p in &a.people {
+        let avatar = p
+            .avatar_file
+            .as_ref()
+            .and_then(|f| a.avatars.get(f).map(|bytes| (f, bytes)))
+            .map(|(f, bytes)| format!("data:{};base64,{}", mime_for(f), encode_base64(bytes)))
+            .or_else(|| p.avatar_inline.clone());
+
+        let found: Option<(i64, Option<String>)> = tx
+            .query_row(
+                "SELECT id, avatar FROM people WHERE project_id = ?1 AND name = ?2",
+                params![project_id, p.name],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+
+        let id = match found {
+            Some((id, existing_avatar)) => {
+                // 颜色不动：本机这一行可能已经被人改过色。头像只在本机为空时补
+                if existing_avatar.is_none() {
+                    if let Some(uri) = &avatar {
+                        tx.execute(
+                            "UPDATE people SET avatar = ?2 WHERE id = ?1",
+                            params![id, uri],
+                        )
+                        .map_err(|e| e.to_string())?;
+                    }
+                }
+                id
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO people (project_id, name, color, avatar, sort_order, created_at)
+                     VALUES (?1, ?2, ?3, ?4,
+                             (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM people WHERE project_id = ?1), ?5)",
+                    params![project_id, p.name, p.color, avatar, ts],
+                )
+                .map_err(|e| e.to_string())?;
+                new_people.push(p.name.clone());
+                tx.last_insert_rowid()
+            }
+        };
+        if let Some(uuid) = &p.account_uuid {
+            rebind(tx, project_id, id, uuid, name, &ts)?;
+        }
+        person_id.insert(p.name.as_str(), id);
+    }
 
     // ---- 任务：文件内 id → 本机 id ----
     //
@@ -1428,6 +1522,7 @@ pub(crate) fn apply_in(
     }
     for c in &a.bundle.comments {
         tx.execute(
+            // 作者不跨机器：文件里不带账号信息，导入的评论作者为空（界面显示为「未知」）
             "INSERT INTO comments (task_id, content, created_at) VALUES (?1, ?2, ?3)",
             params![remap[&c.task_id], c.content, c.created_at],
         )
@@ -1475,14 +1570,14 @@ pub(crate) fn apply_in(
 
     /* ---- 事项类型：只补缺的，绝不覆盖本地已有的 ---- */
     //
-    // 同人员：item_kinds 是全局表，覆盖一个 key 会改掉本机所有项目里那个类型的样子。
+    // 覆盖一个 key 会改掉本机所有项目里那个类型的样子。新补的类型归导入的人（migrations/015）
     for k in &a.bundle.item_kinds {
         tx.execute(
             "INSERT OR IGNORE INTO item_kinds
-                 (key, label, color, requires_note, builtin, sort_order)
+                 (key, label, color, requires_note, builtin, sort_order, account_id)
              VALUES (?1, ?2, ?3, ?4, 0,
-                     (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM item_kinds))",
-            params![k.key, k.label, k.color, k.requires_note as i64],
+                     (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM item_kinds), ?5)",
+            params![k.key, k.label, k.color, k.requires_note as i64, me],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -1539,6 +1634,57 @@ pub(crate) fn apply_in(
     Ok((project_id, new_people))
 }
 
+/**
+ * 按文件里记着的账号 uuid 把人员接回本机账号（Q12）。
+ *
+ * - 本机有这个账号、它在项目里还没有对应的人员：绑定；不是成员就加为编辑者
+ *   （除非它已经能看到同名项目 —— 那样会在它的列表里出现两个分不清的项目）
+ * - 本机没有这个账号：只记 uuid，以后建了 / 导入了这个账号时自动接上
+ */
+fn rebind(tx: &Connection, project_id: i64, person: i64, uuid: &str, project_name: &str, ts: &str) -> Result<()> {
+    tx.execute(
+        "UPDATE people SET account_uuid = ?2 WHERE id = ?1 AND account_id IS NULL",
+        params![person, uuid],
+    )
+    .map_err(|e| e.to_string())?;
+    let Some(account) = tx
+        .query_row("SELECT id FROM accounts WHERE uuid = ?1", params![uuid], |r| r.get::<_, i64>(0))
+        .optional()
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(());
+    };
+    let taken = tx
+        .query_row(
+            "SELECT 1 FROM people WHERE project_id = ?1 AND account_id = ?2",
+            params![project_id, account],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .is_some();
+    if taken {
+        return Ok(());
+    }
+    let member = gantt_core::account::role_of(tx, project_id, account)?.is_some();
+    if !member {
+        if gantt_core::account::name_visible_to(tx, account, project_name, Some(project_id))? {
+            return Ok(());
+        }
+        tx.execute(
+            "INSERT INTO project_members (project_id, account_id, role, added_at) VALUES (?1, ?2, 'editor', ?3)",
+            params![project_id, account, ts],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.execute(
+        "UPDATE people SET account_id = ?2 WHERE id = ?1 AND account_id IS NULL",
+        params![person, account],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /* ------------------------------------------------------------------ */
 /* Tauri 命令                                                          */
 /* ------------------------------------------------------------------ */
@@ -1551,7 +1697,9 @@ pub fn export_project(
     project_id: i64,
     path: String,
 ) -> Result<String> {
+    let me = db.me()?;
     let conn = db.0.lock().map_err(|e| e.to_string())?;
+    gantt_core::account::require_member(&conn, project_id, me)?;
     let (bundle, people, avatars) = collect(&conn, project_id).map_err(|e| e.to_string())?;
     let path = PathBuf::from(path);
     write_archive(
@@ -1569,8 +1717,9 @@ pub fn export_project(
 #[tauri::command]
 pub fn inspect_import(db: tauri::State<Db>, path: String) -> Result<ImportPreview> {
     let archive = read_archive(Path::new(&path))?;
+    let me = db.me()?;
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    preview(&conn, &archive).map_err(|e| e.to_string())
+    preview(&conn, &archive, me).map_err(|e| e.to_string())
 }
 
 /// 真正落库。文件重新读、重新校验，不复用预检结果（中间可能被云盘同步换掉）。
@@ -1593,7 +1742,17 @@ pub fn commit_import(
         return Err(problems.join("\n"));
     }
 
+    let me = db.me()?;
     let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+    // 预检到提交之间什么都可能变（另一个窗口改了名、所有权被移交），这里按当前状态重新判一次
+    let accounts = match target_id {
+        Some(id) => {
+            gantt_core::account::require_owner(&conn, id, me)?;
+            gantt_core::account::member_ids(&conn, id)?
+        }
+        None => vec![me],
+    };
+    gantt_core::account::check_project_name(&conn, target_id, &accounts, &name)?;
 
     // 覆盖前把本机版整份导成 .ganttproj，走正常导出路径，「撤销」即再导入它
     let backup_path = match target_id {
@@ -1621,7 +1780,7 @@ pub fn commit_import(
         }
     };
 
-    apply(&mut conn, &archive, target_id, &name, backup_path)
+    apply(&mut conn, &archive, target_id, &name, backup_path, me)
 }
 
 /// 文件名里的非法字符换成下划线：项目名是自由文本，`/` 在 macOS 上是路径分隔符。
@@ -1679,20 +1838,25 @@ mod tests {
         )
         .unwrap();
         let pid = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO project_members (project_id, account_id, role) VALUES (?1, 1, 'owner')",
+            params![pid],
+        )
+        .unwrap();
 
         // 一个有头像、一个没有
         conn.execute(
-            "INSERT INTO people (name, color, avatar, sort_order, created_at)
-             VALUES ('张三', '#0ea5e9', 'data:image/png;base64,UEsDBBQA', 1, '0'),
-                    ('李四', '#059669', NULL, 2, '0')",
-            [],
+            "INSERT INTO people (project_id, name, color, avatar, sort_order, created_at)
+             VALUES (?1, '张三', '#0ea5e9', 'data:image/png;base64,UEsDBBQA', 1, '0'),
+                    (?1, '李四', '#059669', NULL, 2, '0')",
+            params![pid],
         )
         .unwrap();
         let zhang: i64 = conn
-            .query_row("SELECT id FROM people WHERE name = '张三'", [], |r| r.get(0))
+            .query_row("SELECT id FROM people WHERE project_id = ?1 AND name = '张三'", params![pid], |r| r.get(0))
             .unwrap();
         let li: i64 = conn
-            .query_row("SELECT id FROM people WHERE name = '李四'", [], |r| r.get(0))
+            .query_row("SELECT id FROM people WHERE project_id = ?1 AND name = '李四'", params![pid], |r| r.get(0))
             .unwrap();
 
         let task = |parent: Option<i64>, name: &str, s: &str, e: &str, person: Option<i64>, sort: f64| {
@@ -1855,7 +2019,7 @@ mod tests {
         seed(&b, "干扰项目");
         b.execute("UPDATE projects SET uuid = 'other' WHERE name = '干扰项目'", []).unwrap();
 
-        let outcome = apply(&mut b, &archive, None, "厂房建设", None).unwrap();
+        let outcome = apply(&mut b, &archive, None, "厂房建设", None, 1).unwrap();
         assert_eq!(outcome.task_count, 3);
 
         let (bundle2, people2, avatars2) = collect(&b, outcome.project_id).unwrap();
@@ -1883,7 +2047,7 @@ mod tests {
         b.execute("UPDATE projects SET uuid = 'other' WHERE name = '干扰项目'", [])
             .unwrap();
 
-        let outcome = apply(&mut b, &archive, None, "源项目", None).unwrap();
+        let outcome = apply(&mut b, &archive, None, "源项目", None, 1).unwrap();
 
         // 阻碍：ref 的前半段必须是**目标库里**那条「放线」的 id
         let blocker_ref: String = b
@@ -1964,7 +2128,7 @@ mod tests {
         )
         .unwrap();
 
-        apply(&mut b, &archive, None, "源项目", None).unwrap();
+        apply(&mut b, &archive, None, "源项目", None, 1).unwrap();
 
         let (label, color): (String, String) = b
             .query_row(
@@ -2000,7 +2164,7 @@ mod tests {
             .unwrap();
         assert!(before > 0);
 
-        apply(&mut b, &archive, Some(target), "P", None).unwrap();
+        apply(&mut b, &archive, Some(target), "P", None, 1).unwrap();
 
         let after: i64 = b
             .query_row(
@@ -2031,25 +2195,102 @@ mod tests {
         assert!(li.avatar_file.is_none());
     }
 
-    /// 只带这个项目用到的人。
+    /// 只带这个项目的名册，别的项目的人不跟着走；绑定的账号只带 uuid。
     #[test]
-    fn only_exports_people_in_use() {
+    fn exports_this_projects_roster_with_account_uuid() {
         let a = mem();
         let pid = seed(&a, "P");
-        a.execute(
-            "INSERT INTO people (name, color, sort_order, created_at)
-             VALUES ('王五', '#f97316', 9, '0')",
-            [],
+        a.execute_batch(
+            "INSERT INTO projects (id, name, created_at, updated_at) VALUES (99, '别的', '0', '0');
+             INSERT INTO people (project_id, name, color, sort_order, created_at)
+             VALUES (99, '王五', '#f97316', 9, '0');
+             UPDATE people SET account_id = 1 WHERE name = '张三';",
         )
         .unwrap();
+        let uuid: String = a.query_row("SELECT uuid FROM accounts WHERE id = 1", [], |r| r.get(0)).unwrap();
         let (_, people, _) = collect(&a, pid).unwrap();
         assert_eq!(
             people.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
             vec!["张三", "李四"]
         );
+        assert_eq!(people[0].account_uuid.as_deref(), Some(uuid.as_str()));
+        assert_eq!(people[1].account_uuid, None);
     }
 
-    /// 同名即同人：颜色一律不动（全局表，会影响其他项目），头像只在本机为空时补。
+    /// 导入时按账号 uuid 重新绑定：本机有这个账号就接上并加为成员，没有就记着 uuid。
+    #[test]
+    fn people_are_rebound_by_account_uuid() {
+        let a = mem();
+        let pid = seed(&a, "P");
+        a.execute_batch(
+            "INSERT INTO accounts (name, uuid) VALUES ('乙', 'uuid-yi');
+             UPDATE people SET account_id = (SELECT id FROM accounts WHERE name = '乙') WHERE name = '张三';
+             UPDATE people SET account_uuid = 'uuid-nobody' WHERE name = '李四';",
+        )
+        .unwrap();
+        let (bundle, people, avatars) = collect(&a, pid).unwrap();
+        let path = tmp("rebind.ganttproj");
+        write_archive(&path, "0.1.0", "1", &bundle, &people, &avatars).unwrap();
+        let archive = read_archive(&path).unwrap();
+
+        let mut b = mem();
+        b.execute("INSERT INTO accounts (name, uuid) VALUES ('乙在这台电脑上', 'uuid-yi')", []).unwrap();
+        let yi: i64 = b.query_row("SELECT id FROM accounts WHERE uuid = 'uuid-yi'", [], |r| r.get(0)).unwrap();
+        let outcome = apply(&mut b, &archive, None, "P", None, 1).unwrap();
+
+        let zhang: Option<i64> = b
+            .query_row("SELECT account_id FROM people WHERE name = '张三'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(zhang, Some(yi));
+        assert_eq!(
+            gantt_core::account::role_of(&b, outcome.project_id, yi).unwrap(),
+            Some(gantt_core::account::Role::Editor),
+            "绑定须是成员"
+        );
+        assert_eq!(
+            gantt_core::account::role_of(&b, outcome.project_id, 1).unwrap(),
+            Some(gantt_core::account::Role::Owner),
+            "导入的人是所有者"
+        );
+        let li: (Option<i64>, Option<String>) = b
+            .query_row("SELECT account_id, account_uuid FROM people WHERE name = '李四'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(li, (None, Some("uuid-nobody".to_string())), "对不上的账号只记 uuid");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 别的账号已有同一个项目（同 uuid）时，不能覆盖它，只能作为自己的新项目导入。
+    #[test]
+    fn never_overwrites_a_project_this_account_does_not_own() {
+        let a = mem();
+        let pid = seed(&a, "P");
+        let (bundle, people, avatars) = collect(&a, pid).unwrap();
+        let path = tmp("not-mine.ganttproj");
+        write_archive(&path, "0.1.0", "1", &bundle, &people, &avatars).unwrap();
+        let archive = read_archive(&path).unwrap();
+
+        let mut b = mem();
+        seed(&b, "P"); // 归账号 1
+        b.execute("INSERT INTO accounts (id, name) VALUES (2, '乙')", []).unwrap();
+        let p = preview(&b, &archive, 2).unwrap();
+        assert!(p.target_id.is_none());
+        assert!(!p.name_conflict, "账号 1 的同名项目乙看不见，不算撞名");
+        let outcome = apply(&mut b, &archive, None, "P", None, 2).unwrap();
+        let uuids: i64 = b.query_row("SELECT COUNT(DISTINCT uuid) FROM projects", [], |r| r.get(0)).unwrap();
+        assert_eq!(uuids, 2, "新项目要换一个 uuid");
+        assert!(apply(&mut b, &archive, Some(1), "P", None, 2).is_err(), "不是所有者不能覆盖");
+        assert_eq!(
+            gantt_core::account::role_of(&b, outcome.project_id, 2).unwrap(),
+            Some(gantt_core::account::Role::Owner)
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 覆盖导入时项目内同名即同人：颜色不动（本机可能改过），头像只在本机为空时补。
     #[test]
     fn merges_people_by_name_local_wins() {
         let a = mem();
@@ -2060,15 +2301,14 @@ mod tests {
         let archive = read_archive(&path).unwrap();
 
         let mut b = mem();
-        b.execute(
-            "INSERT INTO people (name, color, avatar, sort_order, created_at)
-             VALUES ('张三', '#111111', 'data:image/png;base64,AAAA', 1, '0'),
-                    ('李四', '#222222', NULL, 2, '0')",
-            [],
+        let target = seed(&b, "P");
+        b.execute_batch(
+            "UPDATE people SET color = '#111111', avatar = 'data:image/png;base64,AAAA' WHERE name = '张三';
+             UPDATE people SET color = '#222222', avatar = NULL WHERE name = '李四';",
         )
         .unwrap();
 
-        let outcome = apply(&mut b, &archive, None, "P", None).unwrap();
+        let outcome = apply(&mut b, &archive, Some(target), "P", None, 1).unwrap();
         assert!(outcome.new_people.is_empty(), "两个人本机都已存在，不该新建");
 
         let zhang: (String, Option<String>) = b
@@ -2109,7 +2349,7 @@ mod tests {
         )
         .unwrap();
 
-        let outcome = apply(&mut b, &archive, Some(target), "厂房建设二期", None).unwrap();
+        let outcome = apply(&mut b, &archive, Some(target), "厂房建设二期", None, 1).unwrap();
         assert_eq!(outcome.project_id, target, "覆盖不该换 id");
         assert!(outcome.overwritten);
 
@@ -2147,7 +2387,7 @@ mod tests {
         let b = mem();
         let t = seed(&b, "旧名字");
         b.execute("UPDATE projects SET uuid='uuid-fixed-0001' WHERE id=?1", params![t]).unwrap();
-        let p = preview(&b, &archive).unwrap();
+        let p = preview(&b, &archive, 1).unwrap();
         assert_eq!(p.matched_by.as_deref(), Some("uuid"));
         assert_eq!(p.rename_to.as_deref(), Some("厂房建设"));
         assert!(!p.name_conflict);
@@ -2156,13 +2396,13 @@ mod tests {
         let c = mem();
         let t2 = seed(&c, "厂房建设");
         c.execute("UPDATE projects SET uuid='completely-different' WHERE id=?1", params![t2]).unwrap();
-        let p = preview(&c, &archive).unwrap();
+        let p = preview(&c, &archive, 1).unwrap();
         assert_eq!(p.matched_by.as_deref(), Some("name"));
         assert!(p.rename_to.is_none());
 
         // 都不匹配 → 全新项目
         let d = mem();
-        let p = preview(&d, &archive).unwrap();
+        let p = preview(&d, &archive, 1).unwrap();
         assert!(p.matched_by.is_none() && p.target_id.is_none());
 
         let _ = std::fs::remove_file(&path);
@@ -2187,8 +2427,13 @@ mod tests {
             [],
         )
         .unwrap();
+        b.execute(
+            "INSERT INTO project_members (project_id, account_id, role) VALUES (?1, 1, 'owner')",
+            params![b.last_insert_rowid()],
+        )
+        .unwrap();
 
-        let p = preview(&b, &archive).unwrap();
+        let p = preview(&b, &archive, 1).unwrap();
         assert_eq!(p.rename_to.as_deref(), Some("办公楼"));
         assert!(p.name_conflict, "改成「办公楼」会和现有项目撞名");
 
@@ -2218,7 +2463,7 @@ mod tests {
         // 全有或全无：有问题就一行都不该写进去
         let mut b = mem();
         let before: i64 = b.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0)).unwrap();
-        let p = preview(&b, &archive).unwrap();
+        let p = preview(&b, &archive, 1).unwrap();
         assert!(!p.problems.is_empty());
         let after: i64 = b.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0)).unwrap();
         assert_eq!(before, after, "预检不能碰库");

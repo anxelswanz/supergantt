@@ -95,6 +95,56 @@ pub fn db_path(dir: &Path) -> PathBuf {
 }
 
 /* ------------------------------------------------------------------ */
+/* 插件数据                                                            */
+/* ------------------------------------------------------------------ */
+
+/// 插件私有数据目录，按账号分开：`plugins/<id>/data/accounts/<账号 uuid>/`。
+///
+/// 放在 `data/` 底下而不是另起一层：安装 / 升级插件时整个 `data/` 会被原样保留
+/// （plugin_store.rs），挪到别处就得在那里再加一条规则。
+pub fn plugin_data_dir(app_data: &Path, plugin_id: &str, account_uuid: &str) -> PathBuf {
+    app_data
+        .join("plugins")
+        .join(plugin_id)
+        .join("data")
+        .join("accounts")
+        .join(account_uuid)
+}
+
+/**
+ * 账号功能之前，插件数据直接放在 `plugins/<id>/data/` 下。把这些老文件搬进
+ * `owner_uuid` 账号的目录（迁移时老数据都归默认账号，见 migrations/015）。
+ *
+ * 幂等：已经搬过的（`data/` 下只剩 `accounts/`）什么也不做；目标里已有同名文件的
+ * 跳过不覆盖。桌面应用启动和 CLI 的 feishu 命令都会调它 —— 谁先跑都行。
+ */
+pub fn migrate_legacy_plugin_data(app_data: &Path, owner_uuid: &str) -> std::io::Result<()> {
+    let plugins = app_data.join("plugins");
+    let Ok(entries) = std::fs::read_dir(&plugins) else {
+        return Ok(());
+    };
+    for plugin in entries.flatten() {
+        let data = plugin.path().join("data");
+        let Ok(items) = std::fs::read_dir(&data) else {
+            continue;
+        };
+        let target = data.join("accounts").join(owner_uuid);
+        for item in items.flatten() {
+            let name = item.file_name();
+            if name == "accounts" || name.to_string_lossy().starts_with(".write.lock") {
+                continue;
+            }
+            std::fs::create_dir_all(&target)?;
+            let dest = target.join(&name);
+            if !dest.exists() {
+                std::fs::rename(item.path(), dest)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/* ------------------------------------------------------------------ */
 /* 锁文件                                                              */
 /* ------------------------------------------------------------------ */
 

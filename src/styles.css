@@ -202,3 +202,15 @@ kbd {
     transition-duration: 0.12s !important;
   }
 }
+
+/*
+ * 事项录入弹窗的书写区：横线纸。线距 = 行高（32px），字坐在线上；
+ * background-attachment: local 让横线跟着文字一起滚
+ */
+.note-sheet {
+  /* 每 32px 一格，格底一条线；从上内边距（14px）处起算，和第一行文字对齐 */
+  background-image: linear-gradient(to bottom, transparent 31px, var(--rule) 31px);
+  background-size: 100% 32px;
+  background-position: 0 14px;
+  background-attachment: local;
+}

@@ -4,6 +4,7 @@
 //! 拿的是 `tauri::State<Db>`，这里一律改成 `&Connection` —— 这样 CLI（没有 Tauri）
 //! 也能调，桌面应用那层只需锁一下 Mutex 再转调进来。SQL、校验、中文错误一字未改。
 
+use crate::account::{self, require_member, require_owner};
 use crate::calendar::today_iso;
 use crate::model::*;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -78,16 +79,38 @@ fn map_task(row: &rusqlite::Row) -> rusqlite::Result<TaskRow> {
     })
 }
 
+/// 带作者的内容删除前的门。`sql` 按 ?1 查出 (project_id, author_id)。
+/// 行不存在时放行 —— 删一个已经不在的东西，结果本来就是「它不在了」。
+fn require_author(conn: &Connection, sql: &str, id: i64, me: i64) -> Result<()> {
+    let row: Option<(i64, Option<i64>)> = conn
+        .query_row(sql, params![id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    match row {
+        Some((project_id, author)) => account::require_author_or_owner(conn, project_id, author, me),
+        None => Ok(()),
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* 项目                                                                */
 /* ------------------------------------------------------------------ */
 
-pub fn list_projects(conn: &Connection) -> Result<Vec<ProjectSummary>> {
+/// 当前账号看得见的项目（自己的 + 共享给自己的）。
+pub fn list_projects(conn: &Connection, me: i64) -> Result<Vec<ProjectSummary>> {
     let mut stmt = conn
-        .prepare("SELECT * FROM projects ORDER BY sort_order, id")
+        .prepare(
+            "SELECT p.*, m.role AS my_role,
+                    (SELECT COUNT(*) FROM project_members c WHERE c.project_id = p.id) AS member_count
+               FROM projects p
+               JOIN project_members m ON m.project_id = p.id AND m.account_id = ?1
+              ORDER BY p.sort_order, p.id",
+        )
         .map_err(|e| e.to_string())?;
-    let projects: Vec<Project> = stmt
-        .query_map([], map_project)
+    let projects: Vec<(Project, String, i64)> = stmt
+        .query_map(params![me], |r| {
+            Ok((map_project(r)?, r.get("my_role")?, r.get("member_count")?))
+        })
         .map_err(|e| e.to_string())?
         .collect::<rusqlite::Result<_>>()
         .map_err(|e| e.to_string())?;
@@ -95,7 +118,7 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<ProjectSummary>> {
     let today = today_iso();
     let mut out = Vec::with_capacity(projects.len());
 
-    for project in projects {
+    for (project, role, member_count) in projects {
         // 叶子任务 = 没有任何任务把它当父节点的任务
         let leaf_filter = "t.id NOT IN (SELECT parent_id FROM tasks WHERE parent_id IS NOT NULL)";
 
@@ -141,13 +164,18 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<ProjectSummary>> {
             leaf_count,
             overdue_count,
             progress: if weight_sum > 0.0 { progress_sum / weight_sum } else { 0.0 },
+            role,
+            member_count,
         });
     }
 
     Ok(out)
 }
 
-pub fn create_project(conn: &Connection, name: String, color: String) -> Result<Project> {
+/// 建项目，建的人就是所有者。名字只需在自己看得见的项目里唯一（migrations/015）。
+pub fn create_project(conn: &Connection, me: i64, name: String, color: String) -> Result<Project> {
+    account::check_project_name(conn, None, &[me], &name)?;
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
     let ts = now();
     // uuid 不在这里给：schema 上挂了触发器，任何插入路径都会自动拿到一个
     // （见 migrations/007_project_identity.sql）。两处生成同一个事实，
@@ -158,16 +186,22 @@ pub fn create_project(conn: &Connection, name: String, color: String) -> Result<
         params![name, color, ts],
     )
     .map_err(|e| name_taken(e, &name))?;
-
-    conn.query_row(
-        "SELECT * FROM projects WHERE id = ?1",
-        params![conn.last_insert_rowid()],
-        map_project,
+    let id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO project_members (project_id, account_id, role, added_at) VALUES (?1, ?2, 'owner', ?3)",
+        params![id, me, ts],
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+
+    conn.query_row("SELECT * FROM projects WHERE id = ?1", params![id], map_project)
+        .map_err(|e| e.to_string())
 }
 
-pub fn rename_project(conn: &Connection, id: i64, name: String, color: String) -> Result<()> {
+/// 编辑者也能改名改色；但新名字要对**每个成员**都不撞（account::check_project_name）。
+pub fn rename_project(conn: &Connection, me: i64, id: i64, name: String, color: String) -> Result<()> {
+    require_member(conn, id, me)?;
+    account::check_project_name(conn, Some(id), &account::member_ids(conn, id)?, &name)?;
     conn.execute(
         "UPDATE projects SET name = ?2, color = ?3, updated_at = ?4 WHERE id = ?1",
         params![id, name, color, now()],
@@ -180,10 +214,12 @@ pub fn rename_project(conn: &Connection, id: i64, name: String, color: String) -
 /// work_days 是 "[1,2,3,4,5]" 这样的星期序号数组，holidays 是 ISO 日期数组。
 pub fn update_project_calendar(
     conn: &Connection,
+    me: i64,
     id: i64,
     work_days: String,
     holidays: String,
 ) -> Result<()> {
+    require_member(conn, id, me)?;
     conn.execute(
         "UPDATE projects SET work_days = ?2, holidays = ?3, updated_at = ?4 WHERE id = ?1",
         params![id, work_days, holidays, now()],
@@ -192,7 +228,9 @@ pub fn update_project_calendar(
     Ok(())
 }
 
-pub fn delete_project(conn: &Connection, id: i64) -> Result<()> {
+/// 只有所有者能删。共享项目被删时其他成员也一起失去它 —— 界面要把这一点说清楚。
+pub fn delete_project(conn: &Connection, me: i64, id: i64) -> Result<()> {
+    require_owner(conn, id, me)?;
     // 任务、依赖、基线都靠 ON DELETE CASCADE 跟着走
     conn.execute("DELETE FROM projects WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
@@ -206,7 +244,8 @@ pub fn max_task_id(conn: &Connection) -> Result<i64> {
         .map_err(|e| e.to_string())
 }
 
-pub fn load_project(conn: &Connection, id: i64) -> Result<ProjectData> {
+pub fn load_project(conn: &Connection, me: i64, id: i64) -> Result<ProjectData> {
+    let role = require_member(conn, id, me)?;
     let project = conn
         .query_row("SELECT * FROM projects WHERE id = ?1", params![id], map_project)
         .map_err(|e| e.to_string())?;
@@ -217,8 +256,9 @@ pub fn load_project(conn: &Connection, id: i64) -> Result<ProjectData> {
     let tasks = stmt
         .query_map(params![id], map_task)
         .map_err(|e| e.to_string())?
-        .collect::<rusqlite::Result<Vec<_>>>()
+        .collect::<rusqlite::Result<Vec<TaskRow>>>()
         .map_err(|e| e.to_string())?;
+    let tasks = apply_view_state(conn, me, tasks)?;
 
     let mut stmt = conn
         .prepare("SELECT id, from_task_id, to_task_id, type, lag_days FROM dependencies WHERE project_id = ?1")
@@ -248,75 +288,115 @@ pub fn load_project(conn: &Connection, id: i64) -> Result<ProjectData> {
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| e.to_string())?;
 
-    let people = read_people(conn).map_err(|e| e.to_string())?;
+    let people = read_people(conn, id).map_err(|e| e.to_string())?;
 
     // 取全库最大 id，而不是本项目的 —— 见 next_task_id 的说明
     let next_task_id = max_task_id(conn)?;
 
-    Ok(ProjectData { project, tasks, dependencies, baselines, people, next_task_id })
+    Ok(ProjectData {
+        project,
+        tasks,
+        dependencies,
+        baselines,
+        people,
+        role: role.as_str().to_string(),
+        next_task_id,
+    })
+}
+
+/// 折叠状态按账号存（task_view_state），不读 tasks.collapsed —— 见 migrations/015。
+fn apply_view_state(conn: &Connection, me: i64, mut tasks: Vec<TaskRow>) -> Result<Vec<TaskRow>> {
+    let mut stmt = conn
+        .prepare("SELECT task_id FROM task_view_state WHERE account_id = ?1 AND collapsed = 1")
+        .map_err(|e| e.to_string())?;
+    let collapsed = stmt
+        .query_map(params![me], |r| r.get::<_, i64>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<std::collections::HashSet<i64>>>()
+        .map_err(|e| e.to_string())?;
+    for t in &mut tasks {
+        t.collapsed = collapsed.contains(&t.id);
+    }
+    Ok(tasks)
 }
 
 /* ------------------------------------------------------------------ */
 /* 负责人                                                              */
 /* ------------------------------------------------------------------ */
 
-pub fn read_people(conn: &Connection) -> rusqlite::Result<Vec<Person>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, name, color, avatar, sort_order FROM people ORDER BY sort_order, id",
-    )?;
+pub const PERSON_COLS: &str =
+    "id, name, color, avatar, sort_order, project_id, account_id, account_uuid, uuid";
+
+pub fn map_person(r: &rusqlite::Row) -> rusqlite::Result<Person> {
+    Ok(Person {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        color: r.get(2)?,
+        avatar: r.get(3)?,
+        sort_order: r.get(4)?,
+        project_id: r.get(5)?,
+        account_id: r.get(6)?,
+        account_uuid: r.get(7)?,
+        uuid: r.get(8)?,
+    })
+}
+
+/// 一个项目的人员名册。人员从 015 起归项目，没有「全局名单」了。
+pub fn read_people(conn: &Connection, project_id: i64) -> rusqlite::Result<Vec<Person>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {PERSON_COLS} FROM people WHERE project_id = ?1 ORDER BY sort_order, id"
+    ))?;
     let rows = stmt
-        .query_map([], |r| {
-            Ok(Person {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                color: r.get(2)?,
-                avatar: r.get(3)?,
-                sort_order: r.get(4)?,
-            })
-        })?
+        .query_map(params![project_id], map_person)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
-pub fn list_people(conn: &Connection) -> Result<Vec<Person>> {
-    read_people(conn).map_err(|e| e.to_string())
+pub fn list_people(conn: &Connection, project_id: i64) -> Result<Vec<Person>> {
+    read_people(conn, project_id).map_err(|e| e.to_string())
 }
 
-pub fn create_person(conn: &Connection, name: String, color: String) -> Result<Person> {
+fn read_person(conn: &Connection, id: i64) -> Result<Person> {
+    conn.query_row(
+        &format!("SELECT {PERSON_COLS} FROM people WHERE id = ?1"),
+        params![id],
+        map_person,
+    )
+    .optional()
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| "人员不存在".to_string())
+}
+
+/// 人员所在项目的门：按人员 id 进来的操作用它。
+fn require_person_member(conn: &Connection, id: i64, me: i64) -> Result<i64> {
+    account::require_row_member(conn, "SELECT project_id FROM people WHERE id = ?1", id, me, "人员")
+}
+
+fn person_name_taken(e: rusqlite::Error, name: &str) -> String {
+    if e.to_string().contains("UNIQUE") {
+        format!("这个项目里已经有叫「{name}」的人了")
+    } else {
+        e.to_string()
+    }
+}
+
+/// 在项目里新建一个人员（没有账号的人）。要绑定账号走 account::bind_person。
+pub fn create_person(conn: &Connection, me: i64, project_id: i64, name: String, color: String) -> Result<Person> {
+    require_member(conn, project_id, me)?;
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("负责人名字不能为空".into());
     }
 
     conn.execute(
-        "INSERT INTO people (name, color, sort_order, created_at)
-         VALUES (?1, ?2, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM people), ?3)",
-        params![name, color, now()],
+        "INSERT INTO people (project_id, name, color, sort_order, created_at)
+         VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM people WHERE project_id = ?1), ?4)",
+        params![project_id, name, color, now()],
     )
-    // 唯一索引挡住重名，这里把库层错误翻译成人话
-    .map_err(|e| {
-        if e.to_string().contains("UNIQUE") {
-            format!("已经有叫「{name}」的负责人了")
-        } else {
-            e.to_string()
-        }
-    })?;
+    // 唯一索引挡住项目内重名，这里把库层错误翻译成人话
+    .map_err(|e| person_name_taken(e, &name))?;
 
-    let id = conn.last_insert_rowid();
-    conn.query_row(
-        "SELECT id, name, color, avatar, sort_order FROM people WHERE id = ?1",
-        params![id],
-        |r| {
-            Ok(Person {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                color: r.get(2)?,
-                avatar: r.get(3)?,
-                sort_order: r.get(4)?,
-            })
-        },
-    )
-    .map_err(|e| e.to_string())
+    read_person(conn, conn.last_insert_rowid())
 }
 
 /// avatar 传 None 表示不改动，传 Some("") 表示清除。
@@ -324,11 +404,13 @@ pub fn create_person(conn: &Connection, name: String, color: String) -> Result<P
 /// 改个名字就会把头像顺手抹掉。
 pub fn update_person(
     conn: &Connection,
+    me: i64,
     id: i64,
     name: String,
     color: String,
     avatar: Option<String>,
 ) -> Result<()> {
+    require_person_member(conn, id, me)?;
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("负责人名字不能为空".into());
@@ -347,25 +429,25 @@ pub fn update_person(
             params![id, name, color],
         ),
     }
-    .map_err(|e| {
-        if e.to_string().contains("UNIQUE") {
-            format!("已经有叫「{name}」的负责人了")
-        } else {
-            e.to_string()
-        }
-    })?;
+    .map_err(|e| person_name_taken(e, &name))?;
     Ok(())
 }
 
 /// 删人不删任务 —— 外键是 ON DELETE SET NULL，相关任务只是变成「无负责人」。
-pub fn delete_person(conn: &Connection, id: i64) -> Result<()> {
+/// 绑定了成员的人员不能删：成员还在，名册里就得有他（取消共享会自动解绑）。
+pub fn delete_person(conn: &Connection, me: i64, id: i64) -> Result<()> {
+    require_person_member(conn, id, me)?;
+    if read_person(conn, id)?.account_id.is_some() {
+        return Err("这个人员绑定着项目成员，请先解绑或取消共享".into());
+    }
     conn.execute("DELETE FROM people WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 /// 某个人身上挂了多少任务 —— 删除前提示用，避免误删掉一个还在被大量引用的人。
-pub fn count_person_tasks(conn: &Connection, id: i64) -> Result<i64> {
+pub fn count_person_tasks(conn: &Connection, me: i64, id: i64) -> Result<i64> {
+    require_person_member(conn, id, me)?;
     conn.query_row(
         "SELECT COUNT(*) FROM tasks WHERE person_id = ?1",
         params![id],
@@ -374,11 +456,56 @@ pub fn count_person_tasks(conn: &Connection, id: i64) -> Result<i64> {
     .map_err(|e| e.to_string())
 }
 
+/**
+ * 从别的项目把人员拷进来（Q5：人员归项目后，免去重复录入的代价）。
+ *
+ * 只能从自己看得见的项目里拷。拷的是一份新行，两边以后各改各的；
+ * 绑定的账号不跟过来 —— 绑定意味着拉人进项目，那要走 bind_person 的权限判断。
+ * 已有同名的跳过。返回实际拷进来的人数。
+ */
+pub fn import_people(conn: &Connection, me: i64, project_id: i64, person_ids: Vec<i64>) -> Result<i64> {
+    require_member(conn, project_id, me)?;
+    let mut added = 0;
+    for pid in person_ids {
+        let p = read_person(conn, pid)?;
+        require_member(conn, p.project_id, me)?;
+        let n = conn
+            .execute(
+                "INSERT OR IGNORE INTO people (project_id, account_uuid, name, color, avatar, sort_order, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5,
+                         (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM people WHERE project_id = ?1), ?6)",
+                params![project_id, p.account_uuid, p.name, p.color, p.avatar, now()],
+            )
+            .map_err(|e| e.to_string())?;
+        added += n as i64;
+    }
+    Ok(added)
+}
+
+/// 自己看得见的所有项目里的人员，供「从其他项目导入」挑选。
+pub fn list_visible_people(conn: &Connection, me: i64) -> Result<Vec<Person>> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {} FROM people p
+              WHERE p.project_id IN (SELECT project_id FROM project_members WHERE account_id = ?1)
+              ORDER BY p.name, p.project_id",
+            PERSON_COLS.split(", ").map(|c| format!("p.{c}")).collect::<Vec<_>>().join(", ")
+        ))
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![me], map_person)
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
 /* ------------------------------------------------------------------ */
 /* 风险点与评论                                                        */
 /* ------------------------------------------------------------------ */
 
-pub fn load_task_notes(conn: &Connection, task_id: i64) -> Result<TaskNotes> {
+pub fn load_task_notes(conn: &Connection, me: i64, task_id: i64) -> Result<TaskNotes> {
+    account::require_task_member(conn, task_id, me)?;
     let risks = {
         let mut stmt = conn
             .prepare(
@@ -416,7 +543,7 @@ pub fn load_task_notes(conn: &Connection, task_id: i64) -> Result<TaskNotes> {
     let comments = {
         let mut stmt = conn
             .prepare(
-                "SELECT id, task_id, content, created_at
+                "SELECT id, task_id, content, created_at, author_id
                  FROM comments WHERE task_id = ?1 ORDER BY created_at DESC",
             )
             .map_err(|e| e.to_string())?;
@@ -427,6 +554,7 @@ pub fn load_task_notes(conn: &Connection, task_id: i64) -> Result<TaskNotes> {
                     task_id: r.get(1)?,
                     content: r.get(2)?,
                     created_at: r.get(3)?,
+                    author_id: r.get(4)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -440,7 +568,8 @@ pub fn load_task_notes(conn: &Connection, task_id: i64) -> Result<TaskNotes> {
 
 /// 每个任务有几条**未解决**的风险 —— 左侧网格靠它显示角标。
 /// 看不见的风险等于没记，所以这个计数必须一次性随项目加载。
-pub fn count_open_risks(conn: &Connection, project_id: i64) -> Result<Vec<(i64, i64)>> {
+pub fn count_open_risks(conn: &Connection, me: i64, project_id: i64) -> Result<Vec<(i64, i64)>> {
+    require_member(conn, project_id, me)?;
     let mut stmt = conn
         .prepare(
             "SELECT r.task_id, COUNT(*)
@@ -462,7 +591,8 @@ pub fn count_open_risks(conn: &Connection, project_id: i64) -> Result<Vec<(i64, 
 /// 不复用 `load_task_notes` 逐任务查：一个项目几百个任务就是几百次 IPC + 几百条
 /// SQL，而导出只需要一次全表 JOIN。排序在库里定死（未解决在前 → 等级高在前 →
 /// 记录早在前），前端不必再排一遍，也保证了导出件的行序是可重复的。
-pub fn load_project_risks(conn: &Connection, project_id: i64) -> Result<Vec<Risk>> {
+pub fn load_project_risks(conn: &Connection, me: i64, project_id: i64) -> Result<Vec<Risk>> {
+    require_member(conn, project_id, me)?;
     let mut stmt = conn
         .prepare(
             "SELECT r.id, r.task_id, r.content, r.level, r.resolved, r.created_at,
@@ -492,7 +622,8 @@ pub fn load_project_risks(conn: &Connection, project_id: i64) -> Result<Vec<Risk
     Ok(rows)
 }
 
-pub fn add_risk(conn: &Connection, task_id: i64, content: String, level: i64) -> Result<Risk> {
+pub fn add_risk(conn: &Connection, me: i64, task_id: i64, content: String, level: i64) -> Result<Risk> {
+    account::require_task_member(conn, task_id, me)?;
     let content = content.trim().to_string();
     if content.is_empty() {
         return Err("风险内容不能为空".into());
@@ -522,7 +653,8 @@ pub fn add_risk(conn: &Connection, task_id: i64, content: String, level: i64) ->
 /// 改一条风险的措辞或等级。**不碰开关状态** —— 关闭要走 resolve_risk，
 /// 那条路强制留下处置说明；从这里顺手把 resolved 一起改掉，等于给自己
 /// 留了一个绕过记录的后门。
-pub fn update_risk(conn: &Connection, id: i64, content: String, level: i64) -> Result<()> {
+pub fn update_risk(conn: &Connection, me: i64, id: i64, content: String, level: i64) -> Result<()> {
+    account::require_row_member(conn, "SELECT t.project_id FROM risks r JOIN tasks t ON t.id = r.task_id WHERE r.id = ?1", id, me, "风险")?;
     let content = content.trim().to_string();
     if content.is_empty() {
         return Err("风险内容不能为空".into());
@@ -540,7 +672,8 @@ pub fn update_risk(conn: &Connection, id: i64, content: String, level: i64) -> R
 /// 处置说明是必填的，库层也拦一道。UI 里那个输入框可以被绕过（将来多一个
 /// 入口、或者有人直接调命令），而一旦允许空说明，它就会变成默认路径 ——
 /// 大家都按最省事的那条走，三个月后复盘时这张表又变回了一排勾。
-pub fn resolve_risk(conn: &Connection, id: i64, resolution: String) -> Result<i64> {
+pub fn resolve_risk(conn: &Connection, me: i64, id: i64, resolution: String) -> Result<i64> {
+    account::require_row_member(conn, "SELECT t.project_id FROM risks r JOIN tasks t ON t.id = r.task_id WHERE r.id = ?1", id, me, "风险")?;
     let resolution = resolution.trim().to_string();
     if resolution.is_empty() {
         return Err("关闭风险要写清楚是怎么解决的".into());
@@ -564,7 +697,8 @@ pub fn resolve_risk(conn: &Connection, id: i64, resolution: String) -> Result<i6
 /// 挂着「已于 3 月 2 日解决：换了供应商」的风险 —— 两个互相矛盾的说法，
 /// 用户从此不再相信其中任何一个。真要留痕，那是审计日志该做的事，
 /// 不是在同一行里塞两份状态。
-pub fn reopen_risk(conn: &Connection, id: i64) -> Result<()> {
+pub fn reopen_risk(conn: &Connection, me: i64, id: i64) -> Result<()> {
+    account::require_row_member(conn, "SELECT t.project_id FROM risks r JOIN tasks t ON t.id = r.task_id WHERE r.id = ?1", id, me, "风险")?;
     conn.execute(
         "UPDATE risks SET resolved = 0, resolved_at = NULL, resolution = NULL WHERE id = ?1",
         params![id],
@@ -573,21 +707,23 @@ pub fn reopen_risk(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
-pub fn delete_risk(conn: &Connection, id: i64) -> Result<()> {
+pub fn delete_risk(conn: &Connection, me: i64, id: i64) -> Result<()> {
+    account::require_row_member(conn, "SELECT t.project_id FROM risks r JOIN tasks t ON t.id = r.task_id WHERE r.id = ?1", id, me, "风险")?;
     conn.execute("DELETE FROM risks WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
     Ok(())
 }
 
-pub fn add_comment(conn: &Connection, task_id: i64, content: String) -> Result<Comment> {
+pub fn add_comment(conn: &Connection, me: i64, task_id: i64, content: String) -> Result<Comment> {
+    account::require_task_member(conn, task_id, me)?;
     let content = content.trim().to_string();
     if content.is_empty() {
         return Err("评论内容不能为空".into());
     }
     let ts = unix_now();
     conn.execute(
-        "INSERT INTO comments (task_id, content, created_at) VALUES (?1, ?2, ?3)",
-        params![task_id, content, ts],
+        "INSERT INTO comments (task_id, content, created_at, author_id) VALUES (?1, ?2, ?3, ?4)",
+        params![task_id, content, ts, me],
     )
     .map_err(|e| e.to_string())?;
 
@@ -596,10 +732,17 @@ pub fn add_comment(conn: &Connection, task_id: i64, content: String) -> Result<C
         task_id,
         content,
         created_at: ts,
+        author_id: Some(me),
     })
 }
 
-pub fn delete_comment(conn: &Connection, id: i64) -> Result<()> {
+pub fn delete_comment(conn: &Connection, me: i64, id: i64) -> Result<()> {
+    require_author(
+        conn,
+        "SELECT t.project_id, c.author_id FROM comments c JOIN tasks t ON t.id = c.task_id WHERE c.id = ?1",
+        id,
+        me,
+    )?;
     conn.execute("DELETE FROM comments WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -613,10 +756,11 @@ pub fn delete_comment(conn: &Connection, id: i64) -> Result<()> {
 ///
 /// 排序放在库里而不是前端：时间线、任务详情、将来的导出都要用同一个顺序，
 /// 三处各排一次迟早有一处不一样。
-pub fn load_daily_notes(conn: &Connection, project_id: i64) -> Result<Vec<DailyNote>> {
+pub fn load_daily_notes(conn: &Connection, me: i64, project_id: i64) -> Result<Vec<DailyNote>> {
+    require_member(conn, project_id, me)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, project_id, task_id, day, content, created_at, updated_at
+            "SELECT id, project_id, task_id, day, content, created_at, updated_at, author_id
                FROM daily_notes WHERE project_id = ?1
               ORDER BY day ASC, id ASC",
         )
@@ -631,6 +775,7 @@ pub fn load_daily_notes(conn: &Connection, project_id: i64) -> Result<Vec<DailyN
                 content: r.get(4)?,
                 created_at: r.get(5)?,
                 updated_at: r.get(6)?,
+                author_id: r.get(7)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -640,21 +785,22 @@ pub fn load_daily_notes(conn: &Connection, project_id: i64) -> Result<Vec<DailyN
 }
 
 pub fn add_daily_note(
-    conn: &Connection,
+    conn: &Connection, me: i64,
     project_id: i64,
     task_id: Option<i64>,
     day: String,
     content: String,
 ) -> Result<DailyNote> {
+    require_member(conn, project_id, me)?;
     let content = content.trim().to_string();
     if content.is_empty() {
         return Err("记录内容不能为空".into());
     }
     let ts = unix_now();
     conn.execute(
-        "INSERT INTO daily_notes (project_id, task_id, day, content, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-        params![project_id, task_id, day, content, ts],
+        "INSERT INTO daily_notes (project_id, task_id, day, content, created_at, updated_at, author_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+        params![project_id, task_id, day, content, ts, me],
     )
     .map_err(|e| e.to_string())?;
 
@@ -666,6 +812,7 @@ pub fn add_daily_note(
         content,
         created_at: ts,
         updated_at: ts,
+        author_id: Some(me),
     })
 }
 
@@ -673,7 +820,8 @@ pub fn add_daily_note(
 ///
 /// day 也可改，因为记错日子是常事（周一早上补记周五的事，很容易点成今天）；
 /// created_at 不动 —— 它记的是「这句话是什么时候说的」，是历史事实。
-pub fn update_daily_note(conn: &Connection, id: i64, day: String, content: String) -> Result<()> {
+pub fn update_daily_note(conn: &Connection, me: i64, id: i64, day: String, content: String) -> Result<()> {
+    account::require_row_member(conn, "SELECT project_id FROM daily_notes WHERE id = ?1", id, me, "记录")?;
     let content = content.trim().to_string();
     if content.is_empty() {
         return Err("记录内容不能为空".into());
@@ -686,7 +834,8 @@ pub fn update_daily_note(conn: &Connection, id: i64, day: String, content: Strin
     Ok(())
 }
 
-pub fn delete_daily_note(conn: &Connection, id: i64) -> Result<()> {
+pub fn delete_daily_note(conn: &Connection, me: i64, id: i64) -> Result<()> {
+    require_author(conn, "SELECT project_id, author_id FROM daily_notes WHERE id = ?1", id, me)?;
     conn.execute("DELETE FROM daily_notes WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -697,7 +846,8 @@ pub fn delete_daily_note(conn: &Connection, id: i64) -> Result<()> {
 /* ------------------------------------------------------------------ */
 
 /// 冻结当前所有任务的日期。只存日期不存进度（DESIGN.md §3.1）。
-pub fn create_baseline(conn: &mut Connection, project_id: i64, name: String) -> Result<BaselineRow> {
+pub fn create_baseline(conn: &mut Connection, me: i64, project_id: i64, name: String) -> Result<BaselineRow> {
+    require_member(conn, project_id, me)?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let ts = now();
 
@@ -721,7 +871,8 @@ pub fn create_baseline(conn: &mut Connection, project_id: i64, name: String) -> 
     Ok(BaselineRow { id: baseline_id, name, created_at: ts })
 }
 
-pub fn load_baseline(conn: &Connection, baseline_id: i64) -> Result<Vec<BaselineTaskRow>> {
+pub fn load_baseline(conn: &Connection, me: i64, baseline_id: i64) -> Result<Vec<BaselineTaskRow>> {
+    account::require_row_member(conn, "SELECT project_id FROM baselines WHERE id = ?1", baseline_id, me, "基线")?;
     let mut stmt = conn
         .prepare(
             "SELECT task_id, name, start_date, end_date, duration
@@ -744,7 +895,8 @@ pub fn load_baseline(conn: &Connection, baseline_id: i64) -> Result<Vec<Baseline
     Ok(rows)
 }
 
-pub fn delete_baseline(conn: &Connection, baseline_id: i64) -> Result<()> {
+pub fn delete_baseline(conn: &Connection, me: i64, baseline_id: i64) -> Result<()> {
+    account::require_row_member(conn, "SELECT project_id FROM baselines WHERE id = ?1", baseline_id, me, "基线")?;
     conn.execute("DELETE FROM baselines WHERE id = ?1", params![baseline_id])
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -823,39 +975,68 @@ pub fn check_integrity(conn: &Connection) -> Result<Vec<String>> {
 /* 设置                                                                */
 /* ------------------------------------------------------------------ */
 
-pub fn get_setting(conn: &Connection, key: String) -> Result<Option<String>> {
-    conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0))
-        .optional()
-        .map_err(|e| e.to_string())
+/**
+ * 全机设置的 key。其余一律按账号存（account_settings，migrations/015）。
+ *
+ * 规则写在库层而不是让前端选表：前端读写设置的接口一个字没变，
+ * 也就不会出现「某个新设置忘了标作用域、悄悄变成全机共享」—— 默认就是按账号。
+ */
+pub fn is_global_setting(key: &str) -> bool {
+    key.starts_with("session.") || key.starts_with("device.")
 }
 
-pub fn set_setting(conn: &Connection, key: String, value: String) -> Result<()> {
-    conn.execute(
-        "INSERT INTO settings (key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![key, value],
-    )
+pub fn get_setting(conn: &Connection, me: i64, key: String) -> Result<Option<String>> {
+    if is_global_setting(&key) {
+        conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0))
+    } else {
+        conn.query_row(
+            "SELECT value FROM account_settings WHERE account_id = ?1 AND key = ?2",
+            params![me, key],
+            |r| r.get(0),
+        )
+    }
+    .optional()
+    .map_err(|e| e.to_string())
+}
+
+pub fn set_setting(conn: &Connection, me: i64, key: String, value: String) -> Result<()> {
+    if is_global_setting(&key) {
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )
+    } else {
+        conn.execute(
+            "INSERT INTO account_settings (account_id, key, value) VALUES (?1, ?2, ?3)
+             ON CONFLICT(account_id, key) DO UPDATE SET value = excluded.value",
+            params![me, key, value],
+        )
+    }
     .map_err(|e| e.to_string())?;
     Ok(())
 }
 
-/// 按前缀列设置项，给插件系统用（`plugin.*`）。
+/// 按前缀列设置项，给插件系统用（`plugin.*`）。只列当前账号的。
 ///
 /// 前缀里的 `%` `_` `\` 必须转义再拼 LIKE —— 它们是 LIKE 的通配符，
 /// 不转义的话一个叫 `plugin.%.x` 的键会匹配到一大片无关设置。
-pub fn list_settings_with_prefix(conn: &Connection, prefix: String) -> Result<Vec<(String, String)>> {
+pub fn list_settings_with_prefix(conn: &Connection, me: i64, prefix: String) -> Result<Vec<(String, String)>> {
     let escaped = prefix
         .replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_");
     let mut stmt = conn
-        .prepare("SELECT key, value FROM settings WHERE key LIKE ?1 ESCAPE '\\' ORDER BY key")
+        .prepare(
+            "SELECT key, value FROM account_settings
+              WHERE account_id = ?1 AND key LIKE ?2 ESCAPE '\\' ORDER BY key",
+        )
         .map_err(|e| e.to_string())?;
     // ⚠️ 必须 collect 进一个具名变量再返回，不能让它当块尾表达式。
     // query_map 借着 stmt，`?` 造出的临时值会活到块尾、比 stmt 还晚析构，
     // 编译器会报「stmt does not live long enough」—— 真正短命的是那个临时值。
     let rows = stmt
-        .query_map(params![format!("{escaped}%")], |r| {
+        .query_map(params![me, format!("{escaped}%")], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })
         .map_err(|e| e.to_string())?
@@ -883,19 +1064,21 @@ fn map_item_note(r: &rusqlite::Row) -> rusqlite::Result<ItemNote> {
         resolution: r.get(10)?,
         created_at: r.get(11)?,
         updated_at: r.get(12)?,
+        author_id: r.get(13)?,
     })
 }
 
 const ITEM_NOTE_COLS: &str = "id, project_id, name, kind, priority, person_id, task_id, \
                               promoted_kind, promoted_ref, closed_at, resolution, \
-                              created_at, updated_at";
+                              created_at, updated_at, author_id";
 
 /// 一个项目的全部事项，**按创建时间倒序**。
 ///
 /// 排序定在库里而不是前端：事项视图、将来的导出都要用同一个顺序。
 /// 倒序是产品决定 —— 刚记下的那条必须在最上面，否则「快」这个唯一的
 /// 核心指标在第二条就丢了。`id DESC` 兜住同一秒内连记两条的情况。
-pub fn load_item_notes(conn: &Connection, project_id: i64) -> Result<Vec<ItemNote>> {
+pub fn load_item_notes(conn: &Connection, me: i64, project_id: i64) -> Result<Vec<ItemNote>> {
+    require_member(conn, project_id, me)?;
     let sql =
         format!("SELECT {ITEM_NOTE_COLS} FROM item_notes WHERE project_id = ?1 ORDER BY created_at DESC, id DESC");
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
@@ -918,13 +1101,14 @@ fn read_item_note(conn: &Connection, id: i64) -> Result<ItemNote> {
 /// **不收类型。** 分拣是分开的动作（设计稿 §4.2）：录入界面每多一个字段，
 /// 记下来的概率就低一分，而「这是什么」往往要等记完才想清楚。
 pub fn add_item_note(
-    conn: &Connection,
+    conn: &Connection, me: i64,
     project_id: i64,
     name: String,
     priority: i64,
     person_id: Option<i64>,
     task_id: Option<i64>,
 ) -> Result<ItemNote> {
+    require_member(conn, project_id, me)?;
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("事项内容不能为空".into());
@@ -933,9 +1117,9 @@ pub fn add_item_note(
     let ts = unix_now();
     conn.execute(
         "INSERT INTO item_notes (project_id, name, priority, person_id, task_id,
-                                 created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-        params![project_id, name, priority, person_id, task_id, ts],
+                                 created_at, updated_at, author_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
+        params![project_id, name, priority, person_id, task_id, ts, me],
     )
     .map_err(|e| e.to_string())?;
 
@@ -953,6 +1137,7 @@ pub fn add_item_note(
         resolution: None,
         created_at: ts,
         updated_at: ts,
+        author_id: Some(me),
     })
 }
 
@@ -965,7 +1150,7 @@ pub fn add_item_note(
 ///
 /// `kind` 传 None 就是改回「未分拣」。那是一个合法的目标状态，不是清空操作。
 pub fn update_item_note(
-    conn: &Connection,
+    conn: &Connection, me: i64,
     id: i64,
     name: String,
     kind: Option<String>,
@@ -973,6 +1158,7 @@ pub fn update_item_note(
     person_id: Option<i64>,
     task_id: Option<i64>,
 ) -> Result<()> {
+    account::require_row_member(conn, "SELECT project_id FROM item_notes WHERE id = ?1", id, me, "事项")?;
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("事项内容不能为空".into());
@@ -1017,7 +1203,8 @@ pub fn update_item_note(
  * UI 里也会拦一道，但规则只写在界面上等于没写：命令会多出入口，而一旦
  * 允许空结论，它就会变成默认路径，三个月后这张表又变回一排勾。
  */
-pub fn close_item_note(conn: &Connection, id: i64, resolution: Option<String>) -> Result<i64> {
+pub fn close_item_note(conn: &Connection, me: i64, id: i64, resolution: Option<String>) -> Result<i64> {
+    account::require_row_member(conn, "SELECT project_id FROM item_notes WHERE id = ?1", id, me, "事项")?;
     let note = read_item_note(conn, id)?;
     if note.promoted_kind.is_some() {
         return Err("这条事项已经分拣成实体了，请到阻碍或风险那边关闭它".into());
@@ -1050,7 +1237,8 @@ pub fn close_item_note(conn: &Connection, id: i64, resolution: Option<String>) -
 
 /// 重新打开。关闭时刻和结论一并清掉 —— 留着的话界面上会出现一条「未关闭」
 /// 却挂着「已于某日解决」的事项，两个互相矛盾的说法。和 `reopen_risk` 同款。
-pub fn reopen_item_note(conn: &Connection, id: i64) -> Result<()> {
+pub fn reopen_item_note(conn: &Connection, me: i64, id: i64) -> Result<()> {
+    account::require_row_member(conn, "SELECT project_id FROM item_notes WHERE id = ?1", id, me, "事项")?;
     conn.execute(
         "UPDATE item_notes SET closed_at = NULL, resolution = NULL, updated_at = ?2 WHERE id = ?1",
         params![id, unix_now()],
@@ -1059,7 +1247,8 @@ pub fn reopen_item_note(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
-pub fn delete_item_note(conn: &Connection, id: i64) -> Result<()> {
+pub fn delete_item_note(conn: &Connection, me: i64, id: i64) -> Result<()> {
+    require_author(conn, "SELECT project_id, author_id FROM item_notes WHERE id = ?1", id, me)?;
     conn.execute("DELETE FROM item_notes WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -1080,13 +1269,14 @@ pub fn delete_item_note(conn: &Connection, id: i64) -> Result<()> {
  * 判断不该在分拣这一步被扔掉。
  */
 pub fn promote_note_to_risk(
-    conn: &mut Connection,
+    conn: &mut Connection, me: i64,
     note_id: i64,
     task_id: i64,
     content: String,
     level: i64,
     priority: Option<i64>,
 ) -> Result<Risk> {
+    account::require_row_member(conn, "SELECT project_id FROM item_notes WHERE id = ?1", note_id, me, "事项")?;
     let content = content.trim().to_string();
     if content.is_empty() {
         return Err("风险内容不能为空".into());
@@ -1133,7 +1323,8 @@ pub fn promote_note_to_risk(
  * `promoted_ref` 的形态是 `'<taskId>/<periodId>'`。两段都要：periodId 在
  * 一个任务内唯一，但事项这边不知道它属于谁 —— 而列表要显示「卡在哪条活上」。
  */
-pub fn promote_note_to_blocker(conn: &Connection, note_id: i64, promoted_ref: String) -> Result<()> {
+pub fn promote_note_to_blocker(conn: &Connection, me: i64, note_id: i64, promoted_ref: String) -> Result<()> {
+    account::require_row_member(conn, "SELECT project_id FROM item_notes WHERE id = ?1", note_id, me, "事项")?;
     let note = read_item_note(conn, note_id)?;
     if note.promoted_kind.is_some() {
         return Err("这条事项已经分拣过了".into());
@@ -1159,7 +1350,8 @@ pub fn promote_note_to_blocker(conn: &Connection, note_id: i64, promoted_ref: St
  * 事项也删掉重记一遍 —— 而它记录的原始信息（谁在什么时候说的）就此丢失。
  * 所以**悬挂引用是预期状态，而不是损坏**（设计稿 §6.2 规则三）。
  */
-pub fn unpromote_note(conn: &mut Connection, note_id: i64) -> Result<Option<String>> {
+pub fn unpromote_note(conn: &mut Connection, me: i64, note_id: i64) -> Result<Option<String>> {
+    account::require_row_member(conn, "SELECT project_id FROM item_notes WHERE id = ?1", note_id, me, "事项")?;
     let note = read_item_note(conn, note_id)?;
     let Some(kind) = note.promoted_kind.clone() else {
         return Ok(None);
@@ -1195,15 +1387,22 @@ pub fn unpromote_note(conn: &mut Connection, note_id: i64) -> Result<Option<Stri
 /// 内置的两行由打开库时的 `schema::ensure_builtin_kinds` 保证存在，
 /// 所以这里查出来一定至少有两条 —— 但前端仍然有一份常量兜底，
 /// 一个读不出类型的库不该让事项视图整个白掉。
-pub fn list_item_kinds(conn: &Connection) -> Result<Vec<ItemKind>> {
+pub fn list_item_kinds(conn: &Connection, me: i64) -> Result<Vec<ItemKind>> {
+    // 自己的 + 内置的 + 自己看得见的项目里别人用到的（只读，否则那些事项显示不出标签）
     let mut stmt = conn
         .prepare(
-            "SELECT key, label, color, requires_note, builtin, sort_order
-               FROM item_kinds ORDER BY sort_order, key",
+            "SELECT key, label, color, requires_note, builtin, sort_order,
+                    builtin = 1 OR account_id = ?1 OR account_id IS NULL
+               FROM item_kinds
+              WHERE builtin = 1 OR account_id = ?1 OR account_id IS NULL
+                 OR key IN (SELECT n.kind FROM item_notes n
+                             JOIN project_members m ON m.project_id = n.project_id
+                            WHERE m.account_id = ?1 AND n.kind IS NOT NULL)
+              ORDER BY sort_order, key",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([], |r| {
+        .query_map(params![me], |r| {
             Ok(ItemKind {
                 key: r.get(0)?,
                 label: r.get(1)?,
@@ -1211,6 +1410,7 @@ pub fn list_item_kinds(conn: &Connection) -> Result<Vec<ItemKind>> {
                 requires_note: r.get::<_, i64>(3)? != 0,
                 builtin: r.get::<_, i64>(4)? != 0,
                 sort_order: r.get(5)?,
+                editable: r.get::<_, i64>(6)? != 0,
             })
         })
         .map_err(|e| e.to_string())?
@@ -1222,7 +1422,7 @@ pub fn list_item_kinds(conn: &Connection) -> Result<Vec<ItemKind>> {
 /// 新建或改一个类型。`builtin` 一列由库决定，调用方改不了 ——
 /// 否则「内置不可删」这条规矩可以被一次改名绕过去。
 pub fn save_item_kind(
-    conn: &Connection,
+    conn: &Connection, me: i64,
     key: String,
     label: String,
     color: String,
@@ -1232,15 +1432,16 @@ pub fn save_item_kind(
     if label.is_empty() {
         return Err("类型名称不能为空".into());
     }
+    require_kind_editable(conn, &key, me)?;
     conn.execute(
-        "INSERT INTO item_kinds (key, label, color, requires_note, builtin, sort_order)
+        "INSERT INTO item_kinds (key, label, color, requires_note, builtin, sort_order, account_id)
          VALUES (?1, ?2, ?3, ?4, 0,
-                 (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM item_kinds))
+                 (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM item_kinds), ?5)
          ON CONFLICT (key) DO UPDATE
             SET label = excluded.label,
                 color = excluded.color,
                 requires_note = excluded.requires_note",
-        params![key, label, color, requires_note as i64],
+        params![key, label, color, requires_note as i64, me],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -1256,7 +1457,7 @@ pub fn save_item_kind(
  *
  * 返回被退回的条数，界面据此提示。
  */
-pub fn delete_item_kind(conn: &mut Connection, key: String) -> Result<i64> {
+pub fn delete_item_kind(conn: &mut Connection, me: i64, key: String) -> Result<i64> {
     let builtin: Option<i64> = conn
         .query_row(
             "SELECT builtin FROM item_kinds WHERE key = ?1",
@@ -1270,6 +1471,7 @@ pub fn delete_item_kind(conn: &mut Connection, key: String) -> Result<i64> {
         Some(1) => return Err("内置类型不能删除 —— 可以改名字和颜色".into()),
         _ => {}
     }
+    require_kind_editable(conn, &key, me)?;
 
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let reverted = tx
@@ -1284,12 +1486,29 @@ pub fn delete_item_kind(conn: &mut Connection, key: String) -> Result<i64> {
     Ok(reverted as i64)
 }
 
+/// 自定义类型只有创建者能改能删；内置的、无主的（创建者账号已删除）人人能改。
+fn require_kind_editable(conn: &Connection, key: &str, me: i64) -> Result<()> {
+    let owner: Option<Option<i64>> = conn
+        .query_row(
+            "SELECT CASE WHEN builtin = 1 THEN NULL ELSE account_id END FROM item_kinds WHERE key = ?1",
+            params![key],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    match owner {
+        Some(Some(a)) if a != me => Err("这个类型是别人建的，只有创建者能修改".into()),
+        _ => Ok(()),
+    }
+}
+
 /// 改一条风险的优先级。
 ///
 /// 单独一个命令而不是塞进 `update_risk`：事项视图里改优先级是点一下标签就
 /// 立刻生效的行内操作，而 update_risk 要带上正文和等级 —— 为了改一个小整数
 /// 把整条正文回传一遍，中间任何一次并发编辑都会被这次回传盖掉。
-pub fn set_risk_priority(conn: &Connection, id: i64, priority: Option<i64>) -> Result<()> {
+pub fn set_risk_priority(conn: &Connection, me: i64, id: i64, priority: Option<i64>) -> Result<()> {
+    account::require_row_member(conn, "SELECT t.project_id FROM risks r JOIN tasks t ON t.id = r.task_id WHERE r.id = ?1", id, me, "风险")?;
     let n = conn
         .execute(
             "UPDATE risks SET priority = ?2 WHERE id = ?1",
@@ -1307,7 +1526,7 @@ pub fn set_risk_priority(conn: &Connection, id: i64, priority: Option<i64>) -> R
 /* ------------------------------------------------------------------ */
 
 const AI_REVIEW_COLS: &str = "id, project_id, title, stage, background, snapshot, questions, \
-                              document, created_at, updated_at";
+                              document, created_at, updated_at, author_id";
 
 const AI_REVIEW_STAGES: &[&str] = &["ask1", "answer1", "ask2", "answer2", "write", "done"];
 
@@ -1323,6 +1542,7 @@ fn map_ai_review(r: &rusqlite::Row) -> rusqlite::Result<AiReview> {
         document: r.get(7)?,
         created_at: r.get(8)?,
         updated_at: r.get(9)?,
+        author_id: r.get(10)?,
     })
 }
 
@@ -1330,7 +1550,8 @@ fn map_ai_review(r: &rusqlite::Row) -> rusqlite::Result<AiReview> {
 ///
 /// 连快照和文档一起取：一个项目的复盘是个位数，而界面点开任何一份都要立刻
 /// 看到内容 —— 拆成「列表 + 详情」两次往返，省下的那点字节不值得多一种加载态。
-pub fn list_ai_reviews(conn: &Connection, project_id: i64) -> Result<Vec<AiReview>> {
+pub fn list_ai_reviews(conn: &Connection, me: i64, project_id: i64) -> Result<Vec<AiReview>> {
+    require_member(conn, project_id, me)?;
     let sql = format!(
         "SELECT {AI_REVIEW_COLS} FROM ai_reviews WHERE project_id = ?1 ORDER BY updated_at DESC, id DESC"
     );
@@ -1345,21 +1566,22 @@ pub fn list_ai_reviews(conn: &Connection, project_id: i64) -> Result<Vec<AiRevie
 
 /// 开始一次复盘：背景表单和数据快照在这一刻定下来，之后不再变。
 pub fn create_ai_review(
-    conn: &Connection,
+    conn: &Connection, me: i64,
     project_id: i64,
     title: String,
     background: String,
     snapshot: String,
 ) -> Result<AiReview> {
+    require_member(conn, project_id, me)?;
     let title = title.trim().to_string();
     if title.is_empty() {
         return Err("复盘标题不能为空".into());
     }
     let ts = unix_now();
     conn.execute(
-        "INSERT INTO ai_reviews (project_id, title, background, snapshot, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-        params![project_id, title, background, snapshot, ts],
+        "INSERT INTO ai_reviews (project_id, title, background, snapshot, created_at, updated_at, author_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+        params![project_id, title, background, snapshot, ts, me],
     )
     .map_err(|e| e.to_string())?;
 
@@ -1374,6 +1596,7 @@ pub fn create_ai_review(
         document: String::new(),
         created_at: ts,
         updated_at: ts,
+        author_id: Some(me),
     })
 }
 
@@ -1382,13 +1605,14 @@ pub fn create_ai_review(
 /// **不碰背景和快照** —— 那两项是这次复盘的前提，中途能改的话，前面答过的题
 /// 就对不上它们了。想换前提就另开一份。
 pub fn save_ai_review(
-    conn: &Connection,
+    conn: &Connection, me: i64,
     id: i64,
     title: String,
     stage: String,
     questions: String,
     document: String,
 ) -> Result<i64> {
+    account::require_row_member(conn, "SELECT project_id FROM ai_reviews WHERE id = ?1", id, me, "复盘")?;
     let title = title.trim().to_string();
     if title.is_empty() {
         return Err("复盘标题不能为空".into());
@@ -1411,7 +1635,8 @@ pub fn save_ai_review(
     Ok(ts)
 }
 
-pub fn delete_ai_review(conn: &Connection, id: i64) -> Result<()> {
+pub fn delete_ai_review(conn: &Connection, me: i64, id: i64) -> Result<()> {
+    require_author(conn, "SELECT project_id, author_id FROM ai_reviews WHERE id = ?1", id, me)?;
     conn.execute("DELETE FROM ai_reviews WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -1465,7 +1690,8 @@ fn map_milestone_row(r: &rusqlite::Row) -> rusqlite::Result<Milestone> {
     })
 }
 
-pub fn load_milestones(conn: &Connection, project_id: i64) -> Result<Vec<Milestone>> {
+pub fn load_milestones(conn: &Connection, me: i64, project_id: i64) -> Result<Vec<Milestone>> {
+    require_member(conn, project_id, me)?;
     let sql = format!(
         "SELECT {MILESTONE_COLS} FROM milestones WHERE project_id = ?1 \
          ORDER BY sort_order, id"
@@ -1574,7 +1800,7 @@ fn write_task_links(conn: &Connection, milestone_id: i64, task_ids: &[i64]) -> R
 }
 
 pub fn add_milestone(
-    conn: &Connection,
+    conn: &Connection, me: i64,
     project_id: i64,
     name: String,
     date: String,
@@ -1582,6 +1808,7 @@ pub fn add_milestone(
     description: String,
     task_ids: Vec<i64>,
 ) -> Result<Milestone> {
+    require_member(conn, project_id, me)?;
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("里程碑名称不能为空".into());
@@ -1624,7 +1851,7 @@ pub fn add_milestone(
 }
 
 pub fn update_milestone(
-    conn: &Connection,
+    conn: &Connection, me: i64,
     id: i64,
     name: String,
     date: String,
@@ -1632,6 +1859,7 @@ pub fn update_milestone(
     description: String,
     task_ids: Vec<i64>,
 ) -> Result<()> {
+    account::require_row_member(conn, "SELECT project_id FROM milestones WHERE id = ?1", id, me, "里程碑")?;
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("里程碑名称不能为空".into());
@@ -1658,7 +1886,8 @@ pub fn update_milestone(
 }
 
 /// 只改排序。拖拽时每帧不该把整条记录回传一遍。
-pub fn reorder_milestones(conn: &Connection, project_id: i64, ids: Vec<i64>) -> Result<()> {
+pub fn reorder_milestones(conn: &Connection, me: i64, project_id: i64, ids: Vec<i64>) -> Result<()> {
+    require_member(conn, project_id, me)?;
     let ts = unix_now();
     let mut stmt = conn
         .prepare(
@@ -1673,7 +1902,8 @@ pub fn reorder_milestones(conn: &Connection, project_id: i64, ids: Vec<i64>) -> 
     Ok(())
 }
 
-pub fn delete_milestone(conn: &Connection, id: i64) -> Result<()> {
+pub fn delete_milestone(conn: &Connection, me: i64, id: i64) -> Result<()> {
+    account::require_row_member(conn, "SELECT project_id FROM milestones WHERE id = ?1", id, me, "里程碑")?;
     conn.execute("DELETE FROM milestones WHERE id = ?1", params![id])
         .map_err(|e| e.to_string())?;
     Ok(())

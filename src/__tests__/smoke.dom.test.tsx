@@ -10,7 +10,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 const invoke = vi.fn();
-vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
+vi.mock("@tauri-apps/api/core", async () => {
+  const { withSession } = await import("../test/ipc");
+  return { invoke: withSession((...a: unknown[]) => invoke(...a)) };
+});
 
 // 没开 globals，testing-library 不会自动清理；不清的话上一次 render 的
 // DOM 还留在 body 里，查询会命中多个同名节点

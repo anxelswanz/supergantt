@@ -2,6 +2,8 @@
 //! 字段校验、版本比较、依赖顺序全是纯逻辑，放 TS 侧能用 vitest 直接跑。
 //!
 //! 插件目录固定在 app_config_dir()/plugins，和 gantt.db、backups/ 在一起。
+//! 另有「开发目录」：开发者模式里登记的本地源码目录（plugin-dev-dirs.json），
+//! 直接从源码位置加载，同 id 时盖过已安装的那份。
 
 use std::path::{Path, PathBuf};
 
@@ -31,6 +33,8 @@ pub struct RawPlugin {
     pub entry_raw: Option<String>,
     /// 和 manifest 同级的 styles.css，有就自动注入
     pub css_raw: Option<String>,
+    /// 从开发目录加载的（不是装在插件目录里的）
+    pub dev: bool,
 }
 
 /// 把插件目录建出来并返回。首次调用会创建目录。
@@ -61,7 +65,12 @@ fn scan(app: &tauri::AppHandle) -> Result<Vec<RawPlugin>> {
     let dir = ensure_dir(app)?;
     let entries = std::fs::read_dir(&dir).map_err(|e| format!("读不了插件目录：{e}"))?;
 
-    let mut out = Vec::new();
+    let mut out: Vec<RawPlugin> = dev_dirs(app)
+        .into_iter()
+        .filter(|p| p.is_dir())
+        .filter_map(|p| read_plugin(&p, true))
+        .collect();
+
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
@@ -75,30 +84,128 @@ fn scan(app: &tauri::AppHandle) -> Result<Vec<RawPlugin>> {
         if crate::plugin_host::only_data(&path) {
             continue;
         }
-
-        let manifest_path = path.join("manifest.json");
-        let manifest_raw = read_text(&manifest_path);
-
-        // 入口名从 manifest 取，取不到退回 main.js。刻意宽松：只有 main.js
-        // 没 manifest 的目录交给 TS 侧报「缺少 manifest.json」，而不是静默跳过
-        let entry_name = manifest_raw
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-            .and_then(|v| v.get("main")?.as_str().map(str::to_string))
-            .unwrap_or_else(|| "main.js".to_string());
-
-        out.push(RawPlugin {
-            path: path.to_string_lossy().to_string(),
-            entry_raw: read_text(&path.join(&entry_name)),
-            css_raw: read_text(&path.join("styles.css")),
-            manifest_raw,
-            dir_name,
-        });
+        // 同 id 的开发目录在：用源码那份
+        if out.iter().any(|p| p.dev && p.dir_name == dir_name) {
+            continue;
+        }
+        out.extend(read_plugin(&path, false));
     }
 
     // 顺序稳定，否则每次启动视图顺序都在跳。按目录名排。
     out.sort_by(|a, b| a.dir_name.cmp(&b.dir_name));
     Ok(out)
+}
+
+/// 读一个插件目录。目录名取不出来（非 UTF-8、隐藏目录）时为 None
+fn read_plugin(path: &Path, dev: bool) -> Option<RawPlugin> {
+    let dir_name = match path.file_name().and_then(|n| n.to_str()) {
+        Some(n) if !n.starts_with('.') => n.to_string(),
+        _ => return None,
+    };
+    let manifest_path = path.join("manifest.json");
+    let manifest_raw = read_text(&manifest_path);
+
+    // 入口名从 manifest 取，取不到退回 main.js。刻意宽松：只有 main.js
+    // 没 manifest 的目录交给 TS 侧报「缺少 manifest.json」，而不是静默跳过
+    let entry_name = manifest_raw
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|v| v.get("main")?.as_str().map(str::to_string))
+        .unwrap_or_else(|| "main.js".to_string());
+
+    Some(RawPlugin {
+        path: path.to_string_lossy().to_string(),
+        entry_raw: read_text(&path.join(&entry_name)),
+        css_raw: read_text(&path.join("styles.css")),
+        manifest_raw,
+        dir_name,
+        dev,
+    })
+}
+
+/* ------------------------------------------------------------------ */
+/* 开发目录                                                            */
+/* ------------------------------------------------------------------ */
+
+/// 登记的开发目录，和 gantt.db 同目录。一行一个绝对路径的 JSON 数组
+const DEV_DIRS_FILE: &str = "plugin-dev-dirs.json";
+
+fn dev_dirs_file(app: &tauri::AppHandle) -> Result<PathBuf> {
+    Ok(app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("拿不到配置目录：{e}"))?
+        .join(DEV_DIRS_FILE))
+}
+
+/// 读登记表。文件坏了当作空表 —— 开发者模式不该挡住插件加载
+fn dev_dirs(app: &tauri::AppHandle) -> Vec<PathBuf> {
+    let Ok(file) = dev_dirs_file(app) else { return Vec::new() };
+    std::fs::read_to_string(file)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(PathBuf::from)
+        .collect()
+}
+
+fn write_dev_dirs(app: &tauri::AppHandle, dirs: &[PathBuf]) -> Result<()> {
+    let list: Vec<String> = dirs.iter().map(|p| p.to_string_lossy().to_string()).collect();
+    let text = serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?;
+    std::fs::write(dev_dirs_file(app)?, text).map_err(|e| format!("写不了 {DEV_DIRS_FILE}：{e}"))
+}
+
+/// 插件代码所在的目录：登记了开发目录就是它，否则是插件目录下的 `<id>/`。
+/// Skill 链接要指向真正的代码位置
+pub(crate) fn code_dir(app: &tauri::AppHandle, id: &str) -> Result<PathBuf> {
+    crate::plugin_host::check_id(id)?;
+    if let Some(p) = dev_dirs(app)
+        .into_iter()
+        .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(id))
+    {
+        return Ok(p);
+    }
+    Ok(ensure_dir(app)?.join(id))
+}
+
+#[tauri::command]
+pub fn dev_plugin_dirs(app: tauri::AppHandle) -> Vec<String> {
+    dev_dirs(&app).iter().map(|p| p.to_string_lossy().to_string()).collect()
+}
+
+/// 登记一个开发目录。目录名就是插件 id（和已安装插件的规则一样），
+/// 同名的旧登记被替换 —— 同一个 id 只能有一份源码
+#[tauri::command]
+pub fn dev_plugin_add(app: tauri::AppHandle, path: String) -> Result<String> {
+    let dir = PathBuf::from(&path);
+    if !dir.is_absolute() || !dir.is_dir() {
+        return Err(format!("「{path}」不是一个文件夹"));
+    }
+    if !dir.join("manifest.json").is_file() {
+        return Err("这个文件夹里没有 manifest.json —— 要选插件自己的目录，例如 plugins/feishu-sync".into());
+    }
+    let id = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("目录名读不出来")?
+        .to_string();
+    crate::plugin_host::check_id(&id)
+        .map_err(|_| format!("目录名「{id}」不能当插件 id：只能用小写字母、数字和 -，且字母开头"))?;
+
+    let mut dirs: Vec<PathBuf> = dev_dirs(&app)
+        .into_iter()
+        .filter(|p| p.file_name().and_then(|n| n.to_str()) != Some(id.as_str()))
+        .collect();
+    dirs.push(dir);
+    write_dev_dirs(&app, &dirs)?;
+    Ok(id)
+}
+
+#[tauri::command]
+pub fn dev_plugin_remove(app: tauri::AppHandle, path: String) -> Result<()> {
+    let dirs: Vec<PathBuf> = dev_dirs(&app).into_iter().filter(|p| p != Path::new(&path)).collect();
+    write_dev_dirs(&app, &dirs)
 }
 
 #[tauri::command]

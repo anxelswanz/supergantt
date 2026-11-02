@@ -10,9 +10,9 @@ import type { ComponentType } from "react";
 
 import { api } from "../db/api";
 import { attachRun, ensureProcListener } from "../db/proc";
-import type { BlockedPeriod } from "../core/blocked";
+import { closeBlocked, type BlockedPeriod } from "../core/blocked";
 import { kindLabel, mergeItems, type ItemRow } from "../core/items";
-import type { Task } from "../gantt/model";
+import { resolve, type Task } from "../gantt/model";
 import { useAppStore } from "../store/useAppStore";
 import { HOST_API_VERSION, validateManifest } from "./manifest";
 import type {
@@ -20,6 +20,7 @@ import type {
   PluginApi,
   PluginCommand,
   PluginItemAction,
+  PluginComposerOption,
   PluginItemBadge,
   PluginManifest,
   PluginProcess,
@@ -50,6 +51,8 @@ export interface RegistryState {
   itemActions: { pluginId: string; action: PluginItemAction }[];
   /** 事项行上的插件徽标 */
   itemBadges: { pluginId: string; badge: PluginItemBadge }[];
+  /** 「记一条」里的插件开关 */
+  composerOptions: { pluginId: string; option: PluginComposerOption }[];
   /** 徽标版本号：插件状态宿主看不见，靠 refresh() 加一令事项页重画 */
   badgeVersion: number;
   /** 首次扫描是否完成，用于区分「还没扫」和「扫了但一个都没有」 */
@@ -66,6 +69,7 @@ const state: RegistryState = {
   settingFields: [],
   itemActions: [],
   itemBadges: [],
+  composerOptions: [],
   badgeVersion: 0,
   booted: false,
   bootError: null,
@@ -379,8 +383,11 @@ function makeApi(manifest: PluginManifest, dir: string, disposables: Disposable[
           }),
         );
       },
-      run(cmdId) {
-        runCommand(cmdId);
+      run(cmdId, ...args) {
+        return callCommand(cmdId, args);
+      },
+      has(cmdId) {
+        return state.commands.has(cmdId);
       },
     },
 
@@ -476,8 +483,43 @@ function makeApi(manifest: PluginManifest, dir: string, disposables: Disposable[
           void store().addRisk(taskId, content, level);
         },
       },
+      async projectSnapshot() {
+        const app = store();
+        const project = app.project;
+        if (!project) return null;
+        // 落库是防抖的，刚拖完的那一下可能还没写进去 —— 和导出同一个规矩
+        await app.persistence?.flush();
+        // 折叠是浏览状态，不是项目内容：快照一律展开
+        const tasks = resolve([...app.tasks.values()].map((t) => ({ ...t, collapsed: false })));
+        // 风险、记录、事项都直接从库里查：事项只有进过事项视图才在 store 里
+        const [risks, dailyNotes, itemNotes, itemKinds] = await Promise.all([
+          api.loadProjectRisks(project.id),
+          api.loadDailyNotes(project.id),
+          api.loadItemNotes(project.id),
+          api.listItemKinds().catch(() => app.itemKinds),
+        ]);
+        const { buildSnapshot } = await import("../core/projectSnapshot");
+        return buildSnapshot({
+          projectName: project.name,
+          tasks,
+          people: app.people,
+          risks,
+          dailyNotes,
+          itemNotes,
+          itemKinds,
+          today: todayDays(),
+        });
+      },
+      async legacyAiReviews() {
+        const project = store().project;
+        if (!project) return [];
+        const rows = await api.listAiReviews(project.id).catch(() => []);
+        return Array.isArray(rows) ? rows : [];
+      },
       items: {
         list: itemSnapshot,
+        close: closeItem,
+        reopen: reopenItem,
         subscribe(listener) {
           // 只在这几样变了时通知 —— 拖一下甘特条不该让日报重算一遍
           const off = useAppStore.subscribe((next, prev) => {
@@ -553,6 +595,23 @@ function makeApi(manifest: PluginManifest, dir: string, disposables: Disposable[
       },
     },
 
+    composer: {
+      register(option: PluginComposerOption) {
+        if (state.composerOptions.some((o) => o.option.id === option.id)) {
+          throw new Error(`录入开关 "${option.id}" 已经被注册过了`);
+        }
+        const entry = { pluginId: id, option };
+        state.composerOptions = [...state.composerOptions, entry];
+        commit();
+        return track(
+          disposable(() => {
+            state.composerOptions = state.composerOptions.filter((o) => o !== entry);
+            commit();
+          }),
+        );
+      },
+    },
+
     itemBadges: {
       register(badge: PluginItemBadge) {
         const entry = { pluginId: id, badge };
@@ -598,6 +657,34 @@ function makeApi(manifest: PluginManifest, dir: string, disposables: Disposable[
       },
     },
 
+    ai: {
+      available() {
+        return api.aiAvailable().catch(() => false);
+      },
+      async ask(prompt, opts = {}) {
+        // 和 exec 白名单同一个道理：不是沙箱，是让「这个插件会把数据发给 Claude」在安装前就看得见
+        if (!manifest.permissions?.ai) {
+          throw new Error(`插件 ${id} 没有声明可以用 Claude —— 在 manifest 的 permissions 里加上 "ai": true`);
+        }
+        const { askClaude } = await import("../core/claude");
+        const run = await askClaude(prompt, opts);
+        track(disposable(() => run.cancel()));
+        return run;
+      },
+    },
+
+    export: {
+      async document(input) {
+        const { exportMarkdownDocument } = await import("../export/run");
+        return exportMarkdownDocument(input.format, {
+          projectName: store().project?.name ?? "",
+          title: input.title,
+          markdown: input.markdown,
+          fileName: input.fileName,
+        });
+      },
+    },
+
     util: {
       toISODate: daysToIso,
       toDay: isoToDays,
@@ -639,7 +726,7 @@ async function spawnProcess(
   const done = new Promise<{ code: number | null }>((resolve) => {
     finish = (code) => resolve({ code });
   });
-  // 分发在 db/proc.ts，与内置 AI 复盘共用
+  // 分发在 db/proc.ts，与 api.ai.ask 共用
   attachRun(runId, {
     onStdout: guarded(opts.onStdout),
     onStderr: guarded(opts.onStderr),
@@ -900,6 +987,7 @@ export async function boot(): Promise<void> {
         records.push({
           manifest: placeholderManifest(r.dir_name),
           path: r.path,
+          dev: r.dev,
           enabled: false,
           status: "error",
           error: check.error,
@@ -915,6 +1003,7 @@ export async function boot(): Promise<void> {
       const record: PluginRecord = {
         manifest,
         path: r.path,
+        dev: r.dev,
         enabled: isEnabled,
         status: isEnabled ? "loaded" : "disabled",
         warnings: check.warnings,
@@ -1026,6 +1115,14 @@ export async function rescan(): Promise<void> {
     await unlinkSkills(r.manifest);
   }
   const kept = state.records.filter((r) => present.has(r.manifest.id));
+  // 还在的：位置可能变了（登记或移除了同 id 的开发目录）。已加载的代码不动，
+  // 调用方要让新位置生效就 reload
+  const byId = new Map(raw.map((r) => [r.dir_name, r]));
+  for (const r of kept) {
+    const now = byId.get(r.manifest.id)!;
+    r.path = now.path;
+    r.dev = now.dev;
+  }
 
   // 新出现的先不启用，同 boot
   const known = new Set(kept.map((r) => r.manifest.id));
@@ -1034,10 +1131,18 @@ export async function rescan(): Promise<void> {
     const check = validateManifest(r.manifest_raw, r.dir_name);
     kept.push(
       check.ok
-        ? { manifest: check.manifest, path: r.path, enabled: false, status: "disabled", warnings: check.warnings }
+        ? {
+            manifest: check.manifest,
+            path: r.path,
+            dev: r.dev,
+            enabled: false,
+            status: "disabled",
+            warnings: check.warnings,
+          }
         : {
             manifest: placeholderManifest(r.dir_name),
             path: r.path,
+            dev: r.dev,
             enabled: false,
             status: "error",
             error: check.error,
@@ -1068,14 +1173,91 @@ export async function reload(pluginId: string): Promise<void> {
 
 /** 跑一个命令；命令面板和插件内部调用都走它 */
 export function runCommand(id: string): void {
-  const cmd = snapshot.commands.get(id);
-  if (!cmd) {
-    warn(`没有找到命令 "${id}"`);
+  callCommand(id, []).catch((e) => warn((e as Error).message));
+}
+
+/** 跨插件调用：带参数、拿返回值。命令表读 state（不读 snapshot）—— 刚注册的也要找得到 */
+function callCommand(id: string, args: unknown[]): Promise<unknown> {
+  const cmd = state.commands.get(id);
+  if (!cmd) return Promise.reject(new Error(`没有找到命令 "${id}"（提供它的插件可能没有启用）`));
+  return Promise.resolve()
+    .then(() => cmd.run(...args))
+    .catch((e) => {
+      throw new Error(`命令 "${id}" 执行失败：${(e as Error)?.message ?? e}`);
+    });
+}
+
+/**
+ * 关闭一条事项并写结论。三种来源各走事项页圆圈那条路，规则也和圆圈一致：
+ * 悬挂引用、还没分拣的不让关。已关闭的也能再写：事项、风险的结论被覆盖、
+ * 关闭日期记成今天（库里关闭和写结论是同一条语句）；已结束的阻碍只改结论
+ */
+function findRow(key: string): ItemRow {
+  const s = useAppStore.getState();
+  const row = mergeItems({
+    notes: s.itemNotes,
+    tasks: [...s.tasks.values()].map((t) => ({ id: t.id, name: t.name, personId: t.personId, blocked: t.blocked })),
+    risks: s.projectRisks,
+    today: todayDays(),
+  }).find((r) => r.key === key);
+  if (!row) throw new Error(`没有找到事项「${key}」`);
+  if (row.dangling) throw new Error("这条事项分拣成的阻碍或风险已经被删掉了，先在事项页重新分拣");
+  return row;
+}
+
+export async function closeItem(key: string, resolution: string): Promise<void> {
+  const text = resolution.trim();
+  const s = useAppStore.getState();
+  const row = findRow(key);
+
+  if (row.source === "risk" && row.risk) {
+    if (!text) throw new Error("风险关闭时要写结论");
+    await s.resolveRisk(row.risk.id, text);
     return;
   }
-  void Promise.resolve()
-    .then(() => cmd.run())
-    .catch((e) => warn(`命令 "${id}" 执行失败：${e}`));
+  if (row.source === "blocker" && row.blocker) {
+    const task = s.tasks.get(row.blocker.taskId);
+    if (!task) throw new Error("这条阻碍所在的任务已经不在了");
+    const pid = row.blocker.period.id;
+    const closed = row.blocker.live ? closeBlocked(task.blocked, pid, todayDays()) : task.blocked;
+    s.patchTask(
+      task.id,
+      { blocked: closed.map((p) => (p.id === pid ? withResolution(p, text) : p)) },
+      row.blocker.live ? "关闭阻碍" : "改阻碍结论",
+    );
+    return;
+  }
+  if (row.note) {
+    if (row.kind == null) throw new Error("这条事项还没分拣，先在事项页给它选个类型");
+    await s.closeItemNote(row.note.id, text || null);
+    return;
+  }
+  throw new Error(`事项「${key}」关不了`);
+}
+
+/** 写或清阻碍的结论。清的时候把字段整个拿掉，和从没写过一样 */
+function withResolution(p: BlockedPeriod, text: string): BlockedPeriod {
+  if (text) return { ...p, resolution: text };
+  const { resolution: _drop, ...rest } = p;
+  return rest;
+}
+
+/** 撤回关闭。阻碍不重开（规则同事项页：已经过去的卡顿不改成「又卡上了」），只清结论 */
+export async function reopenItem(key: string): Promise<void> {
+  const s = useAppStore.getState();
+  const row = findRow(key);
+  if (row.source === "risk" && row.risk) {
+    if (row.closed) await s.reopenRisk(row.risk.id);
+    return;
+  }
+  if (row.source === "blocker" && row.blocker) {
+    const task = s.tasks.get(row.blocker.taskId);
+    const pid = row.blocker.period.id;
+    if (!task || row.blocker.period.resolution == null) return;
+    s.patchTask(task.id, { blocked: task.blocked.map((p) => (p.id === pid ? withResolution(p, "") : p)) }, "清阻碍结论");
+    return;
+  }
+  if (row.note && row.closed) await s.reopenItemNote(row.note.id);
 }
 
 export const plugins = {

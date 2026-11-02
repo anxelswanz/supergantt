@@ -11,7 +11,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 const invoke = vi.fn();
-vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
+vi.mock("@tauri-apps/api/core", async () => {
+  const { withSession } = await import("../test/ipc");
+  return { invoke: withSession((...a: unknown[]) => invoke(...a)) };
+});
 
 const summary = {
   project: {
@@ -30,6 +33,8 @@ const summary = {
   leafCount: 30,
   overdueCount: 0,
   progress: 0.4,
+  role: "owner",
+  memberCount: 1,
 };
 
 beforeEach(() => {

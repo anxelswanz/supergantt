@@ -6,7 +6,10 @@ import { isoToDay } from "../gantt/time";
 
 
 const invoke = vi.fn();
-vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
+vi.mock("@tauri-apps/api/core", async () => {
+  const { withSession } = await import("../test/ipc");
+  return { invoke: withSession((...a: unknown[]) => invoke(...a)) };
+});
 
 const row = (id: number, over: Partial<TaskRow> = {}): TaskRow => ({
   id,

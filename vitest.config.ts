@@ -6,7 +6,7 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   test: {
-    // cargo 构建会把 plugins/ 作为资源拷进 target/（含测试文件），那些副本不该再跑一遍
+    // target/ 是 cargo 的构建产物，里面不该有要跑的测试
     exclude: [...configDefaults.exclude, "**/target/**"],
   },
 });

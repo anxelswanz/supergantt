@@ -14,6 +14,8 @@ import { Icon } from "../brand/Icon";
 import { BrandLockup } from "../brand/Brand";
 import { PROJECT_COLORS, useAppStore } from "../store/useAppStore";
 import { DbImportDialog } from "./DbImportDialog";
+import { AccountMenu } from "./Accounts";
+import { Settings } from "./Settings";
 import { ImportDialog } from "./ImportDialog";
 import {
   commit,
@@ -52,7 +54,8 @@ export function ProjectList() {
   const createProject = useAppStore((s) => s.createProject);
   const openProject = useAppStore((s) => s.openProject);
   const deleteProject = useAppStore((s) => s.deleteProject);
-  const loadPeople = useAppStore((s) => s.loadPeople);
+  const settingsTab = useAppStore((s) => s.settingsTab);
+  const closeSettings = useAppStore((s) => s.closeSettings);
 
   const [creating, setCreating] = useState(false);
   /** 正在确认删除的项目。删项目是这个应用里唯一不可撤销的破坏性操作 */
@@ -148,7 +151,7 @@ export function ProjectList() {
     setUndoing(true);
     try {
       await api.undoDbImport(outcome.backupPath);
-      await Promise.all([loadProjects(), loadPeople()]);
+      await loadProjects();
       setNotice(null);
     } catch (err) {
       setReadError(`撤销失败：${err}`);
@@ -192,6 +195,7 @@ export function ProjectList() {
             <button onClick={() => setCreating(true)} className="btn btn-primary h-7 px-3">
               <Icon name="plus" />新建项目
             </button>
+            <AccountMenu />
           </div>
         </header>
 
@@ -272,7 +276,7 @@ export function ProjectList() {
               </div>
             ))}
             <div className="ml-auto self-center pr-0.5 text-[10px]">
-              数据存在本机的同一个 .db 里
+              数据存在本机的同一个 .db 里，各账号的项目互相独立
             </div>
           </footer>
         )}
@@ -318,10 +322,10 @@ export function ProjectList() {
               setPendingDb(null);
               setNotice({ kind: "dbImported", outcome });
               void loadProjects();
-              void loadPeople();
             }}
           />
         )}
+        {settingsTab != null && <Settings initialTab={settingsTab} onClose={closeSettings} />}
         {deleting && (
           <DeleteProjectDialog
             summary={deleting}
@@ -507,6 +511,12 @@ function DeleteProjectDialog({
         {/* 写具体数字，比「不可恢复」更让人停一下 */}
         <p className="mt-2 text-xs leading-relaxed text-[var(--text-dim)]">
           {summary.taskCount} 个任务，连同风险、评论和逐日记录会一起删掉。
+          {summary.memberCount > 1 && (
+            <>
+              <br />
+              这是共享项目，另外 {summary.memberCount - 1} 个成员也会一起失去它。
+            </>
+          )}
           <br />
           <span className="font-medium text-[var(--danger)]">不能撤销</span>，
           {shortcut("mod", "Z")} 也救不回来，只能从 <code>backups/</code> 恢复。
@@ -565,7 +575,7 @@ function ProjectCard({
   onExport: () => void;
   onRevealData: () => void;
 }) {
-  const { project, taskCount, startDate, endDate, overdueCount, progress } = summary;
+  const { project, taskCount, startDate, endDate, overdueCount, progress, role, memberCount } = summary;
 
   return (
     <motion.button
@@ -589,6 +599,15 @@ function ProjectCard({
             {overdueCount > 0 && (
               <span className="font-mono font-semibold text-[var(--danger)]">
                 {overdueCount} 逾期
+              </span>
+            )}
+            {memberCount > 1 && (
+              <span
+                title={role === "owner" ? `已共享给 ${memberCount - 1} 个账号` : "别人共享给你的项目"}
+                className="flex items-center gap-0.5"
+              >
+                <Icon name="share" size={11} />
+                {role === "owner" ? `共享 ${memberCount}` : "共享给我"}
               </span>
             )}
           </div>
@@ -642,18 +661,21 @@ function ProjectCard({
         >
           <Icon name="export" size={12} />导出
         </span>
-        <span
-          role="button"
-          tabIndex={0}
-          onClick={(e) => {
-            e.stopPropagation();
-            onDelete();
-          }}
-          title="删除这个项目，需要输入确认"
-          className="rounded-[var(--r-s)] px-2 py-1 text-[10px] font-medium text-[var(--text-dim)] hover:bg-[var(--row-hover)] hover:text-[var(--danger)]"
-        >
-          删除
-        </span>
+        {/* 只有所有者能删；编辑者要离开共享项目，在工作区的「共享」里退出 */}
+        {role === "owner" && (
+          <span
+            role="button"
+            tabIndex={0}
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete();
+            }}
+            title="删除这个项目，需要输入确认"
+            className="rounded-[var(--r-s)] px-2 py-1 text-[10px] font-medium text-[var(--text-dim)] hover:bg-[var(--row-hover)] hover:text-[var(--danger)]"
+          >
+            删除
+          </span>
+        )}
       </div>
     </motion.button>
   );

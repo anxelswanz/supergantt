@@ -76,7 +76,7 @@
 
 ```
 错误：找不到叫「王五」的负责人。现有：张三、李四。
-确认是新人请加 --create-missing，或先 `gantt people create --name 王五`。
+确认是新人请加 --create-missing，或先 `gantt people create --project <项目> --name 王五`。
 ```
 
 加 `--create-missing` 才会顺便建。这是刻意的 —— 让错别字变成一个真负责人，
@@ -111,19 +111,22 @@
 
 | 选项 | 字段 | 说明 |
 |---|---|---|
-| `--name` | `name` | 唯一，重名会报错 |
+| `--project` | `projectId` | 必填。负责人归项目，每个项目一份名单 |
+| `--name` | `name` | 项目内唯一，重名会报错 |
 | `--color` | `color` | `#RRGGBB`，不写自动分配 |
 
-删负责人（应用里操作）不会删他的任务，只是那些任务变回「未分配」。
+JSON 里还有 `accountId`（绑定的本机账号，null = 没有账号的人）。绑定账号只能在桌面应用里做。
+删负责人不会删他的任务，只是那些任务变回「未分配」；绑定着账号的负责人不能删。
 
 ## 项目（project）
 
 | 选项 | 字段 | 说明 |
 |---|---|---|
-| `--name` | `name` | 唯一 |
+| `--name` | `name` | 在当前账号看得见的项目里唯一 |
 | `--color` | `color` | `#RRGGBB`，不写给默认色 |
 
-`project show --project <id|名字>` 能拿单个项目详情；`project list` 列全部。
+`project show --project <id|名字>` 能拿单个项目详情；`project list` 列当前账号看得见的全部项目
+（自己的 + 别人共享给自己的），JSON 里 `role` 是 `owner` / `editor`。只有 owner 能删项目。
 
 ## 数据在哪
 

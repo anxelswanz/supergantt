@@ -14,6 +14,7 @@
 //! ## 模块
 //!
 //! - [`schema`] —— 迁移数组、打开、自愈。加列只改这里。
+//! - [`account`] —— 账号、项目成员、共享、人员绑定。项目级读写的权限门也在这里。
 //! - [`model`] —— 结构体。字段名即 JSON 契约，两个消费方共用。
 //! - [`query`] —— 读 + 各类 CRUD。桌面应用的 40 多个命令都转发到这里。
 //! - [`write`] —— 写入。应用走整项目事务替换，CLI 走行级 upsert。
@@ -27,6 +28,7 @@
 //! 字符串是**给人看的中文**。桌面应用把它丢给前端 toast，CLI 把它打到 stderr
 //! 并据此决定退出码。库层就把 rusqlite 的英文报错翻掉，调用方不再各翻一遍。
 
+pub mod account;
 pub mod calendar;
 pub mod feishu;
 pub mod locate;

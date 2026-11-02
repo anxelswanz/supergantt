@@ -40,10 +40,12 @@ use std::collections::HashSet;
 /// 用户下次打开才发现全没了。对前端来说契约不变：仍然是「把完整期望状态发过来」。
 pub fn save_project(
     conn: &mut Connection,
+    me: i64,
     id: i64,
     tasks: Vec<TaskRow>,
     dependencies: Vec<DependencyRow>,
 ) -> Result<()> {
+    crate::account::require_member(conn, id, me)?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
 
     // —— 先挡住跨项目的 id 撞车 ——
@@ -119,7 +121,6 @@ pub fn save_project(
                    person_id  = excluded.person_id,
                    milestone  = excluded.milestone,
                    weight     = excluded.weight,
-                   collapsed  = excluded.collapsed,
                    pinned     = excluded.pinned,
                    note       = excluded.note,
                    sort_order = excluded.sort_order,
@@ -141,7 +142,8 @@ pub fn save_project(
             stmt.execute(params![
                 t.id, id, t.parent_id, t.name, t.start_date, t.end_date, t.progress,
                 t.priority, t.person_id, t.milestone as i64, t.weight,
-                t.collapsed as i64, t.pinned as i64, t.note, t.sort_order, t.blocked,
+                // tasks.collapsed 不再使用，折叠状态写进当前账号的 task_view_state
+                0, t.pinned as i64, t.note, t.sort_order, t.blocked,
                 t.auto_rollover as i64, t.actual_start, t.actual_end, ts,
             ])
             .map_err(|e| e.to_string())?;
@@ -161,6 +163,23 @@ pub fn save_project(
             )
         };
         tx.execute(&sql, params![id]).map_err(|e| e.to_string())?;
+    }
+
+    {
+        // 折叠是每个人自己的视图状态（migrations/015）。只存折起的行：
+        // 展开是默认值，没必要为几百个展开的任务各存一行
+        tx.execute(
+            "DELETE FROM task_view_state
+              WHERE account_id = ?1 AND task_id IN (SELECT id FROM tasks WHERE project_id = ?2)",
+            params![me, id],
+        )
+        .map_err(|e| e.to_string())?;
+        let mut stmt = tx
+            .prepare("INSERT INTO task_view_state (account_id, task_id, collapsed) VALUES (?1, ?2, 1)")
+            .map_err(|e| e.to_string())?;
+        for t in tasks.iter().filter(|t| t.collapsed) {
+            stmt.execute(params![me, t.id]).map_err(|e| e.to_string())?;
+        }
     }
 
     {

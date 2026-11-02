@@ -40,6 +40,8 @@ interface Props {
   maxHeight?: number;
   className?: string;
   autoFocus?: boolean;
+  /** 裸 Enter 就是换行，不提交 —— 提交交给外面的按钮（或 onKeyDown 里接的 ⌘Enter） */
+  enterNewline?: boolean;
 }
 
 export const GrowingTextarea = forwardRef<GrowingTextareaHandle, Props>(
@@ -54,6 +56,7 @@ export const GrowingTextarea = forwardRef<GrowingTextareaHandle, Props>(
       maxHeight = 120,
       className = "",
       autoFocus,
+      enterNewline = false,
     },
     ref,
   ) {
@@ -82,7 +85,7 @@ export const GrowingTextarea = forwardRef<GrowingTextareaHandle, Props>(
           e.stopPropagation();
           onKeyDown?.(e);
           if (e.defaultPrevented) return;
-          if (e.key === "Enter" && !e.shiftKey) {
+          if (e.key === "Enter" && !e.shiftKey && !enterNewline) {
             e.preventDefault();
             onSubmit?.();
           }

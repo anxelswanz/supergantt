@@ -34,8 +34,9 @@ import {
   type ItemRow,
 } from "../core/items";
 import { MenuDivider, MenuItem, Popover } from "./Popover";
-import { GrowingTextarea, type GrowingTextareaHandle } from "./GrowingTextarea";
-import { FilterSelect, type SelectOption } from "./FilterSelect";
+import { NoteComposer } from "./QuickNote";
+import { loadMemo, memoKey, saveMemo } from "../core/memo";
+import type { SelectOption } from "./FilterSelect";
 import type { ItemKind, Person } from "../db/api";
 import { BlockedDetail } from "./BlockedDetail";
 import { PromoteDialog, type PromoteTarget } from "./PromoteDialog";
@@ -86,14 +87,42 @@ export function ItemsView() {
   const taskMap = useAppStore((s) => s.tasks);
   const revision = useAppStore((s) => s.revision);
   const people = useAppStore((s) => s.people);
-  const setQuickNoteOpen = useAppStore((s) => s.setQuickNoteOpen);
   const pendingSortNoteId = useAppStore((s) => s.pendingSortNoteId);
   const setPendingSortNote = useAppStore((s) => s.setPendingSortNote);
   const itemOrder = useAppStore((s) => s.itemOrder);
   const setItemOrder = useAppStore((s) => s.setItemOrder);
 
-  const [filter, setFilter] = useState<ItemFilter>(EMPTY_FILTER);
+  const projectId = useAppStore((s) => s.project?.id ?? null);
+  const [filter, setFilterState] = useState<ItemFilter>(EMPTY_FILTER);
+  /**
+   * 筛选条件按项目记住：切走再回来、重启应用都还在。搜索词不记 —— 那是一次性的查找，
+   * 下次进来还带着一个看不见的搜索词，只会让人以为事项丢了。
+   * 读回来之前不写，免得一打开就用空条件把记住的那份盖掉
+   */
+  const filterLoaded = useRef<number | null>(null);
+  useEffect(() => {
+    filterLoaded.current = null;
+    setFilterState(EMPTY_FILTER);
+    if (projectId == null) return;
+    let live = true;
+    void loadMemo<Partial<ItemFilter>>(memoKey.itemsFilter(projectId)).then((saved) => {
+      if (!live) return;
+      if (saved) setFilterState({ ...EMPTY_FILTER, ...saved, query: "" });
+      filterLoaded.current = projectId;
+    });
+    return () => {
+      live = false;
+    };
+  }, [projectId]);
+  const setFilter = (next: ItemFilter) => {
+    setFilterState(next);
+    if (projectId != null && filterLoaded.current === projectId) {
+      const { query: _q, ...keep } = next;
+      saveMemo(memoKey.itemsFilter(projectId), keep);
+    }
+  };
   const [closedOpen, setClosedOpen] = useState(false);
+  const [composerOpen, setComposerOpen] = useState(false);
   /** 点开的那条阻碍详情。渲染在本视图根层 —— 它是 fixed 模态 */
   const [blockedDetail, setBlockedDetail] = useState<{ taskId: number; periodId: string } | null>(
     null,
@@ -209,16 +238,17 @@ export function ItemsView() {
           )}
 
           {/*
-            不再放「＋ 记一条」按钮：下面就是常驻录入行，同一个视图里两个入口
-            做同一件事只会让人犹豫点哪个。⌘K 那个弹窗是给**别的**视图用的，
-            这里只提一句它的存在
+            录入入口：一个按钮，点开是一张大的书写弹窗（NoteComposer roomy）。
+            ⌘K 的紧凑版照样在任何视图下都能用，这里不再另提
           */}
           <button
-            onClick={() => setQuickNoteOpen(true)}
-            title="在任何视图下都能唤出快速记录"
-            className="ml-auto shrink-0 text-[10px] text-[var(--text-dim)] transition-colors hover:text-[var(--text)]"
+            onClick={() => setComposerOpen(true)}
+            title={`记一条事项（任何视图下也可以按 ${shortcut("mod", "K")}）`}
+            className="ml-auto flex h-7 shrink-0 items-center gap-1.5 self-center rounded-md px-3 text-[11.5px] font-medium text-[var(--on-accent)] shadow-[0_1px_0_rgba(0,0,0,0.06)] transition-[filter,transform] hover:brightness-110 active:scale-[0.97]"
+            style={{ background: "var(--accent)" }}
           >
-            <Kbd>{shortcut("mod", "K")}</Kbd> 随处记一条
+            <span className="text-[13px] leading-none">＋</span>
+            记一条
           </button>
 
           {/* 导出的是筛出来的这些，按屏幕上的顺序 */}
@@ -256,12 +286,6 @@ export function ItemsView() {
         />
       </div>
 
-      {/*
-        常驻的录入行。事项视图里连记多条时，弹出层是多余的 ——
-        但它和 ⌘K 那个弹窗写进的是同一条路径（store.addItemNote），
-        不是第二套录入逻辑。
-      */}
-      <InlineComposer tasks={tasks} day={day} />
 
       {/* layoutScroll：行的位移动画要把这个容器的滚动量算进去，否则滚过之后再排序会从错的位置飞进来 */}
       <motion.div layoutScroll className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
@@ -274,7 +298,7 @@ export function ItemsView() {
           >
             {!filtering ? (
               <>
-                {closed.length > 0 ? "全部处理完了。" : "还没有事项。"}想到什么就在上面记一句 ——
+                {closed.length > 0 ? "全部处理完了。" : "还没有事项。"}想到什么就点右上角「记一条」——
                 <br />
                 不用先想清楚它是什么，也不用填日期。
               </>
@@ -404,6 +428,8 @@ export function ItemsView() {
           onClose={() => setPromoting(null)}
         />
       )}
+
+      <NoteComposer roomy open={composerOpen} onClose={() => setComposerOpen(false)} />
     </div>
     </MotionConfig>
   );
@@ -746,13 +772,9 @@ function Chips<T>({
   );
 }
 
-/* ------------------------------------------------------------------ */
-/* 常驻录入行                                                          */
-/* ------------------------------------------------------------------ */
-
 /**
  * 「关联到哪条任务」的选项：受阻 → 进行中 → 待开始 → 其余。
- * 录入行和行尾菜单里的「更换关联任务」共用这一份，两处顺序不会不一样
+ * 行尾菜单里的「更换关联任务」用这一份
  */
 function taskPickOptions(tasks: ResolvedTask[], day: number): SelectOption<number | null>[] {
   const rank = (t: ResolvedTask) => {
@@ -769,107 +791,6 @@ function taskPickOptions(tasks: ResolvedTask[], day: number): SelectOption<numbe
         search: t.name,
       })),
   ];
-}
-
-function InlineComposer({ tasks, day }: { tasks: ResolvedTask[]; day: number }) {
-  const addItemNote = useAppStore((s) => s.addItemNote);
-  const people = useAppStore((s) => s.people);
-  const taskMap = useAppStore((s) => s.tasks);
-
-  const [name, setName] = useState("");
-  const [personId, setPersonId] = useState<number | null>(null);
-  const [taskId, setTaskId] = useState<number | null>(null);
-  const [priority, setPriority] = useState<Priority>(2);
-  const touchedPerson = useRef(false);
-  const dropdownOpen = useRef(0);
-  const inputRef = useRef<GrowingTextareaHandle>(null);
-
-  const taskOptions = useMemo(() => taskPickOptions(tasks, day), [tasks, day]);
-
-  const submit = async () => {
-    if (!name.trim()) return;
-    const row = await addItemNote(name, priority, personId, taskId);
-    if (!row) return;
-    setName("");
-    inputRef.current?.focus();
-  };
-
-  return (
-    <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-[var(--rule)] bg-[var(--surface-alt)] px-4 py-2">
-      {/*
-        标题框是一个**会换行、会长高**的多行框，不是单行输入框。
-        一条事项常常是一整句话（「供应商说电机下周才能到，要不要先上二号线」），
-        单行框里它会往左滚出去，写到一半就无法回头检查自己写了什么。
-
-        它也比旁边那三个下拉明显大一号：这一行里只有它是必填的，其余三个
-        不动也能直接 Enter 存下 —— 版面上的大小差别要把这件事说出来，
-        否则四个等高的控件读起来像四个同等重要的字段。
-      */}
-      <GrowingTextarea
-        ref={inputRef}
-        value={name}
-        onChange={setName}
-        onSubmit={() => {
-          // 下拉开着时 Enter 归下拉。正常情况下焦点在下拉自己的搜索框里，
-          // 这个回调根本不会被调到 —— 留着是因为规则只写在一处就够了
-          if (dropdownOpen.current === 0) void submit();
-        }}
-        placeholder="记一条…（↵ 保存并接着记，⇧↵ 换行）"
-        minHeight={44}
-        maxHeight={120}
-        className="min-w-[200px] flex-1 rounded-lg border border-[var(--rule)] bg-[var(--surface)] px-3 py-2.5 text-[13px] leading-relaxed text-[var(--text)] focus:border-[var(--accent)]"
-      />
-      <FilterSelect
-        value={personId}
-        options={[
-          { value: null, label: "未指派" },
-          ...people.map((p) => ({ value: p.id as number | null, label: p.name, color: p.color })),
-        ]}
-        onPick={(id) => {
-          touchedPerson.current = true;
-          setPersonId(id);
-        }}
-        onOpenChange={(o) => (dropdownOpen.current += o ? 1 : -1)}
-        placeholder="未指派"
-        width={110}
-      />
-      <FilterSelect
-        value={taskId}
-        options={taskOptions}
-        onPick={(id) => {
-          setTaskId(id);
-          if (touchedPerson.current || id == null) return;
-          const owner = taskMap.get(id)?.personId ?? null;
-          if (owner != null) setPersonId(owner);
-        }}
-        onOpenChange={(o) => (dropdownOpen.current += o ? 1 : -1)}
-        placeholder="不关联任务"
-        width={156}
-      />
-      <FilterSelect
-        value={priority}
-        options={PRIORITY_LABELS.map((label, i) => ({
-          value: i as Priority,
-          label,
-          color: PRIORITY_COLORS[i],
-        }))}
-        onPick={setPriority}
-        onOpenChange={(o) => (dropdownOpen.current += o ? 1 : -1)}
-        width={92}
-      />
-      {/* 和标题框同高：它是这一行的终点，不该比旁边的下拉还矮 */}
-      <button
-        onClick={() => void submit()}
-        disabled={!name.trim()}
-        title="保存并接着记"
-        className="flex h-[30px] shrink-0 items-center gap-1.5 rounded-lg px-3 text-[11px] font-medium text-white transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
-        style={{ background: "var(--accent)" }}
-      >
-        记下来
-        <span className="text-[10px] opacity-70">↵</span>
-      </button>
-    </div>
-  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -1066,7 +987,7 @@ function Row({
       }}
       // 整行都能按住拖。按钮、输入框上按下不起拖（见 useRowDrag.start）
       onPointerDown={(e) => drag.start(row, e)}
-      className="group relative cursor-grab rounded-lg px-2 py-1.5 transition-colors hover:bg-[var(--row-hover)] active:cursor-grabbing"
+      className="group relative cursor-grab rounded-lg px-2 py-3 transition-colors hover:bg-[var(--row-hover)] active:cursor-grabbing"
       style={{
         // 持续中的阻碍是唯一一类「现在就要人去处理」的行，给它一道底色。
         // 其余一律不上色 —— 一张人人高亮的列表等于没有高亮
@@ -1093,11 +1014,15 @@ function Row({
       <span
         title="按住整行拖动调整顺序"
         aria-hidden
-        className="pointer-events-none absolute left-0 top-1.5 grid h-5 w-2 select-none place-items-center text-[9px] leading-none tracking-[-2px] text-[var(--text-dim)] opacity-0 transition-opacity group-hover:opacity-100"
+        className="pointer-events-none absolute left-0 top-3 grid h-[22px] w-2 select-none place-items-center text-[9px] leading-none tracking-[-2px] text-[var(--text-dim)] opacity-0 transition-opacity group-hover:opacity-100"
       >
         ⋮⋮
       </span>
-      <div className="flex items-center gap-2.5">
+      {/*
+        顶端对齐：标题会折成多行，圆圈、日期和右侧那一串都跟着**第一行**走，
+        不跟着整块文字的中线跑 —— 否则一条四行的事项，它的勾会掉到第二行半中间
+      */}
+      <div className="flex items-start gap-2.5">
 
         {/* 圆圈。点下去的后果按类型不同 —— 见 core/items.closePolicy */}
         <motion.button
@@ -1106,7 +1031,7 @@ function Row({
           title={circleTitle}
           whileTap={{ scale: 0.8 }}
           transition={SNAPPY}
-          className="grid size-[15px] shrink-0 place-items-center rounded-full border text-[9px] leading-none transition-colors hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:border-dashed disabled:opacity-40 disabled:hover:border-[var(--rule)]"
+          className="mt-[3.5px] grid size-[15px] shrink-0 place-items-center rounded-full border text-[9px] leading-none transition-colors hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:border-dashed disabled:opacity-40 disabled:hover:border-[var(--rule)]"
           style={{
             borderColor: row.closed ? "var(--text-dim)" : "var(--rule)",
             color: "var(--text-dim)",
@@ -1135,7 +1060,7 @@ function Row({
           固定宽度 + tabular-nums，所以标题的起点在每一行都对齐。
         */}
         <span
-          className="w-[32px] shrink-0 font-mono text-[10px] tabular-nums text-[var(--text-dim)]"
+          className="w-[32px] shrink-0 font-mono text-[10px] leading-[22px] tabular-nums text-[var(--text-dim)]"
           title={`记录于 ${new Date(row.createdAt * 1000).toLocaleDateString("zh-CN")}`}
         >
           {shortDate(row.createdAt)}
@@ -1143,10 +1068,13 @@ function Row({
 
         {/*
           标题。拿掉两列之后它终于能铺满剩下的宽度 ——
-          一条事项的全部价值就在这句话里，别的都是它的属性
+          一条事项的全部价值就在这句话里，别的都是它的属性。
+
+          不再截成一行：照原样换行（录入时的回车保留），最多摊开 4 行，
+          再长的收在 4 行末尾，完整内容悬停看
         */}
         <span
-          className={`min-w-0 flex-1 truncate text-[12px] leading-5 ${
+          className={`line-clamp-4 min-w-0 flex-1 whitespace-pre-wrap break-words text-[13px] leading-[22px] ${
             row.closed ? "text-[var(--text-dim)] line-through" : "text-[var(--text)]"
           }`}
           title={hover}
@@ -1155,6 +1083,7 @@ function Row({
         </span>
 
         {/* 从事项分拣出来的实体。放在标题右边紧挨着，它修饰的是「这条怎么来的」 */}
+        <span className="flex h-[22px] shrink-0 items-center gap-2.5">
         {row.fromNoteId != null && (
           <span
             className="shrink-0 text-[10px] leading-none text-[var(--text-dim)]"
@@ -1197,6 +1126,7 @@ function Row({
           taskOptions={taskOptions}
           onOpenBlocked={onOpenBlocked}
         />
+        </span>
       </div>
 
       {/*
@@ -1204,7 +1134,7 @@ function Row({
         不该为了对齐而空占 18 像素。缩进对齐到标题的起点
       */}
       {(meta.length > 0 || row.resolution || row.dangling) && (
-        <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 pl-[67px] text-[10px] leading-snug">
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 pl-[67px] text-[10px] leading-snug">
           {row.dangling && (
             <>
               <span className="font-medium text-[var(--danger)]" title="它当初分拣成的那个阻碍/风险已经被删掉了">

@@ -1,6 +1,6 @@
-//! 插件宿主能力：附带插件安装、私有存储、受限子进程、Skill 软链接进 `~/.claude/skills`。
+//! 插件宿主能力：卸载、私有存储、受限子进程、Skill 软链接进 `~/.claude/skills`。
 //! 这些检查不是安全沙箱（插件与宿主同一 WebView，能 invoke 任何命令），只挡手误：
-//! 存储限 `plugins/<id>/data/` 且卸载不删；子进程只认裸程序名、禁 shell；exec 白名单在 registry.ts。
+//! 存储限 `plugins/<id>/data/accounts/<账号>/` 且卸载不删；子进程只认裸程序名、禁 shell；exec 白名单在 registry.ts。
 //! 真正的边界是「装之前先确认来源」。
 
 use std::collections::HashMap;
@@ -19,7 +19,7 @@ use crate::plugin::ensure_dir;
 type Result<T> = std::result::Result<T, String>;
 
 /// 插件 id 形状，与 manifest.ts 的 ID_PATTERN 一致。会拼进路径，必须挡 `../x` 这类穿越。
-fn check_id(id: &str) -> Result<()> {
+pub(crate) fn check_id(id: &str) -> Result<()> {
     let ok = (2..=64).contains(&id.len())
         && id.chars().next().is_some_and(|c| c.is_ascii_lowercase())
         && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
@@ -49,97 +49,17 @@ fn plugin_dir(app: &tauri::AppHandle, id: &str) -> Result<PathBuf> {
 }
 
 /* ------------------------------------------------------------------ */
-/* 随应用附带的插件                                                     */
+/* 安装 / 卸载（下载在 plugin_store.rs）                                 */
 /* ------------------------------------------------------------------ */
 
-/// 附带插件在资源目录下的子目录，见 tauri.conf.json 的 bundle.resources。
-const BUNDLED_DIR: &str = "bundled-plugins";
-
-/// 找附带插件目录：debug 优先读仓库 `plugins/`（改源码后要重新构建才会同步到 resources），打包后读资源目录。
-fn bundled_root(app: &tauri::AppHandle) -> Option<PathBuf> {
-    if cfg!(debug_assertions) {
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("plugins");
-        if repo.is_dir() {
-            return Some(repo);
-        }
-    }
-    let dir = app.path().resource_dir().ok()?.join(BUNDLED_DIR);
-    dir.is_dir().then_some(dir)
-}
-
-#[derive(Serialize)]
-pub struct BundledPlugin {
-    pub dir_name: String,
-    /// 附带版本的 manifest 原文，校验在 TS 侧
-    pub manifest_raw: Option<String>,
-    /// 已安装版本的 manifest 原文，没装为 None
-    pub installed_manifest_raw: Option<String>,
-}
-
-#[tauri::command]
-pub fn list_bundled_plugins(app: tauri::AppHandle) -> Result<Vec<BundledPlugin>> {
-    let Some(root) = bundled_root(&app) else {
-        return Ok(Vec::new());
-    };
-    let installed = ensure_dir(&app)?;
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(&root).map_err(|e| format!("读不了附带插件目录：{e}"))?.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
-            continue;
-        };
-        if !path.is_dir() || name.starts_with('.') || check_id(&name).is_err() {
-            continue;
-        }
-        out.push(BundledPlugin {
-            manifest_raw: std::fs::read_to_string(path.join("manifest.json")).ok(),
-            installed_manifest_raw: std::fs::read_to_string(installed.join(&name).join("manifest.json")).ok(),
-            dir_name: name,
-        });
-    }
-    out.sort_by(|a, b| a.dir_name.cmp(&b.dir_name));
-    Ok(out)
-}
-
 /// 安装时跳过：测试、隐藏文件、运行时自写的 data 与 node_modules。
-fn skip_on_install(name: &str) -> bool {
+/// 插件仓库的打包脚本（scripts/lib.mjs 的 skip）是同一套规则，这里是第二道。
+pub(crate) fn skip_on_install(name: &str) -> bool {
     name.starts_with('.') || name.contains(".test.") || name == "data" || name == "node_modules"
 }
 
-fn copy_tree(from: &Path, to: &Path) -> Result<()> {
-    std::fs::create_dir_all(to).map_err(|e| format!("建不了目录 {}：{e}", to.display()))?;
-    for entry in std::fs::read_dir(from).map_err(|e| format!("读不了 {}：{e}", from.display()))?.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if skip_on_install(&name) {
-            continue;
-        }
-        let src = entry.path();
-        let dst = to.join(&name);
-        if src.is_dir() {
-            copy_tree(&src, &dst)?;
-        } else {
-            std::fs::copy(&src, &dst).map_err(|e| format!("拷不了 {name}：{e}"))?;
-        }
-    }
-    Ok(())
-}
-
-/// 安装或更新附带插件。更新只换代码，`data/` 保留。
-#[tauri::command]
-pub fn install_bundled_plugin(app: tauri::AppHandle, id: String) -> Result<()> {
-    let root = bundled_root(&app).ok_or("这个版本的应用没有附带插件")?;
-    check_id(&id)?;
-    let src = root.join(&id);
-    if !src.join("manifest.json").is_file() {
-        return Err(format!("附带插件里没有「{id}」"));
-    }
-    let dst = plugin_dir(&app, &id)?;
-    remove_code(&dst)?;
-    copy_tree(&src, &dst)
-}
-
 /// 删掉 `data/` 以外的一切。目录不存在不算错。
-fn remove_code(dir: &Path) -> Result<()> {
+pub(crate) fn remove_code(dir: &Path) -> Result<()> {
     if !dir.is_dir() {
         return Ok(());
     }
@@ -182,14 +102,28 @@ pub fn uninstall_plugin(app: tauri::AppHandle, id: String) -> Result<()> {
 /* 私有存储                                                            */
 /* ------------------------------------------------------------------ */
 
-fn data_file(app: &tauri::AppHandle, id: &str, name: &str) -> Result<PathBuf> {
+/// 按账号分开：`plugins/<id>/data/accounts/<账号 uuid>/<name>`（gantt_core::locate::plugin_data_dir）。
+/// A 的飞书队列、API 配置不该被 B 读到，也不该被 B 的同步写进 B 的表格。
+fn data_file(app: &tauri::AppHandle, db: &crate::db::Db, id: &str, name: &str) -> Result<PathBuf> {
     check_name(name, "文件名")?;
-    Ok(plugin_dir(app, id)?.join("data").join(name))
+    check_id(id)?;
+    let me = db.me()?;
+    let uuid = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        gantt_core::account::get_account(&conn, me)?.uuid
+    };
+    let config = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    Ok(gantt_core::locate::plugin_data_dir(&config, id, &uuid).join(name))
 }
 
 #[tauri::command]
-pub fn plugin_storage_read(app: tauri::AppHandle, id: String, name: String) -> Result<Option<String>> {
-    let path = data_file(&app, &id, &name)?;
+pub fn plugin_storage_read(
+    app: tauri::AppHandle,
+    db: tauri::State<crate::db::Db>,
+    id: String,
+    name: String,
+) -> Result<Option<String>> {
+    let path = data_file(&app, &db, &id, &name)?;
     match std::fs::read_to_string(&path) {
         Ok(s) => Ok(Some(s)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -199,8 +133,14 @@ pub fn plugin_storage_read(app: tauri::AppHandle, id: String, name: String) -> R
 
 /// 临时文件 + rename：gantt CLI 会并发读，半截 JSON 会解析失败。
 #[tauri::command]
-pub fn plugin_storage_write(app: tauri::AppHandle, id: String, name: String, content: String) -> Result<()> {
-    let path = data_file(&app, &id, &name)?;
+pub fn plugin_storage_write(
+    app: tauri::AppHandle,
+    db: tauri::State<crate::db::Db>,
+    id: String,
+    name: String,
+    content: String,
+) -> Result<()> {
+    let path = data_file(&app, &db, &id, &name)?;
     let dir = path.parent().ok_or("路径不对")?;
     std::fs::create_dir_all(dir).map_err(|e| format!("建不了 data 目录：{e}"))?;
     let tmp = dir.join(format!(".{name}.tmp"));
@@ -328,7 +268,7 @@ pub fn plugin_spawn(
     spawn_piped(&app, &procs, &exe, &args, &cwd, stdin)
 }
 
-/// 起进程、接管 IO、登记进进程表。插件与 AI 复盘（ai_review.rs）共用，前端只监听一套 `plugin-proc`。
+/// 起进程、接管 IO、登记进进程表。插件的 proc.spawn 与 ai.ask（ai.rs）共用，前端只监听一套 `plugin-proc`。
 /// 不在这里判断「能跑什么」：插件靠程序名检查 + 白名单，AI 复盘把程序和参数写死在 Rust 里。
 pub(crate) fn spawn_piped(
     app: &tauri::AppHandle,
@@ -428,7 +368,8 @@ fn skills_dir() -> Result<PathBuf> {
 pub fn plugin_link_skill(app: tauri::AppHandle, id: String, dir: String, name: String) -> Result<String> {
     check_name(&dir, "Skill 目录")?;
     check_name(&name, "Skill 名")?;
-    let src = plugin_dir(&app, &id)?.join(&dir);
+    // 开发中的插件从源码目录链接，改 SKILL.md 立刻生效
+    let src = crate::plugin::code_dir(&app, &id)?.join(&dir);
     if !src.join("SKILL.md").is_file() {
         return Err(format!("插件里没有 {dir}/SKILL.md"));
     }
@@ -461,9 +402,8 @@ pub fn plugin_unlink_skill(app: tauri::AppHandle, id: String, name: String) -> R
     if !meta.file_type().is_symlink() {
         return Ok(());
     }
-    let mine = plugin_dir(&app, &id)?;
     let target = std::fs::read_link(&dst).unwrap_or_default();
-    if target.starts_with(&mine) {
+    if target.starts_with(plugin_dir(&app, &id)?) || target.starts_with(crate::plugin::code_dir(&app, &id)?) {
         std::fs::remove_file(&dst).map_err(|e| format!("移除链接失败：{e}"))?;
     }
     Ok(())

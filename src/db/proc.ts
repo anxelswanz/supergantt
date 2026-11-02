@@ -1,5 +1,5 @@
 /**
- * 所有子进程输出共用 `plugin-proc` 事件（plugin_host.rs spawn_piped），插件和 AI 复盘都走这里。
+ * 所有子进程输出共用 `plugin-proc` 事件（plugin_host.rs spawn_piped），插件的 proc.spawn 和 ai.ask 都走这里。
  * 分发表必须只有一份，否则各自会把对方的事件当早到事件攒着，永不释放。
  */
 

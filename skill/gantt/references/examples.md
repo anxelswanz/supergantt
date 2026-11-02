@@ -12,7 +12,7 @@
 # 1. 找到项目、看现有任务（别重复建）、看负责人名字怎么写的
 gantt project list --json
 gantt task list --project 3 --json
-gantt people list --json
+gantt people list --project 3 --json
 ```
 
 ```bash
@@ -88,7 +88,7 @@ gantt task update 52 --assignee 李四 --json
 李四如果还不在负责人列表里：
 
 ```bash
-gantt people create --name 李四
+gantt people create --project 3 --name 李四
 ```
 
 ---

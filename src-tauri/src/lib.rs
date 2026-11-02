@@ -1,13 +1,13 @@
-use std::sync::Mutex;
 use tauri::Manager;
 
-mod ai_review;
+mod ai;
 mod backup;
 mod db;
 mod dbfile;
 mod export;
 mod plugin;
 mod plugin_host;
+mod plugin_store;
 mod transfer;
 
 pub(crate) const DB_FILE: &str = "gantt.db";
@@ -29,7 +29,24 @@ pub fn run() {
                 eprintln!("[backup] 备份失败：{err}");
             }
 
-            app.manage(db::Db(Mutex::new(conn)));
+            // 账号功能之前的插件数据（飞书队列等）归默认账号。幂等，每次启动都跑也无妨
+            if let Ok(accounts) = gantt_core::account::list_accounts(&conn) {
+                if let Some(first) = accounts.iter().min_by_key(|a| a.id) {
+                    if let Err(err) = gantt_core::locate::migrate_legacy_plugin_data(&dir, &first.uuid) {
+                        eprintln!("[plugin] 迁移旧插件数据失败：{err}");
+                    }
+                }
+            }
+
+            let db = db::Db::new(conn);
+            {
+                let conn = db.0.lock().map_err(|e| e.to_string())?;
+                // 上次的账号没设密码就直接进入；失败只是停在登录页，不挡启动
+                if let Err(err) = db::auto_login(&db, &conn) {
+                    eprintln!("[session] 自动登录失败：{err}");
+                }
+            }
+            app.manage(db);
             app.manage(plugin_host::Procs::default());
 
             // 留 PID 锁文件，告诉离线 CLI「应用正开着，别写」（gantt-core/src/locate.rs）。
@@ -52,8 +69,25 @@ pub fn run() {
             db::create_baseline,
             db::load_baseline,
             db::delete_baseline,
+            db::session_state,
+            db::login,
+            db::logout,
+            db::create_account,
+            db::update_account,
+            db::set_password,
+            db::delete_account_plan,
+            db::delete_account,
+            db::list_members,
+            db::share_preview,
+            db::share_project,
+            db::unshare_project,
+            db::leave_project,
+            db::transfer_ownership,
             db::list_people,
             db::create_person,
+            db::list_visible_people,
+            db::import_people,
+            db::bind_person,
             db::update_person,
             db::delete_person,
             db::count_person_tasks,
@@ -97,13 +131,16 @@ pub fn run() {
             db::update_milestone,
             db::reorder_milestones,
             db::delete_milestone,
-            ai_review::ai_review_available,
-            ai_review::ai_review_run,
+            ai::ai_available,
+            ai::ai_ask,
             plugin::list_plugins,
             plugin::plugins_dir,
             plugin::reveal_plugins_dir,
-            plugin_host::list_bundled_plugins,
-            plugin_host::install_bundled_plugin,
+            plugin::dev_plugin_dirs,
+            plugin::dev_plugin_add,
+            plugin::dev_plugin_remove,
+            plugin_store::store_fetch_index,
+            plugin_store::store_install,
             plugin_host::uninstall_plugin,
             plugin_host::plugin_storage_read,
             plugin_host::plugin_storage_write,

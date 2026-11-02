@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@tauri-apps/api/core", () => ({ invoke: () => Promise.resolve(null) }));
 
 import { useAppStore } from "../store/useAppStore";
-import { itemSnapshot } from "./registry";
+import { closeItem, itemSnapshot, reopenItem } from "./registry";
 import type { Task } from "../gantt/model";
 
 /** data.items 和事项页走同一个合并层：含不是从事项分拣来的阻碍，名字/类型名已解好 */
@@ -100,5 +100,80 @@ describe("itemSnapshot", () => {
   it("没打开项目时是空的", () => {
     useAppStore.setState({ project: null });
     expect(itemSnapshot()).toEqual([]);
+  });
+});
+
+describe("1.3：data.items.close", () => {
+  it("事项走 closeItemNote，风险走 resolveRisk，结论去掉首尾空白", async () => {
+    const closeItemNote = vi.fn(async () => {});
+    const resolveRisk = vi.fn(async () => {});
+    useAppStore.setState({ closeItemNote, resolveRisk } as never);
+
+    await closeItem("note:1", "  换夹具\n1. 量尺寸  ");
+    expect(closeItemNote).toHaveBeenCalledWith(1, "换夹具\n1. 量尺寸");
+    await closeItem("risk:5", "改用备选供应商");
+    expect(resolveRisk).toHaveBeenCalledWith(5, "改用备选供应商");
+  });
+
+  it("持续中的阻碍：今天结束，并记下结论", async () => {
+    const patchTask = vi.fn();
+    useAppStore.setState({ patchTask } as never);
+    await closeItem("blocker:12/b1", "到货了");
+    const [taskId, changes, label] = patchTask.mock.calls[0];
+    expect(taskId).toBe(12);
+    expect(label).toBe("关闭阻碍");
+    expect(changes.blocked[0]).toMatchObject({ id: "b1", resolution: "到货了" });
+    expect(changes.blocked[0].open).not.toBe(true);
+  });
+
+  it("1.4：事项可以不带结论关闭，风险不行", async () => {
+    const closeItemNote = vi.fn(async () => {});
+    useAppStore.setState({ closeItemNote } as never);
+    await closeItem("note:1", "  ");
+    expect(closeItemNote).toHaveBeenCalledWith(1, null);
+    await expect(closeItem("risk:5", "")).rejects.toThrow(/结论/);
+  });
+
+  it("认不出的 key、还没分拣的事项都拒绝", async () => {
+    const s = useAppStore.getState();
+    await expect(closeItem("note:99", "x")).rejects.toThrow(/没有找到/);
+    useAppStore.setState({ itemNotes: [{ ...s.itemNotes[0], kind: null }] });
+    await expect(closeItem("note:1", "x")).rejects.toThrow(/分拣/);
+  });
+});
+
+describe("1.4：data.items.reopen", () => {
+  it("事项、风险重新打开；没关的不动", async () => {
+    const reopenItemNote = vi.fn(async () => {});
+    const reopenRisk = vi.fn(async () => {});
+    const s = useAppStore.getState();
+    useAppStore.setState({
+      reopenItemNote,
+      reopenRisk,
+      itemNotes: [{ ...s.itemNotes[0], closedAt: unix("2026-10-09"), resolution: "x" }],
+      projectRisks: [{ ...s.projectRisks[0], resolved: true, resolution: "y" }],
+    } as never);
+    await reopenItem("note:1");
+    await reopenItem("risk:5");
+    expect(reopenItemNote).toHaveBeenCalledWith(1);
+    expect(reopenRisk).toHaveBeenCalledWith(5);
+
+    useAppStore.setState({ itemNotes: [{ ...s.itemNotes[0], closedAt: null }] });
+    reopenItemNote.mockClear();
+    await reopenItem("note:1");
+    expect(reopenItemNote).not.toHaveBeenCalled();
+  });
+
+  it("阻碍：不重开，只把结论拿掉", async () => {
+    const patchTask = vi.fn();
+    const task = useAppStore.getState().tasks.get(12)!;
+    useAppStore.setState({
+      patchTask,
+      tasks: new Map([[12, { ...task, blocked: [{ ...task.blocked[0], open: false, resolution: "到货了" }] } as Task]]),
+    } as never);
+    await reopenItem("blocker:12/b1");
+    const period = patchTask.mock.calls[0][1].blocked[0];
+    expect(period.open).toBe(false);
+    expect(period).not.toHaveProperty("resolution");
   });
 });

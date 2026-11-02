@@ -14,7 +14,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 const invoke = vi.fn();
-vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
+vi.mock("@tauri-apps/api/core", async () => {
+  const { withSession } = await import("../test/ipc");
+  return { invoke: withSession((...a: unknown[]) => invoke(...a)) };
+});
 
 const unix = (iso: string) => Date.parse(`${iso}T00:00:00Z`) / 1000;
 
@@ -377,26 +380,30 @@ describe("改类型", () => {
   });
 });
 
-describe("常驻录入行", () => {
+describe("「记一条」弹窗", () => {
   /**
+   * 事项视图里没有常驻录入行了：头部一个「记一条」按钮，点开大号书写弹窗。
+   *
    * 标题框是**会换行的多行框**，不是单行输入框。
    *
    * 一条事项常常是一整句话，单行框里它会往左滚出去 —— 写到一半就无法
-   * 回头检查自己写了什么。换成 textarea 之后随之而来的问题是「回车是
-   * 提交还是换行」，所以这里把那条分工钉住：裸 ↵ 提交、⇧↵ 换行。
+   * 回头检查自己写了什么。这个弹窗是专门来写的，所以回车就是换行，
+   * 保存只靠「记下来」按钮（⌘↵ 是它的快捷键）。
    */
-  it("是 textarea：⇧↵ 换行不提交，裸 ↵ 才提交", async () => {
+  it("是 textarea：↵ 换行不提交，点「记下来」才提交", async () => {
     const store = await openWorkspace();
     store.getState().setActiveView("items");
 
-    const box = (await screen.findByPlaceholderText(/^记一条…/)) as HTMLTextAreaElement;
+    fireEvent.click(await screen.findByRole("button", { name: /记一条/ }));
+    const box = (await screen.findByPlaceholderText(/^会上提到的那件事、/)) as HTMLTextAreaElement;
     expect(box.tagName).toBe("TEXTAREA");
 
     fireEvent.change(box, { target: { value: "供应商说电机下周才能到" } });
+    fireEvent.keyDown(box, { key: "Enter" });
     fireEvent.keyDown(box, { key: "Enter", shiftKey: true });
     expect(invoke.mock.calls.some(([c]) => c === "add_item_note")).toBe(false);
 
-    fireEvent.keyDown(box, { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: "记下来" }));
     await waitFor(() =>
       expect(invoke.mock.calls.some(([c]) => c === "add_item_note")).toBe(true),
     );
@@ -412,7 +419,8 @@ describe("常驻录入行", () => {
     store.getState().setActiveView("items");
     const before = store.getState().tasks.size;
 
-    const box = await screen.findByPlaceholderText(/^记一条…/);
+    fireEvent.click(await screen.findByRole("button", { name: /记一条/ }));
+    const box = await screen.findByPlaceholderText(/^会上提到的那件事、/);
     fireEvent.change(box, { target: { value: "随手记一条" } });
     fireEvent.keyDown(box, { key: "Enter" });
 
@@ -429,7 +437,7 @@ describe("视图开关", () => {
 
     await waitFor(() => expect(screen.queryByRole("button", { name: "看板" })).toBe(null));
     // 编号跟着重新算 —— 不留一个按了没反应的死键
-    expect(store.getState().enabledViews).toEqual(["gantt", "timeline", "review", "ai-review", "items", "milestone"]);
+    expect(store.getState().enabledViews).toEqual(["gantt", "timeline", "review", "items", "milestone"]);
 
     fireEvent.keyDown(window, { key: "2", metaKey: true, ctrlKey: true });
     await waitFor(() => expect(store.getState().activeView).toBe("timeline"));
@@ -465,13 +473,12 @@ describe("视图开关", () => {
       "gantt",
       "board",
       "timeline",
-      "ai-review",
       "items",
       "milestone",
     ]);
 
     await store.getState().loadSettings();
-    expect(store.getState().enabledViews).toEqual(["gantt", "board", "timeline", "ai-review", "items", "milestone"]);
+    expect(store.getState().enabledViews).toEqual(["gantt", "board", "timeline", "items", "milestone"]);
   });
 });
 
@@ -784,5 +791,97 @@ describe("事项视图：任务按钮、筛选、排序", () => {
 
     store.getState().setActiveView("board");
     await waitFor(() => expect(screen.queryByText("导出")).toBe(null));
+  });
+});
+
+describe("记一条：分类、记住上一次、插件开关", () => {
+  const pick = async (triggerTitle: RegExp, label: string) => {
+    fireEvent.click(screen.getByTitle(triggerTitle));
+    // 下拉弹出层里那一项（列表里可能有同名文字，取最后挂上来的）
+    const hits = await screen.findAllByText(label);
+    fireEvent.click(hits[hits.length - 1]);
+  };
+
+  it("录入时可以直接分类；关联任务和分类下次打开还在", async () => {
+    await openWorkspace();
+    fireEvent.keyDown(window, { key: "k", metaKey: true, ctrlKey: true });
+    await screen.findByText("快速记录");
+
+    await pick(/现在就分好/, "问题");
+    await pick(/关联的活/, "#12 电机安装");
+    const input = screen.getByPlaceholderText("会上提到的那件事…");
+    fireEvent.change(input, { target: { value: "夹具尺寸不对" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() =>
+      expect(invoke.mock.calls.some(([c, a]) => c === "update_item_note" && (a as { kind: string }).kind === "issue")).toBe(true),
+    );
+    expect(invoke.mock.calls.find(([c]) => c === "add_item_note")![1]).toMatchObject({ taskId: 12 });
+
+    // 关掉再打开：分类、任务沿用上一次，标题是空的
+    fireEvent.keyDown(screen.getByPlaceholderText("会上提到的那件事…"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByText("快速记录")).toBeNull());
+    fireEvent.keyDown(window, { key: "k", metaKey: true, ctrlKey: true });
+    await screen.findByText("快速记录");
+    await waitFor(() => expect(screen.getByTitle(/现在就分好/).textContent).toContain("问题"));
+    expect(screen.getByTitle(/关联的活/).textContent).toContain("电机安装");
+    expect((screen.getByPlaceholderText("会上提到的那件事…") as HTMLTextAreaElement).value).toBe("");
+    // 按项目记
+    expect(settings["memo.composer.task.7"]).toBe("12");
+    expect(settings["memo.composer.kind.7"]).toBe('"issue"');
+  });
+
+  it("插件注册的开关出现在录入弹窗里，开着时存下后收到这条事项", async () => {
+    // 一个只注册录入开关的插件：存下后把事项记到 window 上
+    const source = `export function onload(api) {
+      api.composer.register({ id: "t.opt", label: "测试开关", onSaved: (item) => { window.__saved = item; } });
+    }`;
+    URL.createObjectURL = () => `data:text/javascript,${encodeURIComponent(source)}`;
+    URL.revokeObjectURL = () => {};
+    settings.plugins_enabled = JSON.stringify(["t-plugin"]);
+    const base = invoke.getMockImplementation()!;
+    invoke.mockImplementation((cmd: string, args?: Record<string, unknown>) =>
+      cmd === "list_settings_with_prefix"
+        ? Promise.resolve([])
+        : cmd === "list_plugins"
+        ? Promise.resolve([
+            {
+              dir_name: "t-plugin",
+              path: "/p/t-plugin",
+              manifest_raw: JSON.stringify({ id: "t-plugin", name: "T", version: "1.0.0", apiVersion: "1.5" }),
+              entry_raw: source,
+              css_raw: null,
+              dev: false,
+            },
+          ])
+        : base(cmd, args),
+    );
+
+    await openWorkspace();
+    fireEvent.keyDown(window, { key: "k", metaKey: true, ctrlKey: true });
+    await screen.findByText("快速记录");
+    const sw = await screen.findByRole("switch", { name: "测试开关" });
+    expect(sw.getAttribute("aria-checked")).toBe("false");
+    fireEvent.click(sw);
+    expect(sw.getAttribute("aria-checked")).toBe("true");
+
+    const input = screen.getByPlaceholderText("会上提到的那件事…");
+    fireEvent.change(input, { target: { value: "电机要延期" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect((window as unknown as { __saved?: { title: string; noteId: number } }).__saved).toMatchObject({ title: "电机要延期", noteId: 99 }));
+    // 开关状态记住了
+    expect(settings["memo.composer.option.t.opt"]).toBe("true");
+  });
+});
+
+describe("事项页筛选按项目记住", () => {
+  it("改了筛选，下次进来还在；搜索词不记", async () => {
+    settings["memo.items.filter.7"] = JSON.stringify({ kinds: ["issue"], status: "open", query: "旧搜索" });
+    const store = await openWorkspace();
+    store.getState().setActiveView("items");
+    await screen.findByText("事项");
+    // 读回来的筛选：只剩问题类，「等料」那条阻碍被筛掉
+    await waitFor(() => expect(screen.queryByText("等料")).toBeNull());
+    expect((screen.getByPlaceholderText(/搜索/) as HTMLInputElement).value).toBe("");
   });
 });

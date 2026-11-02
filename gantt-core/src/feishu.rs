@@ -1,4 +1,4 @@
-//! 飞书同步插件（`plugins/feishu-sync`）的同步队列。
+//! 飞书同步插件（插件仓库 anxelswanz/supergantt-plugins 的 `plugins/feishu-sync`）的同步队列。
 //!
 //! 队列不在 gantt.db 里，而在插件自己的数据目录：
 //! `<数据目录>/plugins/feishu-sync/data/queue.json`。插件在应用里维护它
@@ -24,34 +24,49 @@
 //!     "addedAt": "2026-10-12T09:00:00Z",
 //!     "missing": false,          // 源事项已被删除
 //!     "item": { ...ItemView },   // 插件维护的最新快照
+//!     "analysis": {              // 可选：故障树附上的根因分析，见下
+//!       "source": "fault-tree", "problem": "…",
+//!       "rootCauses": [{ "label": "…", "chain": ["顶事件", "…", "根因"], "actions": ["对策"] }],
+//!       "steps": ["1. 事件 — 已确认 · 2026-10-21", "   1.1 …"],   // 排查过程，整棵树
+//!       "solution": ["对策", "…"], "updatedAt": "…"
+//!     },
 //!     "syncs": {
 //!       "<baseToken>:<tableId>": {
 //!         "recordId": "rec…", "syncedAt": "…", "snapshot": { ...ItemView }, "error": null
 //!       }
 //!     }
+//!   }],
+//!   "waiting": [{                // 可选：「记一条」时开了加入飞书、还没分拣的；分拣后插件把它挪进 entries
+//!     "key": "note:15", "projectId": 1, "addedAt": "…"
 //!   }]
 //! }
 //! ```
 //!
+//! CLI 只读写 entries；waiting 原样保留（整份 JSON 读进来、改完整份写回）。
+//!
 //! 状态按「目标表」算：同一条事项可以同步到两张表，各有各的记录。
+//!
+//! `analysis` 不参与「有没有改过」的比较：故障树写它的同时会关闭事项、写结论，
+//! 事项本身的变化已经足以让状态变成「有变更」（撤回时同理：事项重开 → 有变更）。
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
-/// 插件 id。和 plugins/feishu-sync/manifest.json 一致
+/// 插件 id。和插件仓库里 plugins/feishu-sync/manifest.json 一致
 pub const PLUGIN_ID: &str = "feishu-sync";
 
-pub fn data_dir(app_data: &Path) -> PathBuf {
-    app_data.join("plugins").join(PLUGIN_ID).join("data")
+/// 队列和配置按账号分开（DESIGN.md §13）：A 加进队列的事项不该被 B 同步到 B 的表格里。
+pub fn data_dir(app_data: &Path, account_uuid: &str) -> PathBuf {
+    crate::locate::plugin_data_dir(app_data, PLUGIN_ID, account_uuid)
 }
 
-pub fn queue_path(app_data: &Path) -> PathBuf {
-    data_dir(app_data).join("queue.json")
+pub fn queue_path(app_data: &Path, account_uuid: &str) -> PathBuf {
+    data_dir(app_data, account_uuid).join("queue.json")
 }
 
-pub fn config_path(app_data: &Path) -> PathBuf {
-    data_dir(app_data).join("config.json")
+pub fn config_path(app_data: &Path, account_uuid: &str) -> PathBuf {
+    data_dir(app_data, account_uuid).join("config.json")
 }
 
 /// 读一个 JSON 文件。不存在当作空对象 —— 插件还没写过队列是正常状态。
@@ -76,8 +91,10 @@ pub fn save(path: &Path, value: &Value) -> Result<(), String> {
 
 /// 比较「有没有改过」时看的字段。
 ///
-/// ⚠️ 和 plugins/feishu-sync/main.js 的 SNAPSHOT_FIELDS 必须一字不差 ——
+/// ⚠️ 和插件仓库里 plugins/feishu-sync/main.js 的 SNAPSHOT_FIELDS 必须一字不差 ——
 /// 两边算出不同的状态，界面上就是「已同步」而 CLI 说「有变更」。
+/// 改了这里之后，在插件仓库跑 `npm run sync-sdk`：它把这份列表抽进
+/// sdk/feishu-snapshot-fields.json，插件的测试拿它比对。
 pub const SNAPSHOT_FIELDS: &[&str] = &[
     "title", "kind", "kindLabel", "priority", "personId", "personName", "taskId", "taskName", "day",
     "closed", "closedDay", "resolution", "riskLevel",
@@ -248,8 +265,8 @@ pub struct WriteLock(PathBuf);
 const LOCK_STALE_SECS: u64 = 120;
 
 impl WriteLock {
-    pub fn acquire(app_data: &Path) -> Result<WriteLock, String> {
-        let dir = data_dir(app_data);
+    pub fn acquire(app_data: &Path, account_uuid: &str) -> Result<WriteLock, String> {
+        let dir = data_dir(app_data, account_uuid);
         std::fs::create_dir_all(&dir).map_err(|e| format!("建不了 {}：{e}", dir.display()))?;
         let path = dir.join(".write.lock");
         for _ in 0..50 {
@@ -363,11 +380,12 @@ mod tests {
     fn write_lock_is_exclusive() {
         let dir = std::env::temp_dir().join(format!("gantt-feishu-lock-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let a = WriteLock::acquire(&dir).unwrap();
-        assert!(data_dir(&dir).join(".write.lock").exists());
+        let a = WriteLock::acquire(&dir, "u1").unwrap();
+        assert!(data_dir(&dir, "u1").join(".write.lock").exists());
+        let _other = WriteLock::acquire(&dir, "u2").expect("不同账号的锁互不相干");
         drop(a);
-        assert!(!data_dir(&dir).join(".write.lock").exists());
-        let _b = WriteLock::acquire(&dir).unwrap();
+        assert!(!data_dir(&dir, "u1").join(".write.lock").exists());
+        let _b = WriteLock::acquire(&dir, "u1").unwrap();
     }
 
     #[test]

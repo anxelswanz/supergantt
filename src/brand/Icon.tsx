@@ -20,7 +20,11 @@ export type IconName =
   | "plus"
   | "more"
   | "trash"
-  | "today";
+  | "today"
+  | "plugin"
+  | "search"
+  | "share"
+  | "lock";
 
 const PATHS: Record<IconName, ReactNode> = {
   back: <path d="M9.5 3.5 5 8l4.5 4.5" />,
@@ -50,6 +54,18 @@ const PATHS: Record<IconName, ReactNode> = {
   trash: <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5" />,
   // 今天：一根竖线穿过一格，和图形标的今天线同一个意思
   today: <path d="M2.5 5.5h11v7h-11zM8 2.5v11" />,
+  // 拼块：四格里缺一角、外伸一个凸起 —— 插件是「插进来的那一块」
+  plugin: <path d="M3 3h4v4H3zM9 9h4v4H9zM3 9h4v4H3zM9 5h2V3h2v4H9z" />,
+  search: <path d="M7 12a5 5 0 1 0 0-10 5 5 0 0 0 0 10zM10.6 10.6 14 14" />,
+  // 共享：两个人肩并肩
+  share: (
+    <>
+      <circle cx="6" cy="5.5" r="2" />
+      <path d="M2.5 13c.4-2.2 1.8-3.5 3.5-3.5s3.1 1.3 3.5 3.5" />
+      <path d="M10.5 3.8a2 2 0 0 1 0 3.6M11.5 9.7c1.1.4 1.8 1.5 2 3.3" />
+    </>
+  ),
+  lock: <path d="M4.5 7.5h7v5.5h-7zM6 7.5V5.5a2 2 0 0 1 4 0v2" />,
 };
 
 export function Icon({

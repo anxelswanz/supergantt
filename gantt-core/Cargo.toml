@@ -6,6 +6,8 @@ authors = ["you"]
 edition = "2021"
 
 [dependencies]
+argon2 = "0.5"
+password-hash = { version = "0.5", features = ["getrandom"] }
 # ⚠️ rusqlite 版本必须和 src-tauri/Cargo.toml 里的**完全一致**（连 feature 一起）。
 #
 # 两边只要有一处对不上，Cargo 会同时编出两份 rusqlite，于是 `gantt_core::Connection`

@@ -187,15 +187,9 @@ pub struct DbImportOutcome {
     pub backup_path: String,
 }
 
-struct ExtraPerson {
-    name: String,
-    color: String,
-    avatar: Option<String>,
-}
-
 pub struct Plan {
     items: Vec<(Archive, DbImportItem)>,
-    extra_people: Vec<ExtraPerson>,
+    extra_people: Vec<String>,
     problems: Vec<String>,
     warnings: Vec<String>,
 }
@@ -206,13 +200,16 @@ impl Plan {
             problems: self.problems.clone(),
             warnings: source_warnings.iter().chain(&self.warnings).cloned().collect(),
             projects: self.items.iter().map(|(_, item)| item.clone()).collect(),
-            extra_people: self.extra_people.iter().map(|p| p.name.clone()).collect(),
+            extra_people: self.extra_people.clone(),
         }
     }
 }
 
 /// 读源库、校验、对号、定名，不写库。
-pub fn plan(local: &Connection, src: &Connection) -> rusqlite::Result<Plan> {
+///
+/// 多账号下（migrations/015）只对号到 `me` **拥有**的项目：别人的、或自己只是编辑者的
+/// 项目不会被覆盖，同 uuid 的源项目作为新项目导入。名字只需在 `me` 看得见的项目里不撞。
+pub fn plan(local: &Connection, src: &Connection, me: i64) -> rusqlite::Result<Plan> {
     let ids: Vec<i64> = src
         .prepare("SELECT id FROM projects ORDER BY sort_order, id")?
         .query_map([], |r| r.get(0))?
@@ -242,10 +239,20 @@ pub fn plan(local: &Connection, src: &Connection) -> rusqlite::Result<Plan> {
         problems.push("这个数据库里一个项目都没有。".into());
     }
 
-    let locals: Vec<(i64, String, String)> = local
-        .prepare("SELECT id, uuid, name FROM projects ORDER BY id")?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+    // 自己看得见的项目；第四列 = 自己是不是所有者（只有这些能被覆盖）
+    let visible: Vec<(i64, String, String, bool)> = local
+        .prepare(
+            "SELECT p.id, p.uuid, p.name, m.role = 'owner' FROM projects p
+               JOIN project_members m ON m.project_id = p.id AND m.account_id = ?1
+              ORDER BY p.id",
+        )?
+        .query_map(params![me], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<rusqlite::Result<_>>()?;
+    let locals: Vec<(i64, String, String)> = visible
+        .iter()
+        .filter(|v| v.3)
+        .map(|(id, uuid, name, _)| (*id, uuid.clone(), name.clone()))
+        .collect();
 
     // uuid 优先、名字兜底，一个本机项目只能被认领一次（否则同名的第二个源项目会冲掉它）
     let mut claimed: HashSet<i64> = HashSet::new();
@@ -270,10 +277,10 @@ pub fn plan(local: &Connection, src: &Connection) -> rusqlite::Result<Plan> {
     }
 
     // 未被覆盖的本机项目占着的名字不能用。原名被占时覆盖的沿用本机原名，否则加后缀并在预检里说明
-    let mut taken: HashSet<String> = locals
+    let mut taken: HashSet<String> = visible
         .iter()
-        .filter(|(id, _, _)| !claimed.contains(id))
-        .map(|(_, _, name)| name.clone())
+        .filter(|(id, _, _, _)| !claimed.contains(id))
+        .map(|(_, _, name, _)| name.clone())
         .collect();
     let mut names: Vec<Option<String>> = vec![None; archives.len()];
     // 源库内名字唯一，第一轮只可能撞本机
@@ -327,24 +334,9 @@ pub fn plan(local: &Connection, src: &Connection) -> rusqlite::Result<Plan> {
         items.push((archive, item));
     }
 
-    // 未用到的负责人也带过来：整库导入即「都搬过来」，.ganttproj 只带用到的人
-    let used: HashSet<String> = items
-        .iter()
-        .flat_map(|(a, _)| a.people.iter().map(|p| p.name.clone()))
-        .collect();
-    let local_people: HashSet<String> = local
-        .prepare("SELECT name FROM people")?
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    let extra_people = src
-        .prepare("SELECT name, color, avatar FROM people ORDER BY sort_order, id")?
-        .query_map([], |r| {
-            Ok(ExtraPerson { name: r.get(0)?, color: r.get(1)?, avatar: r.get(2)? })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .into_iter()
-        .filter(|p| !used.contains(&p.name) && !local_people.contains(&p.name))
-        .collect();
+    // 人员从 015 起归项目，没有「不属于任何项目的人」了 —— 各项目的名册随项目一起过来。
+    // 字段留着是为了前端契约不变，恒为空
+    let extra_people = Vec::new();
 
     Ok(Plan { items, extra_people, problems, warnings })
 }
@@ -358,16 +350,8 @@ fn names_unwrap(name: Option<String>) -> String {
 /* 落库、快照、恢复                                                     */
 /* ------------------------------------------------------------------ */
 
-fn now_secs() -> String {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-        .to_string()
-}
-
 /// 落库。返回（新建数，覆盖数，新增负责人）。
-pub fn import_all(conn: &mut Connection, plan: &Plan) -> Result<(i64, i64, Vec<String>)> {
+pub fn import_all(conn: &mut Connection, plan: &Plan, me: i64) -> Result<(i64, i64, Vec<String>)> {
     if !plan.problems.is_empty() {
         return Err(plan.problems.join("\n"));
     }
@@ -388,7 +372,14 @@ pub fn import_all(conn: &mut Connection, plan: &Plan) -> Result<(i64, i64, Vec<S
     let mut overwritten = 0;
     let mut new_people = Vec::new();
     for (archive, item) in &plan.items {
-        let (_, added) = transfer::apply_in(&tx, archive, item.target_id, &item.final_name)
+        // 项目名不再有唯一索引（migrations/015），预检之后冒出来的同名项目要在这里挡
+        if gantt_core::account::name_visible_to(&tx, me, &item.final_name, item.target_id)? {
+            return Err(format!(
+                "「{}」写入失败，没有导入任何项目：已有名为「{}」的项目",
+                item.file.name, item.final_name
+            ));
+        }
+        let (_, added) = transfer::apply_in(&tx, archive, item.target_id, &item.final_name, me)
             .map_err(|e| format!("「{}」写入失败，没有导入任何项目：{e}", item.file.name))?;
         if item.target_id.is_some() {
             overwritten += 1;
@@ -396,17 +387,6 @@ pub fn import_all(conn: &mut Connection, plan: &Plan) -> Result<(i64, i64, Vec<S
             created += 1;
         }
         new_people.extend(added);
-    }
-
-    let ts = now_secs();
-    for p in &plan.extra_people {
-        tx.execute(
-            "INSERT INTO people (name, color, avatar, sort_order, created_at)
-             VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM people), ?4)",
-            params![p.name, p.color, p.avatar, ts],
-        )
-        .map_err(|e| e.to_string())?;
-        new_people.push(p.name.clone());
     }
 
     tx.commit().map_err(|e| e.to_string())?;
@@ -458,9 +438,47 @@ pub fn export_database(app: tauri::AppHandle, db: tauri::State<Db>, path: String
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(|e| format!("创建目录失败：{e}"))?;
     }
+    let me = db.me()?;
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    backup::snapshot(&conn, &path).map_err(|e| format!("导出失败：{e}"))?;
+    // 先拷到同目录临时文件，裁掉别人的东西再改名：裁剪中途失败也不会留下一份含他人数据的导出件
+    let part = path.with_file_name(format!(
+        "{}.exporting",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("gantt.db")
+    ));
+    let _ = fs::remove_file(&part);
+    backup::snapshot(&conn, &part).map_err(|e| format!("导出失败：{e}"))?;
+    drop(conn);
+    if let Err(e) = keep_only_account(&part, me) {
+        let _ = fs::remove_file(&part);
+        return Err(format!("导出失败：{e}"));
+    }
+    fs::rename(&part, &path).map_err(|e| format!("导出失败：{e}"))?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+/**
+ * 把一份整库副本裁成「只有 `me` 看得见的东西」（Q13）。
+ *
+ * - 删掉 `me` 看不见的项目（级联带走任务、事项……）
+ * - 删掉其他账号（成员关系、账号设置、折叠状态随级联走）
+ * - `me` 自己的密码哈希、账号设置（里面可能有 API key）、全机设置都清掉 ——
+ *   导出件是要拷给别人或别的电脑的
+ * - 最后 VACUUM：删掉的行还躺在空闲页里，不压实的话用十六进制编辑器就能看见
+ */
+fn keep_only_account(path: &Path, me: i64) -> Result<()> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    conn.pragma_update(None, "foreign_keys", "ON").map_err(|e| e.to_string())?;
+    conn.execute_batch(&format!(
+        "BEGIN;
+         DELETE FROM projects WHERE id NOT IN (SELECT project_id FROM project_members WHERE account_id = {me});
+         DELETE FROM accounts WHERE id <> {me};
+         UPDATE accounts SET password_hash = NULL WHERE id = {me};
+         DELETE FROM account_settings;
+         DELETE FROM settings;
+         COMMIT;
+         VACUUM;"
+    ))
+    .map_err(|e| e.to_string())
 }
 
 /// 预检：读源库、校验、对号，不写库。
@@ -475,8 +493,9 @@ pub fn inspect_db_import(
         return Err("这就是本机正在使用的数据库，不需要导入。".into());
     }
     let src = open_source(&path)?;
+    let me = db.me()?;
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    let plan = plan(&conn, &src.conn).map_err(|e| format!("读取数据库失败：{e}"))?;
+    let plan = plan(&conn, &src.conn, me).map_err(|e| format!("读取数据库失败：{e}"))?;
     Ok(plan.preview(&src.warnings))
 }
 
@@ -493,8 +512,9 @@ pub fn commit_db_import(
         return Err("这就是本机正在使用的数据库，不需要导入。".into());
     }
     let src = open_source(&path)?;
+    let me = db.me()?;
     let mut conn = db.0.lock().map_err(|e| e.to_string())?;
-    let plan = plan(&conn, &src.conn).map_err(|e| format!("读取数据库失败：{e}"))?;
+    let plan = plan(&conn, &src.conn, me).map_err(|e| format!("读取数据库失败：{e}"))?;
     if !plan.problems.is_empty() {
         return Err(plan.problems.join("\n"));
     }
@@ -507,7 +527,7 @@ pub fn commit_db_import(
     backup::snapshot(&conn, &backup_path)
         .map_err(|e| format!("导入前备份失败，没有写入任何数据：{e}"))?;
 
-    let (created, overwritten, new_people) = import_all(&mut conn, &plan)?;
+    let (created, overwritten, new_people) = import_all(&mut conn, &plan, me)?;
     Ok(DbImportOutcome {
         created,
         overwritten,
@@ -568,13 +588,22 @@ mod tests {
         .unwrap();
         let pid = conn.last_insert_rowid();
         conn.execute(
-            "INSERT OR IGNORE INTO people (name, color, avatar, created_at)
-             VALUES (?1, '#0ea5e9', 'data:image/png;base64,UEsDBBQA', '0')",
-            params![person],
+            "INSERT INTO project_members (project_id, account_id, role) VALUES (?1, 1, 'owner')",
+            params![pid],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO people (project_id, name, color, avatar, created_at)
+             VALUES (?1, ?2, '#0ea5e9', 'data:image/png;base64,UEsDBBQA', '0')",
+            params![pid, person],
         )
         .unwrap();
         let person_id: i64 = conn
-            .query_row("SELECT id FROM people WHERE name = ?1", params![person], |r| r.get(0))
+            .query_row(
+                "SELECT id FROM people WHERE project_id = ?1 AND name = ?2",
+                params![pid, person],
+                |r| r.get(0),
+            )
             .unwrap();
         conn.execute(
             "INSERT INTO tasks (project_id, name, start_date, end_date, person_id, created_at, updated_at)
@@ -617,7 +646,7 @@ mod tests {
             .unwrap()
     }
 
-    /// 主线：整个库导进已有项目的本机。本机独有项目要留着，未用到的负责人也要带过来。
+    /// 主线：整个库导进已有项目的本机。本机独有项目要留着，各项目的名册随项目过来。
     #[test]
     fn imports_every_project_and_keeps_local_ones() {
         let d = dir("all");
@@ -626,27 +655,27 @@ mod tests {
             let src = db::open(&path).unwrap();
             project(&src, "u-mac-1", "厂房建设", "张三");
             project(&src, "u-mac-2", "办公楼", "李四");
-            src.execute(
-                "INSERT INTO people (name, color, created_at) VALUES ('王五', '#f97316', '0')",
-                [],
-            )
-            .unwrap();
         }
 
         let mut local = mem();
         project(&local, "u-win-1", "新工地", "赵六");
 
         let source = open_source(&path).unwrap();
-        let plan = plan(&local, &source.conn).unwrap();
+        let plan = plan(&local, &source.conn, 1).unwrap();
         assert!(plan.problems.is_empty(), "{:?}", plan.problems);
         assert!(plan.items.iter().all(|(_, i)| i.target_id.is_none()));
 
-        let (created, overwritten, new_people) = import_all(&mut local, &plan).unwrap();
+        let (created, overwritten, new_people) = import_all(&mut local, &plan, 1).unwrap();
         assert_eq!((created, overwritten), (2, 0));
         assert_eq!(names(&local), vec!["办公楼", "厂房建设", "新工地"]);
         assert_eq!(count(&local, "SELECT COUNT(*) FROM tasks"), 6);
         assert_eq!(count(&local, "SELECT COUNT(*) FROM risks"), 3);
-        assert!(new_people.contains(&"王五".to_string()), "{new_people:?}");
+        assert!(new_people.contains(&"李四".to_string()), "{new_people:?}");
+        assert_eq!(
+            count(&local, "SELECT COUNT(*) FROM project_members WHERE account_id = 1 AND role = 'owner'"),
+            3,
+            "导入的项目归导入的人"
+        );
 
         // 父子关系不跨项目
         assert_eq!(
@@ -677,7 +706,7 @@ mod tests {
 
         {
             let source = open_source(&path).unwrap();
-            let plan = plan(&mem(), &source.conn).unwrap();
+            let plan = plan(&mem(), &source.conn, 1).unwrap();
             assert_eq!(plan.items.len(), 1);
             assert_eq!(plan.items[0].1.file.name, "还在 WAL 里的项目");
             assert!(source.warnings.is_empty(), "{:?}", source.warnings);
@@ -738,7 +767,7 @@ mod tests {
 
         let source = open_source(&path).unwrap();
         assert!(source.warnings.iter().any(|w| w.contains("较旧版本")), "{:?}", source.warnings);
-        let plan = plan(&mem(), &source.conn).unwrap();
+        let plan = plan(&mem(), &source.conn, 1).unwrap();
         assert!(plan.problems.is_empty(), "{:?}", plan.problems);
         assert_eq!(plan.items[0].1.file.task_count, 1);
         assert!(!plan.items[0].0.bundle.project.uuid.is_empty(), "迁移应补上 uuid");
@@ -788,13 +817,13 @@ mod tests {
             .unwrap();
         project(&local, "u9", "本机项目", "李四");
 
-        let plan = plan(&local, &src).unwrap();
+        let plan = plan(&local, &src, 1).unwrap();
         let item = &plan.items[0].1;
         assert_eq!(item.target_id, Some(target));
         assert_eq!(item.matched_by.as_deref(), Some("uuid"));
         assert_eq!(item.final_name, "厂房建设二期");
 
-        let (created, overwritten, _) = import_all(&mut local, &plan).unwrap();
+        let (created, overwritten, _) = import_all(&mut local, &plan, 1).unwrap();
         assert_eq!((created, overwritten), (0, 1));
         assert_eq!(names(&local), vec!["厂房建设二期", "本机项目"]);
         assert_eq!(count(&local, "SELECT COUNT(*) FROM tasks WHERE name = '本机独有的任务'"), 0);
@@ -811,9 +840,9 @@ mod tests {
         project(&local, "u1", "A", "张三");
         project(&local, "u2", "B", "张三");
 
-        let plan = plan(&local, &src).unwrap();
+        let plan = plan(&local, &src, 1).unwrap();
         assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
-        import_all(&mut local, &plan).unwrap();
+        import_all(&mut local, &plan, 1).unwrap();
 
         let u1: String = local
             .query_row("SELECT name FROM projects WHERE uuid = 'u1'", [], |r| r.get(0))
@@ -835,12 +864,12 @@ mod tests {
         project(&local, "u1", "B", "张三");
         project(&local, "u2", "A", "张三");
 
-        let plan = plan(&local, &src).unwrap();
+        let plan = plan(&local, &src, 1).unwrap();
         let finals: Vec<&str> = plan.items.iter().map(|(_, i)| i.final_name.as_str()).collect();
         assert_eq!(finals, vec!["A（导入）", "B"]);
         assert!(plan.warnings.iter().any(|w| w.contains("「A（导入）」")), "{:?}", plan.warnings);
 
-        import_all(&mut local, &plan).unwrap();
+        import_all(&mut local, &plan, 1).unwrap();
         assert_eq!(names(&local), vec!["A", "A（导入）", "B"]);
     }
 
@@ -854,9 +883,9 @@ mod tests {
             .unwrap();
 
         let mut local = mem();
-        let rejected = plan(&local, &src).unwrap();
+        let rejected = plan(&local, &src, 1).unwrap();
         assert!(rejected.problems.iter().any(|p| p.starts_with("「坏项目」")), "{:?}", rejected.problems);
-        assert!(import_all(&mut local, &rejected).is_err());
+        assert!(import_all(&mut local, &rejected, 1).is_err());
         assert_eq!(count(&local, "SELECT COUNT(*) FROM projects"), 0);
 
         // 预检后本机冒出同名项目，第二个会撞唯一索引，第一个写进去的也要撤掉
@@ -864,17 +893,50 @@ mod tests {
         project(&src, "u1", "第一个", "张三");
         project(&src, "u2", "第二个", "张三");
         let mut local = mem();
-        let stale = plan(&local, &src).unwrap();
+        let stale = plan(&local, &src, 1).unwrap();
         local
             .execute(
                 "INSERT INTO projects (name, uuid, created_at, updated_at) VALUES ('第二个', 'late', '0', '0')",
                 [],
             )
             .unwrap();
-        let err = import_all(&mut local, &stale).unwrap_err();
+        local
+            .execute(
+                "INSERT INTO project_members (project_id, account_id, role) VALUES (?1, 1, 'owner')",
+                params![local.last_insert_rowid()],
+            )
+            .unwrap();
+        let err = import_all(&mut local, &stale, 1).unwrap_err();
         assert!(err.contains("没有导入任何项目"), "{err}");
         assert_eq!(names(&local), vec!["第二个"]);
         assert_eq!(count(&local, "SELECT COUNT(*) FROM tasks"), 0);
+    }
+
+    /// 整库导出只带当前账号看得见的东西：别人的项目、账号、密码、设置都不能出本机。
+    #[test]
+    fn exported_database_keeps_only_the_current_account() {
+        let d = dir("only-me");
+        let path = d.join("export.db");
+        {
+            let conn = db::open(&path).unwrap();
+            project(&conn, "u1", "我的", "张三");
+            conn.execute_batch(
+                "INSERT INTO accounts (id, name, password_hash) VALUES (2, '乙', 'x');
+                 UPDATE accounts SET password_hash = 'secret' WHERE id = 1;
+                 INSERT INTO account_settings (account_id, key, value) VALUES (1, 'plugin.ai.key', 'sk-1');",
+            )
+            .unwrap();
+            let theirs = project(&conn, "u2", "乙的", "李四");
+            conn.execute("UPDATE project_members SET account_id = 2 WHERE project_id = ?1", params![theirs])
+                .unwrap();
+        }
+        keep_only_account(&path, 1).unwrap();
+        let conn = db::open(&path).unwrap();
+        assert_eq!(names(&conn), vec!["我的"]);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM accounts"), 1);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM accounts WHERE password_hash IS NOT NULL"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM account_settings"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM people WHERE name = '李四'"), 0);
     }
 
     /// 撤销即恢复快照，之后活动库仍是 WAL。
@@ -890,8 +952,8 @@ mod tests {
         let src = mem();
         project(&src, "u-local", "被覆盖成这个", "张三");
         project(&src, "u-new", "新来的", "李四");
-        let plan = plan(&live, &src).unwrap();
-        import_all(&mut live, &plan).unwrap();
+        let plan = plan(&live, &src, 1).unwrap();
+        import_all(&mut live, &plan, 1).unwrap();
         assert_eq!(names(&live), vec!["新来的", "被覆盖成这个"]);
 
         restore(&mut live, &snap).unwrap();

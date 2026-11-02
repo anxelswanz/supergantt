@@ -211,9 +211,9 @@ fn hoist_globals(argv: &[String]) -> CliResult<(Vec<String>, Option<String>)> {
             }
             None => {
                 let key = a.trim_start_matches('-');
-                if key == "data-dir" {
+                if key == "data-dir" || key == "account" {
                     let v = argv.get(i + 1).ok_or_else(|| {
-                        CliError::args("选项 --data-dir 后面缺一个值")
+                        CliError::args(format!("选项 --{key} 后面缺一个值"))
                     })?;
                     globals.push(a.clone());
                     globals.push(v.clone());
@@ -253,7 +253,7 @@ fn run(argv: Vec<String>) -> CliResult<()> {
 
     let (rest, group) = hoist_globals(&argv)?;
     let group = group.ok_or_else(|| {
-        CliError::args("没给命令。可用：project / task / people / risk / comment / note / baseline / setting / feishu / check。敲 `gantt help` 看用法。")
+        CliError::args("没给命令。可用：project / task / people / account / risk / comment / note / baseline / setting / feishu / check。敲 `gantt help` 看用法。")
     })?;
 
     match group.as_str() {
@@ -267,8 +267,9 @@ fn run(argv: Vec<String>) -> CliResult<()> {
         "setting" => dispatch_setting(&rest),
         "feishu" => dispatch_feishu(&rest),
         "check" => cmd_check(&Args::parse(&rest)?),
+        "account" => dispatch_account(&rest),
         other => Err(CliError::args(format!(
-            "不认识的命令「{other}」。可用：project / task / people / risk / comment / note / baseline / setting / feishu / check。敲 `gantt help` 看用法。"
+            "不认识的命令「{other}」。可用：project / task / people / account / risk / comment / note / baseline / setting / feishu / check。敲 `gantt help` 看用法。"
         ))),
     }
 }
@@ -316,6 +317,46 @@ fn dispatch_people(rest: &[String]) -> CliResult<()> {
             "people 没有子命令「{other}」。可用：list / create / update / delete。"
         ))),
     }
+}
+
+fn dispatch_account(rest: &[String]) -> CliResult<()> {
+    let (sub, tail) = split_sub(rest, "account")?;
+    let args = Args::parse(tail)?;
+    match sub.as_str() {
+        "list" => cmd_account_list(&args),
+        "whoami" => cmd_account_whoami(&args),
+        other => Err(CliError::args(format!(
+            "account 没有子命令「{other}」。可用：list / whoami。（建账号、改密码请用桌面应用）"
+        ))),
+    }
+}
+
+/// 列出本机账号。不需要先确定身份 —— 这正是「身份不明」时用来查的命令。
+fn cmd_account_list(args: &Args) -> CliResult<()> {
+    let conn = open_ro_conn(args)?;
+    let accounts = gantt_core::account::list_accounts(&conn).map_err(CliError::db)?;
+    let current = resolve_account(&conn, args).ok();
+    if args.json() {
+        print_json(&accounts)?;
+        return Ok(());
+    }
+    println!("{:>4}  {:<16} {}", "ID", "名字", "");
+    for a in &accounts {
+        let mark = if Some(a.id) == current { "← 当前身份" } else { "" };
+        println!("{:>4}  {:<16} {}", a.id, truncate(&a.name, 16), mark);
+    }
+    Ok(())
+}
+
+fn cmd_account_whoami(args: &Args) -> CliResult<()> {
+    let conn = open_ro(args)?;
+    let account = gantt_core::account::get_account(&conn, conn.me).map_err(CliError::db)?;
+    if args.json() {
+        print_json(&account)?;
+    } else {
+        println!("{}（{}）", account.name, account.id);
+    }
+    Ok(())
 }
 
 fn dispatch_risk(rest: &[String]) -> CliResult<()> {
@@ -428,7 +469,81 @@ fn resolve_data_dir(args: &Args) -> CliResult<PathBuf> {
 }
 
 /// 只读打开：不查锁。读永远安全（WAL 下读写不互斥）。
-fn open_ro(args: &Args) -> CliResult<Connection> {
+fn open_ro(args: &Args) -> CliResult<Session> {
+    let conn = open_ro_conn(args)?;
+    Session::new(conn, args)
+}
+
+fn open_rw(args: &Args) -> CliResult<Session> {
+    let conn = open_rw_conn(args)?;
+    Session::new(conn, args)
+}
+
+fn open_or_create(args: &Args) -> CliResult<Session> {
+    let conn = open_or_create_conn(args)?;
+    Session::new(conn, args)
+}
+
+/// 一个打开的库 + 以谁的身份操作。
+///
+/// Deref 到 `Connection`，所以各命令里 `&conn` 照旧能当 `&Connection` 传；
+/// 要身份的地方用 `conn.me`。`&mut` 的调用写成 `(&mut conn.conn, conn.me, …)`：
+/// 两个字段分开借用，编译器放行。
+struct Session {
+    conn: Connection,
+    me: i64,
+}
+
+impl std::ops::Deref for Session {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.conn
+    }
+}
+
+impl std::ops::DerefMut for Session {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+}
+
+impl Session {
+    fn new(conn: Connection, args: &Args) -> CliResult<Session> {
+        let me = resolve_account(&conn, args)?;
+        Ok(Session { conn, me })
+    }
+}
+
+/// 以哪个账号的身份操作：`--account` > `GANTT_ACCOUNT` > 桌面应用上次登录的账号
+/// > 库里唯一的那个账号。和 data_dir 的优先级是同一个写法：越具体越优先。
+///
+/// 不校验密码 —— 本地密码挡不住直接读库（DESIGN.md §13），在这里假装能挡，
+/// 只会让 Skill 多一个用不上的参数。
+fn resolve_account(conn: &Connection, args: &Args) -> CliResult<i64> {
+    use gantt_core::account;
+    let explicit = args
+        .get("account")
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("GANTT_ACCOUNT").ok().filter(|v| !v.is_empty()));
+    if let Some(sel) = explicit {
+        return account::find_account(conn, &sel)
+            .map(|a| a.id)
+            .map_err(|e| CliError::args(format!("{e}。用 `gantt account list` 看看有哪些账号。")));
+    }
+    if let Some(id) = account::last_account(conn).map_err(CliError::db)? {
+        return Ok(id);
+    }
+    let all = account::list_accounts(conn).map_err(CliError::db)?;
+    match all.as_slice() {
+        [one] => Ok(one.id),
+        _ => Err(CliError::args(format!(
+            "有多个账号，不知道以谁的身份操作。请加 --account <名字或 id>，或设置 GANTT_ACCOUNT。现有账号：{}",
+            all.iter().map(|a| format!("{}（{}）", a.name, a.id)).collect::<Vec<_>>().join("、")
+        ))),
+    }
+}
+
+fn open_ro_conn(args: &Args) -> CliResult<Connection> {
     let dir = resolve_data_dir(args)?;
     let path = locate::db_path(&dir);
     if !path.exists() {
@@ -442,7 +557,7 @@ fn open_ro(args: &Args) -> CliResult<Connection> {
 }
 
 /// 可写打开：先做存活检测。这是「铁律 1」的落点。
-fn open_rw(args: &Args) -> CliResult<Connection> {
+fn open_rw_conn(args: &Args) -> CliResult<Connection> {
     let dir = resolve_data_dir(args)?;
 
     if !args.has("force") {
@@ -471,7 +586,7 @@ fn open_rw(args: &Args) -> CliResult<Connection> {
 }
 
 /// 建库（`project create` 允许在空目录里起一个新库）。
-fn open_or_create(args: &Args) -> CliResult<Connection> {
+fn open_or_create_conn(args: &Args) -> CliResult<Connection> {
     let dir = resolve_data_dir(args)?;
 
     if !args.has("force") {
@@ -499,7 +614,7 @@ fn open_or_create(args: &Args) -> CliResult<Connection> {
 
 fn cmd_project_list(args: &Args) -> CliResult<()> {
     let conn = open_ro(args)?;
-    let projects = query::list_projects(&conn).map_err(CliError::db)?;
+    let projects = query::list_projects(&conn, conn.me).map_err(CliError::db)?;
 
     if args.json() {
         print_json(&projects)?;
@@ -532,7 +647,7 @@ fn cmd_project_list(args: &Args) -> CliResult<()> {
 fn cmd_project_show(args: &Args) -> CliResult<()> {
     let conn = open_ro(args)?;
     let id = resolve_project(&conn, project_selector(args)?)?;
-    let data = query::load_project(&conn, id).map_err(CliError::db)?;
+    let data = query::load_project(&conn, conn.me, id).map_err(CliError::db)?;
 
     if args.json() {
         print_json(&data)?;
@@ -552,7 +667,7 @@ fn cmd_project_create(args: &Args) -> CliResult<()> {
     validate_color(&color)?;
 
     let conn = open_or_create(args)?;
-    let project = query::create_project(&conn, name, color).map_err(CliError::validation)?;
+    let project = query::create_project(&conn, conn.me, name, color).map_err(CliError::validation)?;
 
     if args.json() {
         print_json(&project)?;
@@ -588,7 +703,7 @@ fn cmd_project_rename(args: &Args) -> CliResult<()> {
         None => current,
     };
 
-    query::rename_project(&conn, id, name, color).map_err(CliError::validation)?;
+    query::rename_project(&conn, conn.me, id, name, color).map_err(CliError::validation)?;
 
     let project = conn
         .query_row("SELECT * FROM projects WHERE id = ?1", [id], map_project_row)
@@ -628,7 +743,7 @@ fn cmd_project_calendar(args: &Args) -> CliResult<()> {
         None => cur.1,
     };
 
-    query::update_project_calendar(&conn, id, work_days.clone(), holidays.clone())
+    query::update_project_calendar(&conn, conn.me, id, work_days.clone(), holidays.clone())
         .map_err(CliError::db)?;
 
     if args.json() {
@@ -649,7 +764,7 @@ fn cmd_project_calendar(args: &Args) -> CliResult<()> {
 fn cmd_project_delete(args: &Args) -> CliResult<()> {
     let conn = open_rw(args)?;
     let id = resolve_project(&conn, project_selector(args)?)?;
-    let data = query::load_project(&conn, id).map_err(CliError::db)?;
+    let data = query::load_project(&conn, conn.me, id).map_err(CliError::db)?;
 
     if !args.has("yes") {
         return Err(CliError::validation(format!(
@@ -662,7 +777,7 @@ fn cmd_project_delete(args: &Args) -> CliResult<()> {
         )));
     }
 
-    query::delete_project(&conn, id).map_err(CliError::db)?;
+    query::delete_project(&conn, conn.me, id).map_err(CliError::db)?;
     if args.json() {
         print_json(&serde_json::json!({
             "deleted": id,
@@ -685,19 +800,24 @@ fn cmd_project_delete(args: &Args) -> CliResult<()> {
 
 fn cmd_people_list(args: &Args) -> CliResult<()> {
     let conn = open_ro(args)?;
-    let people = query::list_people(&conn).map_err(CliError::db)?;
+    let pid = resolve_project(&conn, project_selector(args)?)?;
+    let people = query::list_people(&conn, pid).map_err(CliError::db)?;
 
     if args.json() {
         print_json(&people)?;
         return Ok(());
     }
     if people.is_empty() {
-        println!("（还没有负责人）");
+        println!("（这个项目还没有负责人）");
         return Ok(());
     }
-    println!("{:>4}  {:<16} {}", "ID", "名字", "颜色");
+    println!("{:>4}  {:<16} {:<8} {}", "ID", "名字", "颜色", "账号");
     for p in &people {
-        println!("{:>4}  {:<16} {}", p.id, truncate(&p.name, 16), p.color);
+        let bound = match p.account_id {
+            Some(a) => gantt_core::account::get_account(&conn, a).map(|x| x.name).unwrap_or_default(),
+            None => "—".to_string(),
+        };
+        println!("{:>4}  {:<16} {:<8} {}", p.id, truncate(&p.name, 16), p.color, bound);
     }
     Ok(())
 }
@@ -708,7 +828,8 @@ fn cmd_people_create(args: &Args) -> CliResult<()> {
     validate_color(&color)?;
 
     let conn = open_rw(args)?;
-    let person = query::create_person(&conn, name, color).map_err(CliError::validation)?;
+    let pid = resolve_project(&conn, project_selector(args)?)?;
+    let person = query::create_person(&conn, conn.me, pid, name, color).map_err(CliError::validation)?;
 
     if args.json() {
         print_json(&person)?;
@@ -734,7 +855,7 @@ fn cmd_people_update(args: &Args) -> CliResult<()> {
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
         )
         .map_err(|_| {
-            CliError::validation(format!("没有 id 为 {id} 的负责人。用 `gantt people list` 看看。"))
+            CliError::validation(format!("没有 id 为 {id} 的负责人。用 `gantt people list --project <项目>` 看看。"))
         })?;
 
     let name = match args.get("name") {
@@ -760,21 +881,13 @@ fn cmd_people_update(args: &Args) -> CliResult<()> {
         ));
     }
 
-    query::update_person(&conn, id, name, color, None).map_err(CliError::validation)?;
+    query::update_person(&conn, conn.me, id, name, color, None).map_err(CliError::validation)?;
 
     let person = conn
         .query_row(
-            "SELECT id, name, color, avatar, sort_order FROM people WHERE id = ?1",
+            &format!("SELECT {} FROM people WHERE id = ?1", query::PERSON_COLS),
             [id],
-            |r| {
-                Ok(Person {
-                    id: r.get(0)?,
-                    name: r.get(1)?,
-                    color: r.get(2)?,
-                    avatar: r.get(3)?,
-                    sort_order: r.get(4)?,
-                })
-            },
+            query::map_person,
         )
         .map_err(|e| CliError::db(e.to_string()))?;
     if args.json() {
@@ -795,10 +908,10 @@ fn cmd_people_delete(args: &Args) -> CliResult<()> {
     let name: String = conn
         .query_row("SELECT name FROM people WHERE id = ?1", [id], |r| r.get(0))
         .map_err(|_| {
-            CliError::validation(format!("没有 id 为 {id} 的负责人。用 `gantt people list` 看看。"))
+            CliError::validation(format!("没有 id 为 {id} 的负责人。用 `gantt people list --project <项目>` 看看。"))
         })?;
 
-    let n = query::count_person_tasks(&conn, id).map_err(CliError::db)?;
+    let n = query::count_person_tasks(&conn, conn.me, id).map_err(CliError::db)?;
     if n > 0 && !args.has("yes") {
         return Err(CliError::validation(format!(
             "负责人 {id}「{name}」名下有 {n} 个任务。删掉这个人不会删任务，\
@@ -806,7 +919,7 @@ fn cmd_people_delete(args: &Args) -> CliResult<()> {
         )));
     }
 
-    query::delete_person(&conn, id).map_err(CliError::db)?;
+    query::delete_person(&conn, conn.me, id).map_err(CliError::db)?;
     if args.json() {
         print_json(&serde_json::json!({ "deleted": id, "name": name, "unassigned": n }))?;
     } else {
@@ -822,7 +935,7 @@ fn cmd_people_delete(args: &Args) -> CliResult<()> {
 fn cmd_task_list(args: &Args) -> CliResult<()> {
     let conn = open_ro(args)?;
     let pid = resolve_project(&conn, project_selector(args)?)?;
-    let data = query::load_project(&conn, pid).map_err(CliError::db)?;
+    let data = query::load_project(&conn, conn.me, pid).map_err(CliError::db)?;
 
     if args.json() {
         print_json(&data.tasks)?;
@@ -877,8 +990,8 @@ fn cmd_task_show(args: &Args) -> CliResult<()> {
 
     // 任务本身 + 挂在它身上的东西，一次读齐。风险和评论走 load_task_notes
     // （它一次把两张表都查了），依赖从 load_project 里筛。
-    let notes = query::load_task_notes(&conn, id).map_err(CliError::db)?;
-    let data = query::load_project(&conn, pid).map_err(CliError::db)?;
+    let notes = query::load_task_notes(&conn, conn.me, id).map_err(CliError::db)?;
+    let data = query::load_project(&conn, conn.me, pid).map_err(CliError::db)?;
     let incoming: Vec<&DependencyRow> =
         data.dependencies.iter().filter(|d| d.to_task_id == id).collect();
     let outgoing: Vec<&DependencyRow> =
@@ -956,7 +1069,7 @@ fn cmd_task_create(args: &Args) -> CliResult<()> {
 
     let conn = open_rw(args)?;
     let pid = resolve_project(&conn, project_selector(args)?)?;
-    let data = query::load_project(&conn, pid).map_err(CliError::db)?;
+    let data = query::load_project(&conn, conn.me, pid).map_err(CliError::db)?;
 
     // 父任务校验（铁律 2 的一半）
     let parent_id = match args.get("parent") {
@@ -1038,7 +1151,7 @@ fn cmd_task_create(args: &Args) -> CliResult<()> {
     write::insert_tasks(&mut conn, pid, vec![(new_id, task)]).map_err(CliError::db)?;
 
     // 回读一遍，输出的就是库里真实的样子
-    let data = query::load_project(&conn, pid).map_err(CliError::db)?;
+    let data = query::load_project(&conn, conn.me, pid).map_err(CliError::db)?;
     let created = data
         .tasks
         .iter()
@@ -1056,7 +1169,7 @@ fn cmd_task_update(args: &Args) -> CliResult<()> {
     let id = single_id(args, "task update")?;
     let conn = open_rw(args)?;
     let (task, pid) = find_task_anywhere(&conn, id)?;
-    let data = query::load_project(&conn, pid).map_err(CliError::db)?;
+    let data = query::load_project(&conn, conn.me, pid).map_err(CliError::db)?;
     let is_parent = data.tasks.iter().any(|t| t.parent_id == Some(id));
 
     let mut patch = write::TaskPatch::default();
@@ -1192,7 +1305,7 @@ fn cmd_task_delete(args: &Args) -> CliResult<()> {
     let id = single_id(args, "task delete")?;
     let conn = open_rw(args)?;
     let (task, pid) = find_task_anywhere(&conn, id)?;
-    let data = query::load_project(&conn, pid).map_err(CliError::db)?;
+    let data = query::load_project(&conn, conn.me, pid).map_err(CliError::db)?;
     let child_count = data.tasks.iter().filter(|t| t.parent_id == Some(id)).count();
 
     if child_count > 0 && !args.has("yes") {
@@ -1230,7 +1343,7 @@ fn cmd_risk_add(args: &Args) -> CliResult<()> {
     // 这里给一句能直接照做的中文。
     find_task_anywhere(&conn, task_id)?;
 
-    let risk = query::add_risk(&conn, task_id, content, level).map_err(CliError::validation)?;
+    let risk = query::add_risk(&conn, conn.me, task_id, content, level).map_err(CliError::validation)?;
     if args.json() {
         print_json(&risk)?;
     } else {
@@ -1248,7 +1361,7 @@ fn cmd_risk_list(args: &Args) -> CliResult<()> {
     let task_id = bare_id(args, "risk list")?;
     let conn = open_ro(args)?;
     find_task_anywhere(&conn, task_id)?;
-    let notes = query::load_task_notes(&conn, task_id).map_err(CliError::db)?;
+    let notes = query::load_task_notes(&conn, conn.me, task_id).map_err(CliError::db)?;
 
     if args.json() {
         print_json(&notes.risks)?;
@@ -1267,7 +1380,7 @@ fn cmd_risk_list(args: &Args) -> CliResult<()> {
 fn cmd_risk_project(args: &Args) -> CliResult<()> {
     let conn = open_ro(args)?;
     let pid = resolve_project(&conn, project_selector(args)?)?;
-    let risks = query::load_project_risks(&conn, pid).map_err(CliError::db)?;
+    let risks = query::load_project_risks(&conn, conn.me, pid).map_err(CliError::db)?;
 
     if args.json() {
         print_json(&risks)?;
@@ -1310,7 +1423,7 @@ fn cmd_risk_update(args: &Args) -> CliResult<()> {
         None => level,
     };
 
-    query::update_risk(&conn, id, content, level).map_err(CliError::validation)?;
+    query::update_risk(&conn, conn.me, id, content, level).map_err(CliError::validation)?;
     if args.json() {
         print_json(&read_risk_json(&conn, id)?)?;
     } else {
@@ -1331,7 +1444,7 @@ fn cmd_risk_resolve(args: &Args) -> CliResult<()> {
     }
     let conn = open_rw(args)?;
     read_risk(&conn, id)?; // 先确认存在，好报一句人话
-    query::resolve_risk(&conn, id, resolution).map_err(CliError::db)?;
+    query::resolve_risk(&conn, conn.me, id, resolution).map_err(CliError::db)?;
 
     if args.json() {
         print_json(&read_risk_json(&conn, id)?)?;
@@ -1347,7 +1460,7 @@ fn cmd_risk_reopen(args: &Args) -> CliResult<()> {
     let id = bare_id(args, "risk reopen")?;
     let conn = open_rw(args)?;
     read_risk(&conn, id)?;
-    query::reopen_risk(&conn, id).map_err(CliError::db)?;
+    query::reopen_risk(&conn, conn.me, id).map_err(CliError::db)?;
     if args.json() {
         print_json(&read_risk_json(&conn, id)?)?;
     } else {
@@ -1360,7 +1473,7 @@ fn cmd_risk_delete(args: &Args) -> CliResult<()> {
     let id = bare_id(args, "risk delete")?;
     let conn = open_rw(args)?;
     read_risk(&conn, id)?;
-    query::delete_risk(&conn, id).map_err(CliError::db)?;
+    query::delete_risk(&conn, conn.me, id).map_err(CliError::db)?;
     if args.json() {
         print_json(&serde_json::json!({ "deleted": id }))?;
     } else {
@@ -1380,7 +1493,7 @@ fn cmd_comment_add(args: &Args) -> CliResult<()> {
     let content = args.require("content")?.to_string();
     let conn = open_rw(args)?;
     find_task_anywhere(&conn, task_id)?;
-    let comment = query::add_comment(&conn, task_id, content).map_err(CliError::validation)?;
+    let comment = query::add_comment(&conn, conn.me, task_id, content).map_err(CliError::validation)?;
     if args.json() {
         print_json(&comment)?;
     } else {
@@ -1397,7 +1510,7 @@ fn cmd_comment_list(args: &Args) -> CliResult<()> {
     let task_id = bare_id(args, "comment list")?;
     let conn = open_ro(args)?;
     find_task_anywhere(&conn, task_id)?;
-    let notes = query::load_task_notes(&conn, task_id).map_err(CliError::db)?;
+    let notes = query::load_task_notes(&conn, conn.me, task_id).map_err(CliError::db)?;
 
     if args.json() {
         print_json(&notes.comments)?;
@@ -1428,7 +1541,7 @@ fn cmd_comment_delete(args: &Args) -> CliResult<()> {
     if !exists {
         return Err(CliError::validation(format!("找不到评论 {id}")));
     }
-    query::delete_comment(&conn, id).map_err(CliError::db)?;
+    query::delete_comment(&conn, conn.me, id).map_err(CliError::db)?;
     if args.json() {
         print_json(&serde_json::json!({ "deleted": id }))?;
     } else {
@@ -1479,7 +1592,7 @@ fn cmd_note_add(args: &Args) -> CliResult<()> {
         }
     }
 
-    let note = query::add_daily_note(&conn, pid, task_id, day, content)
+    let note = query::add_daily_note(&conn, conn.me, pid, task_id, day, content)
         .map_err(CliError::validation)?;
     if args.json() {
         print_json(&note)?;
@@ -1492,7 +1605,7 @@ fn cmd_note_add(args: &Args) -> CliResult<()> {
 fn cmd_note_list(args: &Args) -> CliResult<()> {
     let conn = open_ro(args)?;
     let pid = resolve_project(&conn, project_selector(args)?)?;
-    let notes = query::load_daily_notes(&conn, pid).map_err(CliError::db)?;
+    let notes = query::load_daily_notes(&conn, conn.me, pid).map_err(CliError::db)?;
 
     if args.json() {
         print_json(&notes)?;
@@ -1534,7 +1647,7 @@ fn cmd_note_update(args: &Args) -> CliResult<()> {
     };
     let content = args.get("content").map(str::to_string).unwrap_or(cur_content);
 
-    query::update_daily_note(&conn, id, day, content).map_err(CliError::validation)?;
+    query::update_daily_note(&conn, conn.me, id, day, content).map_err(CliError::validation)?;
     if args.json() {
         print_json(&read_note_json(&conn, id)?)?;
     } else {
@@ -1547,7 +1660,7 @@ fn cmd_note_delete(args: &Args) -> CliResult<()> {
     let id = bare_id(args, "note delete")?;
     let conn = open_rw(args)?;
     read_note(&conn, id)?;
-    query::delete_daily_note(&conn, id).map_err(CliError::db)?;
+    query::delete_daily_note(&conn, conn.me, id).map_err(CliError::db)?;
     if args.json() {
         print_json(&serde_json::json!({ "deleted": id }))?;
     } else {
@@ -1567,7 +1680,7 @@ fn cmd_baseline_create(args: &Args) -> CliResult<()> {
     let mut conn = open_rw(args)?;
     let pid = resolve_project(&conn, project_selector(args)?)?;
 
-    let baseline = query::create_baseline(&mut conn, pid, name).map_err(CliError::db)?;
+    let baseline = query::create_baseline(&mut conn.conn, conn.me, pid, name).map_err(CliError::db)?;
     if args.json() {
         print_json(&baseline)?;
     } else {
@@ -1579,7 +1692,7 @@ fn cmd_baseline_create(args: &Args) -> CliResult<()> {
 fn cmd_baseline_list(args: &Args) -> CliResult<()> {
     let conn = open_ro(args)?;
     let pid = resolve_project(&conn, project_selector(args)?)?;
-    let data = query::load_project(&conn, pid).map_err(CliError::db)?;
+    let data = query::load_project(&conn, conn.me, pid).map_err(CliError::db)?;
 
     if args.json() {
         print_json(&data.baselines)?;
@@ -1599,7 +1712,7 @@ fn cmd_baseline_list(args: &Args) -> CliResult<()> {
 fn cmd_baseline_show(args: &Args) -> CliResult<()> {
     let id = bare_id(args, "baseline show")?;
     let conn = open_ro(args)?;
-    let rows = query::load_baseline(&conn, id).map_err(CliError::db)?;
+    let rows = query::load_baseline(&conn, conn.me, id).map_err(CliError::db)?;
 
     if args.json() {
         print_json(&rows)?;
@@ -1628,7 +1741,7 @@ fn cmd_baseline_show(args: &Args) -> CliResult<()> {
 fn cmd_baseline_delete(args: &Args) -> CliResult<()> {
     let id = bare_id(args, "baseline delete")?;
     let conn = open_rw(args)?;
-    query::delete_baseline(&conn, id).map_err(CliError::db)?;
+    query::delete_baseline(&conn, conn.me, id).map_err(CliError::db)?;
     if args.json() {
         print_json(&serde_json::json!({ "deleted": id }))?;
     } else {
@@ -1650,7 +1763,7 @@ fn cmd_setting_get(args: &Args) -> CliResult<()> {
         .ok_or_else(|| CliError::args("setting get 需要一个键，例如 `gantt setting get plugin.foo`"))?
         .clone();
     let conn = open_ro(args)?;
-    let value = query::get_setting(&conn, key.clone()).map_err(CliError::db)?;
+    let value = query::get_setting(&conn, conn.me, key.clone()).map_err(CliError::db)?;
 
     if args.json() {
         print_json(&serde_json::json!({ "key": key, "value": value }))?;
@@ -1671,7 +1784,7 @@ fn cmd_setting_set(args: &Args) -> CliResult<()> {
         .clone();
     let value = args.require("value")?.to_string();
     let conn = open_rw(args)?;
-    query::set_setting(&conn, key.clone(), value.clone()).map_err(CliError::db)?;
+    query::set_setting(&conn, conn.me, key.clone(), value.clone()).map_err(CliError::db)?;
     if args.json() {
         print_json(&serde_json::json!({ "key": key, "value": value }))?;
     } else {
@@ -1683,7 +1796,7 @@ fn cmd_setting_set(args: &Args) -> CliResult<()> {
 fn cmd_setting_list(args: &Args) -> CliResult<()> {
     let prefix = args.get("prefix").unwrap_or("").to_string();
     let conn = open_ro(args)?;
-    let rows = query::list_settings_with_prefix(&conn, prefix).map_err(CliError::db)?;
+    let rows = query::list_settings_with_prefix(&conn, conn.me, prefix).map_err(CliError::db)?;
 
     if args.json() {
         let map: BTreeMap<String, String> = rows.into_iter().collect();
@@ -1740,18 +1853,19 @@ fn project_selector(args: &Args) -> CliResult<String> {
 }
 
 /// 把 id 或名字解析成项目 id。名字要唯一命中，命不中或撞名都报清楚。
-fn resolve_project(conn: &Connection, selector: String) -> CliResult<i64> {
+fn resolve_project(conn: &Session, selector: String) -> CliResult<i64> {
     if let Ok(id) = selector.parse::<i64>() {
-        let exists: bool = conn
-            .query_row("SELECT 1 FROM projects WHERE id = ?1", [id], |_| Ok(true))
-            .unwrap_or(false);
+        // 只认当前账号看得见的项目：别人的项目 id 当作不存在
+        let exists = gantt_core::account::role_of(conn, id, conn.me)
+            .map_err(CliError::db)?
+            .is_some();
         if exists {
             return Ok(id);
         }
         // 数字但没这个 id：也许有人把项目命名成数字，往下走按名字试
     }
 
-    let projects = query::list_projects(conn).map_err(CliError::db)?;
+    let projects = query::list_projects(conn, conn.me).map_err(CliError::db)?;
     let matches: Vec<&ProjectSummary> = projects
         .iter()
         .filter(|p| p.project.name == selector)
@@ -1781,14 +1895,14 @@ fn single_id(args: &Args, cmd: &str) -> CliResult<i64> {
 
 /// 全库找一条任务，连它属于哪个项目一起返回。CLI 的 show/update/delete
 /// 只给 id，不给项目，所以要能凭 id 反查。
-fn find_task_anywhere(conn: &Connection, id: i64) -> CliResult<(TaskRow, i64)> {
+fn find_task_anywhere(conn: &Session, id: i64) -> CliResult<(TaskRow, i64)> {
     let pid: Option<i64> = conn
         .query_row("SELECT project_id FROM tasks WHERE id = ?1", [id], |r| r.get(0))
         .ok();
     let pid = pid.ok_or_else(|| {
         CliError::validation(format!("找不到任务 {id}。用 `gantt task list --project <id>` 看看。"))
     })?;
-    let data = query::load_project(conn, pid).map_err(CliError::db)?;
+    let data = query::load_project(conn, conn.me, pid).map_err(CliError::db)?;
     let task = data
         .tasks
         .into_iter()
@@ -1800,7 +1914,7 @@ fn find_task_anywhere(conn: &Connection, id: i64) -> CliResult<(TaskRow, i64)> {
 /// 把 `--assignee 名字` / `--person-id n` 解析成 person_id。
 /// 找不到名字时**报错并列出现有人名**，绝不静默创建 —— 一个错别字多一个「负责人」
 /// 正是 002_people.sql 当初要根治的问题。加 --create-missing 才新建。
-fn resolve_assignee(conn: &Connection, data: &ProjectData, args: &Args) -> CliResult<Option<i64>> {
+fn resolve_assignee(conn: &Session, data: &ProjectData, args: &Args) -> CliResult<Option<i64>> {
     if let Some(pid) = args.get("person-id") {
         let id: i64 = pid
             .parse()
@@ -1820,7 +1934,7 @@ fn resolve_assignee(conn: &Connection, data: &ProjectData, args: &Args) -> CliRe
     }
 
     if args.has("create-missing") {
-        let person = query::create_person(conn, name.to_string(), "#868E96".to_string())
+        let person = query::create_person(conn, conn.me, data.project.id, name.to_string(), "#868E96".to_string())
             .map_err(CliError::validation)?;
         return Ok(Some(person.id));
     }
@@ -1832,7 +1946,8 @@ fn resolve_assignee(conn: &Connection, data: &ProjectData, args: &Args) -> CliRe
     };
     Err(CliError::validation(format!(
         "找不到叫「{name}」的负责人。现有：{existing}。\n\
-         确认是新人请加 --create-missing，或先 `gantt people create --name {name}`。"
+         确认是新人请加 --create-missing，或先 `gantt people create --project {} --name {name}`。",
+        data.project.id
     )))
 }
 
@@ -2094,7 +2209,7 @@ fn read_note(conn: &Connection, id: i64) -> CliResult<(String, String)> {
 
 fn read_note_json(conn: &Connection, id: i64) -> CliResult<DailyNote> {
     conn.query_row(
-        "SELECT id, project_id, task_id, day, content, created_at, updated_at \
+        "SELECT id, project_id, task_id, day, content, created_at, updated_at, author_id \
          FROM daily_notes WHERE id = ?1",
         [id],
         |r| {
@@ -2106,6 +2221,7 @@ fn read_note_json(conn: &Connection, id: i64) -> CliResult<DailyNote> {
                 content: r.get(4)?,
                 created_at: r.get(5)?,
                 updated_at: r.get(6)?,
+                author_id: r.get(7)?,
             })
         },
     )
@@ -2118,15 +2234,29 @@ fn read_note_json(conn: &Connection, id: i64) -> CliResult<DailyNote> {
 
 const RISK_LABELS: [&str; 3] = ["高", "中", "低"];
 
+/// 飞书队列在哪：数据目录 + 当前账号的 uuid（队列按账号分开）。
+/// 顺手把账号功能之前的老队列搬进默认账号名下 —— CLI 可能比桌面应用先跑。
+fn feishu_scope(args: &Args) -> CliResult<(PathBuf, String)> {
+    let dir = resolve_data_dir(args)?;
+    let conn = open_ro(args)?;
+    let uuid = gantt_core::account::get_account(&conn, conn.me).map_err(CliError::db)?.uuid;
+    let owner = gantt_core::account::list_accounts(&conn).map_err(CliError::db)?;
+    if let Some(first) = owner.iter().min_by_key(|a| a.id) {
+        locate::migrate_legacy_plugin_data(&dir, &first.uuid)
+            .map_err(|e| CliError::db(format!("迁移旧的插件数据失败：{e}")))?;
+    }
+    Ok((dir, uuid))
+}
+
 /// 列出同步队列，给 Agent 填飞书表用。
 ///
 /// 输出里的日期、持续天数、负责人的飞书身份都是**算好的** —— 模型不该自己
 /// 算日期（铁律之外的同一条约定），也不该自己去通讯录里猜人。
 fn cmd_feishu_queue(args: &Args) -> CliResult<()> {
-    let dir = resolve_data_dir(args)?;
-    let qpath = feishu::queue_path(&dir);
+    let (dir, uuid) = feishu_scope(args)?;
+    let qpath = feishu::queue_path(&dir, &uuid);
     let queue = feishu::load(&qpath).map_err(CliError::db)?;
-    let config = feishu::load(&feishu::config_path(&dir)).map_err(CliError::db)?;
+    let config = feishu::load(&feishu::config_path(&dir, &uuid)).map_err(CliError::db)?;
     let target = args.get("target").map(feishu::parse_target).transpose().map_err(CliError::args)?;
     let target_key = target.as_ref().map(|(b, t)| format!("{b}:{t}"));
     let keys: Option<Vec<&str>> = args.get("keys").map(|k| k.split(',').map(str::trim).filter(|s| !s.is_empty()).collect());
@@ -2270,6 +2400,9 @@ fn feishu_item_json(
         "lastingDays": lasting,
         "closed": item.get("closed").and_then(Value::as_bool).unwrap_or(false),
         "resolution": s("resolution"),
+        // 别的插件附上的结构化分析（故障树：根因、因果链、解决步骤、解决方案）。
+        // 原样交给 Agent，由它对着目标表的字段决定拆进哪几列
+        "analysis": e.get("analysis").filter(|v| !v.is_null()),
     })
 }
 
@@ -2286,8 +2419,8 @@ fn edit_feishu_queue(
     let target = args.require("target")?;
     let (b, t) = feishu::parse_target(target).map_err(CliError::args)?;
     let target = format!("{b}:{t}");
-    let dir = resolve_data_dir(args)?;
-    let path = feishu::queue_path(&dir);
+    let (dir, uuid) = feishu_scope(args)?;
+    let path = feishu::queue_path(&dir, &uuid);
     let mut queue = feishu::load(&path).map_err(CliError::db)?;
     let now = query::now();
     f(&mut queue, &key, &target, &now).map_err(CliError::validation)?;
@@ -2338,9 +2471,9 @@ fn cmd_feishu_write(args: &Args) -> CliResult<()> {
         return Err(CliError::validation("没有可写的字段（全部为空）。对不上的字段本来就该忽略，但至少要有一个"));
     }
 
-    let dir = resolve_data_dir(args)?;
-    let qpath = feishu::queue_path(&dir);
-    let _lock = feishu::WriteLock::acquire(&dir).map_err(CliError::validation)?;
+    let (dir, uuid) = feishu_scope(args)?;
+    let qpath = feishu::queue_path(&dir, &uuid);
+    let _lock = feishu::WriteLock::acquire(&dir, &uuid).map_err(CliError::validation)?;
 
     let queue = feishu::load(&qpath).map_err(CliError::db)?;
     let entry = feishu::entries(&queue)
@@ -2530,10 +2663,13 @@ fn print_usage() {
   gantt baseline delete <baseline-id> [--json]
 
 负责人：
-  gantt people list [--json]
-  gantt people create --name <名字> [--color #RRGGBB] [--json]
+  gantt people list --project <项目> [--json]
+  gantt people create --project <项目> --name <名字> [--color #RRGGBB] [--json]
   gantt people update <id> [--name <新名>] [--color #RRGGBB] [--json]
   gantt people delete <id> [--yes] [--json]
+
+  gantt account list [--json]          本机账号；标出当前身份
+  gantt account whoami [--json]
 
 设置（给脚本 / 排障用）：
   gantt setting get <key> [--json]
@@ -2552,6 +2688,8 @@ fn print_usage() {
 
 全局选项（可写在组名之前或子命令之后）：
   --data-dir <路径>   覆盖数据目录（默认按平台推，或读 GANTT_DATA_DIR）
+  --account <名字|id> 以哪个账号的身份操作（默认读 GANTT_ACCOUNT，再默认为
+                      桌面应用上次登录的账号）。只看得见该账号能访问的项目
   --force             桌面应用开着时也强行写（最后写入者胜出，慎用）
   --json              输出稳定 JSON
   --yes               确认破坏性操作（project/people/task delete）
@@ -2953,7 +3091,7 @@ mod tests {
         cmd_baseline_create(&args(&dir, &["--project", "1", "--name", "初始排期"])).unwrap();
 
         // 快照里的日期应等于任务此刻的计划日期
-        let rows = query::load_baseline(&db(&dir), 1).unwrap();
+        let rows = query::load_baseline(&db(&dir), 1, 1).unwrap();
         assert_eq!(rows.len(), 1, "一个任务应有一条快照");
         assert_eq!(rows[0].task_id, 1);
         assert_eq!(rows[0].name, "联调");
@@ -2984,12 +3122,12 @@ mod tests {
     fn baseline_snapshot_does_not_follow_later_edits() {
         let dir = seed();
         cmd_baseline_create(&args(&dir, &["--project", "1", "--name", "初始排期"])).unwrap();
-        let before = query::load_baseline(&db(&dir), 1).unwrap()[0].end_date.clone();
+        let before = query::load_baseline(&db(&dir), 1, 1).unwrap()[0].end_date.clone();
 
         // 打基线之后再改工期 —— 快照是「当时那一版」，必须原地不动
         cmd_task_update(&args(&dir, &["1", "--duration", "10d"])).unwrap();
 
-        let rows = query::load_baseline(&db(&dir), 1).unwrap();
+        let rows = query::load_baseline(&db(&dir), 1, 1).unwrap();
         assert_eq!(rows[0].end_date, before, "基线是快照，不该跟着任务改");
     }
 
@@ -3002,19 +3140,19 @@ mod tests {
         let dir = seed();
         cmd_setting_set(&args(&dir, &["plugin.foo", "--value", "bar"])).unwrap();
         assert_eq!(
-            query::get_setting(&db(&dir), "plugin.foo".into())
+            query::get_setting(&db(&dir), 1, "plugin.foo".into())
                 .unwrap()
                 .as_deref(),
             Some("bar")
         );
         assert_eq!(
-            query::list_settings_with_prefix(&db(&dir), "plugin.".into())
+            query::list_settings_with_prefix(&db(&dir), 1, "plugin.".into())
                 .unwrap()
                 .len(),
             1
         );
         // 前缀不匹配时不该漏出来
-        assert!(query::list_settings_with_prefix(&db(&dir), "other.".into())
+        assert!(query::list_settings_with_prefix(&db(&dir), 1, "other.".into())
             .unwrap()
             .is_empty());
 
@@ -3028,7 +3166,7 @@ mod tests {
         // 「这个键没设过」不是错误 —— 和 `git config --get` 一样，问一个没设过的键
         // 是正常查询，只是答案为空。出错会让 Agent 把「没设过」当成命令用错了。
         cmd_setting_get(&args(&dir, &["没这个键"])).unwrap();
-        assert!(query::get_setting(&db(&dir), "没这个键".into())
+        assert!(query::get_setting(&db(&dir), 1, "没这个键".into())
             .unwrap()
             .is_none());
     }
@@ -3041,7 +3179,7 @@ mod tests {
     fn people_delete_with_tasks_needs_yes() {
         let dir = tmp_dir();
         cmd_project_create(&args(&dir, &["--name", "验证"])).unwrap();
-        cmd_people_create(&args(&dir, &["--name", "张三"])).unwrap();
+        cmd_people_create(&args(&dir, &["--project", "1", "--name", "张三"])).unwrap();
         cmd_task_create(&args(
             &dir,
             &[
@@ -3093,7 +3231,7 @@ mod tests {
     fn people_delete_without_tasks_needs_no_yes() {
         let dir = tmp_dir();
         cmd_project_create(&args(&dir, &["--name", "验证"])).unwrap();
-        cmd_people_create(&args(&dir, &["--name", "闲人"])).unwrap();
+        cmd_people_create(&args(&dir, &["--project", "1", "--name", "闲人"])).unwrap();
         // 名下没活儿，不该逼着加 --yes
         cmd_people_delete(&args(&dir, &["1"])).unwrap();
     }
@@ -3176,11 +3314,31 @@ mod tests {
         assert_eq!(hol2, r#"["2026-10-01"]"#);
     }
 
+    /// 账号隔离：别人的项目按 id 也打不开，身份不明时要求显式指定。
+    #[test]
+    fn projects_are_scoped_to_the_resolved_account() {
+        let dir = tmp_dir();
+        cmd_project_create(&args(&dir, &["--name", "甲的项目"])).unwrap();
+        gantt_core::account::create_account(&db(&dir), "乙".into(), "#000000".into(), None).unwrap();
+
+        // 两个账号、桌面应用也没记过上次登录 → 必须说清楚是谁
+        let err = cmd_project_list(&args(&dir, &[])).unwrap_err();
+        assert_eq!(err.code, code::ARGS);
+
+        let conn = open_ro(&args(&dir, &["--account", "乙"])).unwrap();
+        assert!(query::list_projects(&conn, conn.me).unwrap().is_empty());
+        let err = cmd_task_list(&args(&dir, &["--account", "乙", "--project", "1"])).unwrap_err();
+        assert_eq!(err.code, code::VALIDATION, "别人的项目 id 当作不存在");
+
+        gantt_core::account::set_last_account(&db(&dir), Some(1)).unwrap();
+        cmd_task_list(&args(&dir, &["--project", "1"])).unwrap();
+    }
+
     #[test]
     fn people_update_keeps_name_and_color_when_not_given() {
         let dir = tmp_dir();
         cmd_project_create(&args(&dir, &["--name", "验证"])).unwrap();
-        cmd_people_create(&args(&dir, &["--name", "张三", "--color", "#abcdef"])).unwrap();
+        cmd_people_create(&args(&dir, &["--project", "1", "--name", "张三", "--color", "#abcdef"])).unwrap();
 
         // 只改名：颜色得留着
         cmd_people_update(&args(&dir, &["1", "--name", "张三丰"])).unwrap();

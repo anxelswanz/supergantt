@@ -25,7 +25,14 @@ export interface ProjectSummary {
   overdueCount: number;
   /** 叶子任务按工期加权后的整体进度 */
   progress: number;
+  /** 当前账号在这个项目里的角色 */
+  role: Role;
+  /** 成员数。大于 1 = 共享项目 */
+  memberCount: number;
 }
+
+/** 项目成员的角色。所有者能删项目、管成员；编辑者只能改内容 */
+export type Role = "owner" | "editor";
 
 /** 数据库里的任务行。日期是 ISO 字符串，转成天序号是渲染层的事。 */
 export interface TaskRow {
@@ -61,6 +68,57 @@ export interface Person {
   /** base64 data URI；为 null 时回退到首字母头像 */
   avatar: string | null;
   sortOrder: number;
+  /*
+   * 以下几项是 015 新增的元数据。标成可选：老的测试夹具和插件构造的 Person 没有它们，
+   * 读的地方一律按「缺省 = 未绑定」处理
+   */
+  /** 人员归项目（migrations/015） */
+  projectId?: number;
+  /** 绑定的本机账号；null / 缺省 = 没有账号的人 */
+  accountId?: number | null;
+  /** 记住的账号 uuid：导入后本机没有这个账号时仍留着 */
+  accountUuid?: string | null;
+  uuid?: string;
+}
+
+/** 本机账号。密码哈希不出库，只告诉界面「有没有设密码」 */
+export interface Account {
+  id: number;
+  uuid: string;
+  name: string;
+  color: string;
+  avatar: string | null;
+  hasPassword: boolean;
+  sortOrder: number;
+}
+
+export interface SessionState {
+  accounts: Account[];
+  /** null = 没登录（停在登录页） */
+  current: Account | null;
+  lastAccountId: number | null;
+}
+
+export interface Member {
+  accountId: number;
+  name: string;
+  color: string;
+  avatar: string | null;
+  role: Role;
+}
+
+export interface SharePreview {
+  alreadyMember: boolean;
+  /** 对方已能看到同名项目 —— 共享会被拒绝 */
+  nameClash: boolean;
+  /** 名册里和对方同名、还没绑定的人员：要问「是不是同一个人」 */
+  sameNamePerson: Person | null;
+}
+
+export interface DeleteAccountPlan {
+  lastAccount: boolean;
+  soloProjects: { id: number; name: string }[];
+  sharedProjects: { id: number; name: string; members: Member[] }[];
 }
 
 export interface Risk {
@@ -85,6 +143,8 @@ export interface Comment {
   taskId: number;
   content: string;
   createdAt: number;
+  /** 写的人；null = 账号已删除或导入的内容 */
+  authorId?: number | null;
 }
 
 export interface TaskNotes {
@@ -104,6 +164,8 @@ export interface DailyNote {
   /** Unix 秒 */
   createdAt: number;
   updatedAt: number;
+  /** 写的人；null = 账号已删除或导入的内容 */
+  authorId?: number | null;
 }
 
 /** 一条事项（QuickNote）：不需要日期就能存在的记录。 */
@@ -127,6 +189,8 @@ export interface ItemNote {
   resolution: string | null;
   createdAt: number;
   updatedAt: number;
+  /** 写的人；null = 账号已删除或导入的内容 */
+  authorId?: number | null;
 }
 
 /** 事项类型，全局共用。阻碍和风险不在此表，由 promotedKind + promotedRef 表达。 */
@@ -140,6 +204,8 @@ export interface ItemKind {
   /** 内置行：可改名改色，不可删 */
   builtin: boolean;
   sortOrder: number;
+  /** 当前账号能否改删（缺省 = 能）。别人在共享项目里用到的自定义类型会列出来，但只读 */
+  editable?: boolean;
 }
 
 /** 独立的里程碑，可挂多条任务；和 `TaskRow.milestone`（任务本身是节点）不是一回事。 */
@@ -159,7 +225,7 @@ export interface Milestone {
   updatedAt: number;
 }
 
-/** AI 复盘行。background/snapshot/questions 是 JSON 串，由 aiReview/types.ts 解析。 */
+/** 旧版内置 AI 复盘的一行（只读，给插件迁移用）。background/snapshot/questions 是 JSON 串 */
 export interface AiReviewRow {
   id: number;
   projectId: number;
@@ -204,7 +270,10 @@ export interface ProjectData {
   tasks: TaskRow[];
   dependencies: DependencyRow[];
   baselines: BaselineRow[];
+  /** 本项目的人员名册 */
   people: Person[];
+  /** 当前账号在这个项目里的角色 */
+  role: Role;
   /** 全局下一个可用的任务 id —— 前端不能只看当前项目去猜 */
   nextTaskId: number;
 }
@@ -220,14 +289,17 @@ export interface RawPlugin {
   entry_raw: string | null;
   /** 与 manifest 同级的 styles.css，有就自动注入 */
   css_raw: string | null;
+  /** 从开发者模式登记的本地源码目录加载的 */
+  dev: boolean;
 }
 
-/** 随应用附带的插件。两份 manifest 都是原文，校验和版本比较在 TS 侧 */
-export interface BundledPlugin {
-  dir_name: string;
-  manifest_raw: string | null;
-  /** 已安装版本的 manifest；null = 还没装 */
-  installed_manifest_raw: string | null;
+/** 拉在线插件列表的结果。连不上时给上一次的缓存，并带上原因 */
+export interface StoreIndexFetch {
+  raw: string | null;
+  /** unix 秒 */
+  fetched_at: number | null;
+  from_cache: boolean;
+  error: string | null;
 }
 
 export const api = {
@@ -259,10 +331,64 @@ export const api = {
   deleteBaseline: (baselineId: number) =>
     invoke<void>("delete_baseline", { baselineId }),
 
-  listPeople: () => invoke<Person[]>("list_people"),
+  /* ---------------- 账号与共享 ---------------- */
 
-  createPerson: (name: string, color: string) =>
-    invoke<Person>("create_person", { name, color }),
+  sessionState: () => invoke<SessionState>("session_state"),
+
+  login: (accountId: number, password: string | null) =>
+    invoke<SessionState>("login", { accountId, password }),
+
+  logout: () => invoke<SessionState>("logout"),
+
+  createAccount: (name: string, color: string, password: string | null) =>
+    invoke<Account>("create_account", { name, color, password }),
+
+  /** 改自己的资料。avatar 约定同 updatePerson */
+  updateAccount: (name: string, color: string, avatar?: string) =>
+    invoke<void>("update_account", { name, color, avatar }),
+
+  /** next 传 null 或 "" = 清除密码 */
+  setPassword: (current: string | null, next: string | null) =>
+    invoke<void>("set_password", { current, next }),
+
+  deleteAccountPlan: () => invoke<DeleteAccountPlan>("delete_account_plan"),
+
+  /** transfers：[项目 id, 接手的账号 id][] */
+  deleteAccount: (password: string | null, transfers: [number, number][]) =>
+    invoke<SessionState>("delete_account", { password, transfers }),
+
+  listMembers: (projectId: number) => invoke<Member[]>("list_members", { projectId }),
+
+  sharePreview: (projectId: number, accountId: number) =>
+    invoke<SharePreview>("share_preview", { projectId, accountId }),
+
+  shareProject: (projectId: number, accountId: number, bindPerson: number | null) =>
+    invoke<void>("share_project", { projectId, accountId, bindPerson }),
+
+  unshareProject: (projectId: number, accountId: number) =>
+    invoke<void>("unshare_project", { projectId, accountId }),
+
+  leaveProject: (projectId: number) => invoke<void>("leave_project", { projectId }),
+
+  transferOwnership: (projectId: number, accountId: number) =>
+    invoke<void>("transfer_ownership", { projectId, accountId }),
+
+  /* ---------------- 人员（归项目） ---------------- */
+
+  listPeople: (projectId: number) => invoke<Person[]>("list_people", { projectId }),
+
+  createPerson: (projectId: number, name: string, color: string) =>
+    invoke<Person>("create_person", { projectId, name, color }),
+
+  /** 自己看得见的所有项目里的人员，「从其他项目导入」用 */
+  listVisiblePeople: () => invoke<Person[]>("list_visible_people"),
+
+  importPeople: (projectId: number, personIds: number[]) =>
+    invoke<number>("import_people", { projectId, personIds }),
+
+  /** accountId 传 null = 解绑 */
+  bindPerson: (personId: number, accountId: number | null) =>
+    invoke<void>("bind_person", { personId, accountId }),
 
   /** avatar 传 undefined = 不改动，传 "" = 清除 */
   updatePerson: (id: number, name: string, color: string, avatar?: string) =>
@@ -420,28 +546,21 @@ export const api = {
 
   deleteMilestone: (id: number) => invoke<void>("delete_milestone", { id }),
 
-  /* ---------------- AI 复盘 ---------------- */
+  /* ---------------- AI ---------------- */
 
-  /** 一个项目的全部复盘，最近动过的在前。连快照和文档一起取 */
+  /**
+   * 旧版内置 AI 复盘留在库里的记录（只读）。AI 复盘已经是插件了，
+   * 插件第一次打开某个项目时经 api.data.legacyAiReviews() 把它们搬进自己的 data/
+   */
   listAiReviews: (projectId: number) =>
     invoke<AiReviewRow[]>("list_ai_reviews", { projectId }),
 
-  /** 开始一次复盘。背景和快照在这一刻定下来，之后不再变 */
-  createAiReview: (projectId: number, title: string, background: string, snapshot: string) =>
-    invoke<AiReviewRow>("create_ai_review", { projectId, title, background, snapshot }),
-
-  /** 存进度。**不碰背景和快照。** 返回新的 updatedAt（Unix 秒） */
-  saveAiReview: (id: number, title: string, stage: string, questions: string, document: string) =>
-    invoke<number>("save_ai_review", { id, title, stage, questions, document }),
-
-  deleteAiReview: (id: number) => invoke<void>("delete_ai_review", { id }),
-
   /** 本机有没有装 claude */
-  aiReviewAvailable: () => invoke<boolean>("ai_review_available"),
+  aiAvailable: () => invoke<boolean>("ai_available"),
 
-  /** 问 Claude 一次，返回 run id。程序与参数由 Rust 写死，这里只给提示词和 schema。 */
-  aiReviewRun: (prompt: string, schema: string | null) =>
-    invoke<number>("ai_review_run", { prompt, schema }),
+  /** 问 Claude 一次（零工具），返回 run id。程序与参数由 Rust 写死，这里只给提示词、schema 和单行的系统提示词 */
+  aiAsk: (prompt: string, schema: string | null, system: string | null) =>
+    invoke<number>("ai_ask", { prompt, schema, system }),
 
   /* ---------------- 插件 ---------------- */
 
@@ -454,10 +573,18 @@ export const api = {
   /** 在资源管理器 / 访达里打开插件目录 */
   revealPluginsDir: () => invoke<void>("reveal_plugins_dir"),
 
-  /** 随应用附带、可以在设置里一键安装的插件 */
-  listBundledPlugins: () => invoke<BundledPlugin[]>("list_bundled_plugins"),
-  /** 安装或更新一个附带插件。更新时保留插件的 data/ */
-  installBundledPlugin: (id: string) => invoke<void>("install_bundled_plugin", { id }),
+  /** 拉 GitHub 上的插件列表（index.json）。不会抛网络错误：连不上时退回缓存 */
+  storeFetchIndex: (mirror: string | null) =>
+    invoke<StoreIndexFetch>("store_fetch_index", { mirror }),
+  /** 下载、校验 sha256、安装或更新一个插件，保留 data/。返回装上的 manifest 原文 */
+  storeInstall: (id: string, url: string, sha256: string, mirror: string | null) =>
+    invoke<string>("store_install", { id, url, sha256, mirror }),
+
+  /** 开发者模式：登记的本地插件源码目录 */
+  devPluginDirs: () => invoke<string[]>("dev_plugin_dirs"),
+  /** 登记一个开发目录，返回它的插件 id（目录名） */
+  devPluginAdd: (path: string) => invoke<string>("dev_plugin_add", { path }),
+  devPluginRemove: (path: string) => invoke<void>("dev_plugin_remove", { path }),
   /** 删掉插件代码，保留 data/（重装后数据还在）。调用前先停用 */
   uninstallPlugin: (id: string) => invoke<void>("uninstall_plugin", { id }),
 

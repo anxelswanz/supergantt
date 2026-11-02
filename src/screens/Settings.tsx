@@ -13,7 +13,6 @@ import { APP_VIEWS, PERMANENT_VIEW } from "../core/views";
 import { BLOCKER_KIND, RISK_KIND, newKindKey } from "../core/items";
 import type { ItemKind } from "../db/api";
 import { plugins } from "../plugins/registry";
-import { compareVersions, validateManifest } from "../plugins/manifest";
 import type { PluginRecord, PluginSettingField } from "../plugins/types";
 import { useRegistry } from "../plugins/usePlugins";
 import {
@@ -26,10 +25,13 @@ import { exportDatabaseFile } from "../transfer/projectFile";
 import { Avatar, fileToAvatarDataUrl } from "./Avatar";
 import { CalendarPane } from "./CalendarSettings";
 import { ExportButton } from "./ExportButton";
+import { Icon } from "../brand/Icon";
+import { AccountPane } from "./AccountSettings";
 
-type Tab = "appearance" | "views" | "kinds" | "people" | "calendar" | "plugins" | "data";
+type Tab = "account" | "appearance" | "views" | "kinds" | "people" | "calendar" | "plugins" | "data";
 
 const TABS: { id: Tab; label: string }[] = [
+  { id: "account", label: "账号" },
   { id: "appearance", label: "外观" },
   { id: "views", label: "视图" },
   { id: "kinds", label: "事项类型" },
@@ -103,6 +105,7 @@ export function Settings({
         </nav>
 
         <div className="min-w-0 flex-1 overflow-y-auto p-5">
+          {tab === "account" && <AccountPane />}
           {tab === "appearance" && <AppearancePane />}
           {tab === "views" && <ViewsPane />}
           {tab === "kinds" && <ItemKindsPane />}
@@ -129,6 +132,8 @@ const PLUGIN_STATUS: Record<PluginRecord["status"], { label: string; cls: string
 
 function PluginsPane() {
   const { records, settingFields, booted, bootError } = useRegistry();
+  const closeSettings = useAppStore((s) => s.closeSettings);
+  const setPluginMarketOpen = useAppStore((s) => s.setPluginMarketOpen);
 
   const [dir, setDir] = useState("");
   const [message, setMessage] = useState("");
@@ -168,7 +173,7 @@ function PluginsPane() {
   return (
     <Section
       title="插件"
-      desc="插件可以添加视图，也可以修改任务数据（可撤销）。改完代码后点「重新加载」生效。"
+      desc="插件可以添加视图，也可以修改任务数据（可撤销）。在插件市场里搜索、安装；这里管已装插件的设置。"
     >
       <div className="mb-3 break-all rounded-lg border border-[var(--rule)] bg-[var(--surface-alt)] p-2.5 font-mono text-[10px] text-[var(--text-dim)]">
         {dir || "读取中…"}
@@ -176,13 +181,24 @@ function PluginsPane() {
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <button
+          onClick={() => {
+            // 先关设置：两层弹窗各自监听 Esc，叠着开的话一次 Esc 会把两层一起关掉
+            closeSettings();
+            setPluginMarketOpen(true);
+          }}
+          className="flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white"
+        >
+          <Icon name="plugin" size={13} />
+          打开插件市场
+        </button>
+        <button
           onClick={() => void api.revealPluginsDir().catch(() => {})}
           className="rounded-lg border border-[var(--rule)] px-3 py-1.5 text-xs font-medium text-[var(--text-dim)] hover:text-[var(--text)]"
         >
           {REVEAL_LABEL}
         </button>
         <span className="text-[10px] text-[var(--text-dim)]">
-          装插件：把文件夹拷进这个目录
+          已装插件和它们保存的数据都在这里
         </span>
       </div>
 
@@ -199,21 +215,15 @@ function PluginsPane() {
         </div>
       )}
 
-      <BundledList records={records} onError={setMessage} />
+      {records.length > 0 && (
+        <div className="mb-1.5 text-[10px] font-medium text-[var(--text-dim)]">已安装</div>
+      )}
 
       {!booted && <p className="text-xs text-[var(--text-dim)]">正在扫描插件目录…</p>}
 
       {booted && records.length === 0 && !bootError && (
-        <div className="rounded-lg border border-dashed border-[var(--rule)] p-4 text-xs leading-relaxed text-[var(--text-dim)]">
-          还没有插件。在插件目录里新建一个文件夹，放两个文件：
-          <div className="my-2 rounded bg-[var(--surface-alt)] p-2 font-mono text-[10px] leading-relaxed">
-            quicknote/manifest.json
-            <br />
-            quicknote/main.js
-          </div>
-          manifest.json 里写 id、name、version、apiVersion；
-          main.js 导出 <code>onload(api)</code>，再用 <code>api.views.register(...)</code>
-          注册视图。重启应用后出现在这里。
+        <div className="rounded-lg border border-dashed border-[var(--rule)] p-4 text-[10px] leading-relaxed text-[var(--text-dim)]">
+          还没有装插件。点上面的「打开插件市场」，搜索、安装后会自动启用。
         </div>
       )}
 
@@ -240,6 +250,14 @@ function PluginsPane() {
                     <span className={`shrink-0 text-[10px] font-medium ${status.cls}`}>
                       {status.label}
                     </span>
+                    {r.dev && (
+                      <span
+                        title={r.path}
+                        className="shrink-0 rounded bg-[var(--milestone)]/15 px-1.5 py-px text-[9px] font-medium text-[var(--milestone)]"
+                      >
+                        本地开发
+                      </span>
+                    )}
                   </div>
                   {r.manifest.description && (
                     <div className="mt-1 text-[10px] leading-relaxed text-[var(--text-dim)]">
@@ -263,7 +281,8 @@ function PluginsPane() {
                       {isBusy ? "…" : "重新加载"}
                     </button>
                   )}
-                  {!r.enabled && (
+                  {/* 开发目录的插件不卸载：那是你的源码。在下面「开发者模式」里移除登记 */}
+                  {!r.enabled && !r.dev && (
                     <button
                       onClick={() => {
                         if (
@@ -339,112 +358,101 @@ function PluginsPane() {
         <br />
         插件能读到全部数据，只装可信来源的插件。
       </p>
+
+      <DevDirs records={records} onError={setMessage} />
     </Section>
   );
 }
 
-/** 随应用附带、可一键安装的插件。一个都没有时整段不出现；已装的也列出，按钮写「已安装」。 */
-function BundledList({ records, onError }: { records: PluginRecord[]; onError: (m: string) => void }) {
-  const [list, setList] = useState<
-    { id: string; name: string; version: string; description?: string; installed: string | null }[]
-  >([]);
-  const [busy, setBusy] = useState<string | null>(null);
+/* ------------------------------------------------------------------ */
+/* 开发者模式                                                          */
+/* ------------------------------------------------------------------ */
 
-  const load = () =>
-    api
-      .listBundledPlugins()
-      .then((raw) =>
-        setList(
-          raw.flatMap((b) => {
-            const m = validateManifest(b.manifest_raw, b.dir_name);
-            if (!m.ok) return [];
-            let installed: string | null = null;
-            if (b.installed_manifest_raw) {
-              try {
-                installed = String(JSON.parse(b.installed_manifest_raw).version ?? "0.0.0");
-              } catch {
-                installed = "0.0.0";
-              }
-            }
-            return [
-              {
-                id: m.manifest.id,
-                name: m.manifest.name,
-                version: m.manifest.version,
-                description: m.manifest.description,
-                installed,
-              },
-            ];
-          }),
-        ),
-      )
-      .catch(() => setList([]));
+/**
+ * 登记本地插件源码目录（如 supergantt-plugins/plugins/feishu-sync），直接从那里加载，
+ * 改完点「重新加载」。同 id 时盖过在线装的那份，移除登记后恢复。
+ */
+function DevDirs({ records, onError }: { records: PluginRecord[]; onError: (m: string) => void }) {
+  const [dirs, setDirs] = useState<string[]>([]);
+  const [open, setOpen] = useState(false);
 
-  // records 变了（装了、卸了）就重读一遍已安装版本
+  const load = () => void api.devPluginDirs().then(setDirs).catch(() => setDirs([]));
+  useEffect(load, []);
   useEffect(() => {
-    void load();
-  }, [records]);
+    if (dirs.length > 0) setOpen(true);
+  }, [dirs.length]);
 
-  if (list.length === 0) return null;
+  /** 登记变了：重扫；同 id 正在用的插件要重载，否则跑的还是旧位置的代码 */
+  const settle = async (id: string) => {
+    const wasEnabled = records.find((r) => r.manifest.id === id)?.enabled ?? false;
+    await plugins.rescan();
+    if (wasEnabled && plugins.getSnapshot().records.some((r) => r.manifest.id === id)) {
+      await plugins.reload(id);
+    }
+    load();
+  };
 
-  const install = async (id: string) => {
-    setBusy(id);
+  const add = async () => {
     try {
-      const wasEnabled = records.find((r) => r.manifest.id === id)?.enabled ?? false;
-      await api.installBundledPlugin(id);
-      await plugins.rescan();
-      // 更新正在使用的插件：重载让新代码立刻生效
-      if (wasEnabled) await plugins.reload(id);
-      await load();
+      const { open: pick } = await import("@tauri-apps/plugin-dialog");
+      const path = await pick({ directory: true, multiple: false, title: "选插件的源码目录（里面有 manifest.json）" });
+      if (typeof path !== "string") return;
+      await settle(await api.devPluginAdd(path));
     } catch (e) {
-      onError(`${id}：${(e as Error)?.message ?? e}`);
-    } finally {
-      setBusy(null);
+      onError(`开发目录：${(e as Error)?.message ?? e}`);
+    }
+  };
+
+  const remove = async (path: string) => {
+    try {
+      await api.devPluginRemove(path);
+      await settle(path.split(/[\\/]/).filter(Boolean).pop() ?? "");
+    } catch (e) {
+      onError(`开发目录：${(e as Error)?.message ?? e}`);
     }
   };
 
   return (
-    <div className="mb-4">
-      <div className="mb-1.5 text-[10px] font-medium text-[var(--text-dim)]">可安装</div>
-      <div className="space-y-1.5">
-        {list.map((b) => {
-          const state =
-            b.installed == null ? "install" : compareVersions(b.version, b.installed) > 0 ? "update" : "current";
-          return (
-            <div
-              key={b.id}
-              className="flex items-center gap-3 rounded-xl border border-dashed border-[var(--rule)] p-2.5"
-            >
-              <div className="min-w-0 flex-1">
-                <div className="flex items-baseline gap-2">
-                  <span className="truncate text-xs font-semibold text-[var(--text)]">{b.name}</span>
-                  <span className="shrink-0 font-mono text-[10px] text-[var(--text-dim)]">v{b.version}</span>
-                </div>
-                {b.description && (
-                  <div className="mt-0.5 text-[10px] leading-relaxed text-[var(--text-dim)]">{b.description}</div>
-                )}
-              </div>
-              <button
-                onClick={() => void install(b.id)}
-                disabled={state === "current" || busy === b.id}
-                className={`shrink-0 rounded-lg px-2.5 py-1 text-[10px] font-medium disabled:opacity-50 ${
-                  state === "current"
-                    ? "border border-[var(--rule)] text-[var(--text-dim)]"
-                    : "bg-[var(--accent)] text-white"
-                }`}
+    <div className="mt-5 border-t border-[var(--rule)] pt-3">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-1.5 text-left text-[10px] font-medium text-[var(--text-dim)] hover:text-[var(--text)]"
+      >
+        <span className={`inline-block transition-transform ${open ? "rotate-90" : ""}`}>›</span>
+        开发者模式
+        {dirs.length > 0 && <span className="font-normal">· {dirs.length} 个本地目录</span>}
+      </button>
+      {open && (
+        <div className="mt-2">
+          <p className="mb-2 text-[10px] leading-relaxed text-[var(--text-dim)]">
+            直接从源码目录加载插件，改完点「重新加载」生效，不用发布。同名时盖过在线安装的那份。
+          </p>
+          <div className="space-y-1">
+            {dirs.map((d) => (
+              <div
+                key={d}
+                className="flex items-center gap-2 rounded-lg border border-[var(--rule)] bg-[var(--surface-alt)] px-2.5 py-1.5"
               >
-                {busy === b.id
-                  ? "…"
-                  : state === "install"
-                    ? "安装"
-                    : state === "update"
-                      ? `更新（当前 v${b.installed}）`
-                      : "已安装"}
-              </button>
-            </div>
-          );
-        })}
-      </div>
+                <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-[var(--text)]" title={d}>
+                  {d}
+                </span>
+                <button
+                  onClick={() => void remove(d)}
+                  className="shrink-0 text-[10px] text-[var(--text-dim)] hover:text-[var(--danger)]"
+                >
+                  移除
+                </button>
+              </div>
+            ))}
+          </div>
+          <button
+            onClick={() => void add()}
+            className="mt-2 rounded-lg border border-[var(--rule)] px-3 py-1.5 text-[10px] font-medium text-[var(--text-dim)] hover:text-[var(--text)]"
+          >
+            添加本地目录…
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -702,7 +710,19 @@ function ItemKindsPane() {
       )}
 
       <div className="flex flex-col gap-1.5">
-        {slice.map((k) => (
+        {slice.map((k) =>
+          k.editable === false ? (
+            // 别人建的类型：出现在这里是因为共享项目里有事项用了它（migrations/015）
+            <div
+              key={k.key}
+              title="别的账号建的类型，只有创建者能修改"
+              className="flex items-center gap-2 rounded-xl border border-[var(--rule)] px-2.5 py-1.5 text-[11px] text-[var(--text-dim)]"
+            >
+              <span className="size-2.5 rounded-full" style={{ background: k.color }} />
+              <span className="text-[var(--text)]">{k.label}</span>
+              <span className="ml-auto text-[10px]">别人建的 · 只读</span>
+            </div>
+          ) : (
           <KindRow
             key={k.key}
             kind={k}
@@ -718,7 +738,8 @@ function ItemKindsPane() {
               );
             }}
           />
-        ))}
+          ),
+        )}
 
         {slice.length === 0 && (
           <div className="rounded-xl border border-dashed border-[var(--rule)] py-6 text-center text-[10px] text-[var(--text-dim)]">
@@ -1056,15 +1077,30 @@ function RowHeightPicker() {
 /* ------------------------------------------------------------------ */
 
 function PeoplePane() {
+  const project = useAppStore((s) => s.project);
   const people = useAppStore((s) => s.people);
   const addPerson = useAppStore((s) => s.addPerson);
   const loadPeople = useAppStore((s) => s.loadPeople);
+  const loadMembers = useAppStore((s) => s.loadMembers);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
 
   useEffect(() => {
     void loadPeople();
-  }, [loadPeople]);
+    void loadMembers();
+  }, [loadPeople, loadMembers]);
+
+  // 人员归项目（migrations/015）：没打开项目就没有名单可管
+  if (!project) {
+    return (
+      <Section title="负责人" desc="每个项目有自己的负责人名单。">
+        <div className="py-8 text-center text-xs text-[var(--text-dim)]">
+          打开一个项目后，在这里管理它的负责人。
+        </div>
+      </Section>
+    );
+  }
 
   const add = async () => {
     if (!draft.trim()) return;
@@ -1080,7 +1116,7 @@ function PeoplePane() {
   return (
     <Section
       title="负责人"
-      desc="所有项目共用这份名单。"
+      desc={`「${project.name}」的负责人名单。没有账号的人（外包、甲方）直接加名字；绑定账号后，对方登录就能看到这个项目。`}
     >
       <div className="mb-3 flex gap-2">
         <input
@@ -1102,9 +1138,27 @@ function PeoplePane() {
         >
           添加
         </button>
+        <button
+          onClick={() => setImporting((v) => !v)}
+          title="从你的其他项目里挑人拷过来"
+          className="rounded-lg border border-[var(--rule)] px-2.5 py-1.5 text-xs text-[var(--text-dim)] hover:text-[var(--text)]"
+        >
+          从其他项目导入
+        </button>
       </div>
 
       {error && <div className="mb-2 text-[10px] text-[var(--danger)]">{error}</div>}
+
+      {importing && (
+        <ImportPeople
+          projectId={project.id}
+          existing={people.map((p) => p.name)}
+          onDone={() => {
+            setImporting(false);
+            void loadPeople();
+          }}
+        />
+      )}
 
       <div className="flex flex-col gap-1">
         <AnimatePresence initial={false}>
@@ -1116,10 +1170,139 @@ function PeoplePane() {
 
       {people.length === 0 && (
         <div className="py-8 text-center text-xs text-[var(--text-dim)]">
-          还没有负责人。上面加一个。
+          这个项目还没有负责人。上面加一个。
         </div>
       )}
     </Section>
+  );
+}
+
+/** 从自己看得见的其他项目里挑人，拷一份进当前项目。同名的已经有了，不列。 */
+function ImportPeople({
+  projectId,
+  existing,
+  onDone,
+}: {
+  projectId: number;
+  existing: string[];
+  onDone: () => void;
+}) {
+  const projects = useAppStore((s) => s.projects);
+  const [candidates, setCandidates] = useState<Person[] | null>(null);
+  const [picked, setPicked] = useState<Set<number>>(new Set());
+
+  useEffect(() => {
+    void api.listVisiblePeople().then((all) => {
+      // 同名只留一个：张三在三个项目里各有一份，挑一次就够
+      const seen = new Set(existing);
+      setCandidates(
+        all.filter((p) => {
+          if (p.projectId === projectId || seen.has(p.name)) return false;
+          seen.add(p.name);
+          return true;
+        }),
+      );
+    });
+  }, [projectId, existing]);
+
+  if (!candidates) return null;
+  return (
+    <div className="mb-3 rounded-lg border border-[var(--rule)] bg-[var(--surface-alt)] p-2">
+      {candidates.length === 0 ? (
+        <div className="py-2 text-center text-[10px] text-[var(--text-dim)]">
+          其他项目里没有这个项目还没有的人。
+        </div>
+      ) : (
+        <div className="flex flex-wrap gap-1.5">
+          {candidates.map((p) => {
+            const on = picked.has(p.id);
+            const from = projects.find((x) => x.project.id === p.projectId)?.project.name;
+            return (
+              <button
+                key={p.id}
+                title={from ? `来自「${from}」` : undefined}
+                onClick={() => {
+                  const next = new Set(picked);
+                  if (on) next.delete(p.id);
+                  else next.add(p.id);
+                  setPicked(next);
+                }}
+                className={`flex items-center gap-1 rounded-full border py-0.5 pr-2 pl-0.5 text-[11px] ${
+                  on ? "border-[var(--accent)] text-[var(--text)]" : "border-[var(--rule)] text-[var(--text-dim)]"
+                }`}
+              >
+                <Avatar person={p} size={16} />
+                {p.name}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      <div className="mt-2 flex justify-end gap-2">
+        <button onClick={onDone} className="text-[11px] text-[var(--text-dim)]">
+          取消
+        </button>
+        <button
+          disabled={picked.size === 0}
+          onClick={() => void api.importPeople(projectId, [...picked]).then(onDone)}
+          className="rounded-md bg-[var(--accent)] px-2.5 py-1 text-[11px] font-medium text-white disabled:opacity-40"
+        >
+          导入 {picked.size || ""} 人
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 人员绑定的账号。选项是项目成员；所有者还能选非成员的账号 ——
+ * 选了就顺带把对方加进项目（绑定须是成员，account::bind_person）。
+ */
+function BindSelect({ person }: { person: Person }) {
+  const session = useAppStore((s) => s.session);
+  const members = useAppStore((s) => s.members);
+  const role = useAppStore((s) => s.projectRole);
+  const people = useAppStore((s) => s.people);
+  const loadPeople = useAppStore((s) => s.loadPeople);
+  const loadMembers = useAppStore((s) => s.loadMembers);
+  const [error, setError] = useState<string | null>(null);
+
+  const accounts = session?.accounts ?? [];
+  const isMember = (id: number) => members.some((m) => m.accountId === id);
+  // 已经绑在别的人员上的账号不列：一个账号在一个项目里只对应一个人
+  const taken = new Set(people.filter((p) => p.id !== person.id).map((p) => p.accountId));
+  const options = accounts.filter(
+    (a) => !taken.has(a.id) && (isMember(a.id) || role === "owner" || a.id === person.accountId),
+  );
+
+  const change = async (value: string) => {
+    setError(null);
+    try {
+      await api.bindPerson(person.id, value === "" ? null : Number(value));
+      await Promise.all([loadPeople(), loadMembers()]);
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
+  return (
+    <span className="flex shrink-0 flex-col items-end">
+      <select
+        value={person.accountId ?? ""}
+        onChange={(e) => void change(e.target.value)}
+        title="绑定到这台电脑上的账号"
+        className="max-w-[110px] rounded border border-[var(--rule)] bg-[var(--surface)] px-1 py-0.5 text-[10px] text-[var(--text-dim)] outline-none"
+      >
+        <option value="">无账号</option>
+        {options.map((a) => (
+          <option key={a.id} value={a.id}>
+            {a.name}
+            {isMember(a.id) ? "" : "（加为成员）"}
+          </option>
+        ))}
+      </select>
+      {error && <span className="max-w-[160px] text-[9px] text-[var(--danger)]">{error}</span>}
+    </span>
   );
 }
 
@@ -1222,6 +1405,8 @@ function PersonRow({ person }: { person: Person }) {
         onPick={(color) => void savePerson(person.id, person.name, color)}
       />
 
+      <BindSelect person={person} />
+
       {person.avatar && (
         <button
           onClick={() => void savePerson(person.id, person.name, person.color, "")}
@@ -1232,7 +1417,8 @@ function PersonRow({ person }: { person: Person }) {
         </button>
       )}
 
-      <button
+      {/* 绑着成员的人不能删：成员还在，名册里就得有他（取消共享会自动解绑） */}
+      {person.accountId == null && <button
         onClick={() => void askDelete()}
         onBlur={() => setConfirming(false)}
         className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium transition-opacity ${
@@ -1247,7 +1433,7 @@ function PersonRow({ person }: { person: Person }) {
         }
       >
         {confirming ? `确认（${taskCount ?? 0} 个任务将解除指派）` : "删除"}
-      </button>
+      </button>}
     </motion.div>
   );
 }

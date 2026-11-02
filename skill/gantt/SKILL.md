@@ -44,8 +44,10 @@ $ gantt task update 47 --progress 60%
 `--assignee 王五` 如果王五不在负责人列表里，命令**会失败**（不会偷偷建一个 —— 那样一个
 错别字就多出一个负责人）。报错会列出所有现有名字。要么用对名字，要么先建：
 
+负责人**按项目**分开：每个项目有自己的名单，建人时要说是哪个项目的。
+
 ```bash
-gantt people create --name 王五
+gantt people create --project 3 --name 王五
 # 或者，确认就是这个新人：
 gantt task create ... --assignee 王五 --create-missing
 ```
@@ -84,15 +86,23 @@ gantt task create --project <id|名称> --name <名称>
 gantt task update <id> [上面任意字段] [--parent none] [--clear-assignee] [--json]
 gantt task delete <id> [--yes] [--json]
 
-# 负责人
-gantt people list [--json]
-gantt people create --name <名字> [--color #RRGGBB] [--json]
+# 负责人（按项目）
+gantt people list --project <id|名字> [--json]
+gantt people create --project <id|名字> --name <名字> [--color #RRGGBB] [--json]
+
+# 账号（这台电脑上可能有多个账号，每个账号只看得到自己的项目）
+gantt account list [--json]      # 标出当前以谁的身份操作
+gantt account whoami [--json]
 
 # 结构自检（查数据库有没有坏掉）
 gantt check [--json]
 ```
 
-全局选项：`--data-dir <路径>`（换数据目录，一般不用）、`--force`（见上）、`--json`。
+全局选项：`--data-dir <路径>`（换数据目录，一般不用）、`--account <名字|id>`（以哪个账号的身份操作；
+默认取 `GANTT_ACCOUNT`，再默认为桌面应用上次登录的账号）、`--force`（见上）、`--json`。
+
+如果报「有多个账号，不知道以谁的身份操作」，先 `gantt account list` 看看，问用户是哪个账号，
+再在每条命令上加 `--account`。
 
 `--data-dir` / `--force` / `--json` 要写在**子命令之后**（`gantt task list --project 3 --json`）。
 写在最前面会被当成命令名，报「不认识的命令」。

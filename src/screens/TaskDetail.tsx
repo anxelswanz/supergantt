@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useAuthorLabel } from "./Accounts";
 import { motion } from "motion/react";
 import { resolve, type Task } from "../gantt/model";
 import { PRIORITY_COLORS, PRIORITY_LABELS } from "../gantt/theme";
@@ -702,6 +703,7 @@ function CommentSection({
 
 function CommentRow({ comment, onChanged }: { comment: Comment; onChanged: () => void }) {
   const [confirming, setConfirming] = useState(false);
+  const author = useAuthorLabel(comment.authorId);
 
   return (
     <div className="group rounded-md bg-[var(--surface-alt)] px-2.5 py-2">
@@ -710,12 +712,13 @@ function CommentRow({ comment, onChanged }: { comment: Comment; onChanged: () =>
       </div>
       <div className="mt-1 flex items-center gap-2">
         <span className="text-[9px] text-[var(--text-dim)]">
+          {author && <span className="font-medium text-[var(--text)]">{author} · </span>}
           {formatTime(comment.createdAt)}
         </span>
         <button
           onClick={() => {
             if (!confirming) return setConfirming(true);
-            void api.deleteComment(comment.id).then(onChanged);
+            void api.deleteComment(comment.id).then(onChanged, (err) => alert(String(err)));
           }}
           onBlur={() => setConfirming(false)}
           className={`ml-auto rounded px-1 text-[9px] transition-opacity ${

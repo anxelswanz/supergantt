@@ -4,9 +4,12 @@ import { makeCommand, type Command, type Edit, type TaskMap } from "../core/edit
 import {
   api,
   type DependencyRow,
+  type Member,
   type Person,
   type Project,
   type ProjectSummary,
+  type Role,
+  type SessionState,
 } from "../db/api";
 import { rowToTask } from "../db/convert";
 import { installFlushGuards, Persistence } from "../db/persistence";
@@ -67,6 +70,8 @@ export type Screen = { name: "list" } | { name: "workspace"; projectId: number }
 export type DropPosition = "before" | "inside" | "after";
 
 interface AppState {
+  /** null = 还没问过 Rust（启动第一帧）。当前账号在 Rust 侧，见 src-tauri/src/db.rs 的 Db */
+  session: SessionState | null;
   screen: Screen;
   projects: ProjectSummary[];
   loadingProjects: boolean;
@@ -104,8 +109,14 @@ interface AppState {
   /** 实施侧是否叠加显示计划条 */
   compareOn: boolean;
 
-  /** 全局共享，不按项目隔离；不进撤销栈 */
+  /** 当前项目的人员名册（人员归项目，migrations/015）；不进撤销栈 */
   people: Person[];
+
+  /** 当前账号在打开的项目里的角色；没打开项目时为 null */
+  projectRole: Role | null;
+
+  /** 打开的项目的成员（能打开它的账号）。共享、绑定人员、显示作者都用它 */
+  members: Member[];
 
   /** 放在 store 是因为快捷键在 window 上监听 */
   selectedId: number | null;
@@ -144,6 +155,9 @@ interface AppState {
   /** `Ctrl+K` 弹窗；全局快捷键和事项视图「＋」两个入口 */
   quickNoteOpen: boolean;
 
+  /** 插件市场弹窗。工具条和设置 → 插件两个入口 */
+  pluginMarketOpen: boolean;
+
   /** 录入弹窗 ⌘↵ 后要给哪一行弹分拣菜单（一次性信号） */
   pendingSortNoteId: number | null;
 
@@ -165,6 +179,10 @@ interface AppState {
   reopenRisk: (id: number) => Promise<void>;
   removeRisk: (id: number) => Promise<void>;
   loadSettings: () => Promise<void>;
+  loadSession: () => Promise<SessionState>;
+  /** 登录、切换、退出、删账号之后都走这里：先落库再整页重载，见实现处 */
+  changeSession: (action: () => Promise<SessionState>) => Promise<void>;
+  loadMembers: () => Promise<void>;
   loadPeople: () => Promise<void>;
   addPerson: (name: string) => Promise<void>;
   savePerson: (id: number, name: string, color: string, avatar?: string) => Promise<void>;
@@ -205,6 +223,7 @@ interface AppState {
   /* ---------------- 事项 ---------------- */
 
   setQuickNoteOpen: (open: boolean) => void;
+  setPluginMarketOpen: (open: boolean) => void;
   setPendingSortNote: (id: number | null) => void;
   openSettings: (tab?: string) => void;
   closeSettings: () => void;
@@ -393,6 +412,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
   return {
     screen: { name: "list" },
+    session: null,
     projects: [],
     loadingProjects: false,
 
@@ -417,6 +437,8 @@ export const useAppStore = create<AppState>((set, get) => {
     viewMode: "plan",
     compareOn: false,
     people: [],
+    projectRole: null,
+    members: [],
     selectedId: null,
     detailId: null,
     pendingEditId: null,
@@ -428,6 +450,7 @@ export const useAppStore = create<AppState>((set, get) => {
     milestones: [],
     itemKinds: BUILTIN_KINDS,
     quickNoteOpen: false,
+    pluginMarketOpen: false,
     pendingSortNoteId: null,
     settingsTab: null,
     noteDraft: null,
@@ -548,6 +571,10 @@ export const useAppStore = create<AppState>((set, get) => {
 
     setQuickNoteOpen(open) {
       set({ quickNoteOpen: open });
+    },
+
+    setPluginMarketOpen(open) {
+      set({ pluginMarketOpen: open });
     },
 
     setPendingSortNote(id) {
@@ -999,13 +1026,52 @@ export const useAppStore = create<AppState>((set, get) => {
       await get().refreshRisks();
     },
 
+    async loadSession() {
+      const session = await api.sessionState();
+      set({ session });
+      return session;
+    },
+
+    /**
+     * 换人。先把当前项目落库，再让 Rust 换会话，最后**整页重载**。
+     *
+     * 重载而不是逐个 store 字段清空：撤销栈、插件（启用列表和配置按账号存）、
+     * 视图偏好、各种模块级缓存……任何一处漏清，B 就会看到 A 的东西。当前账号
+     * 存在 Rust 侧，重载后照样在，前端从零按新账号启动是最不会漏的做法。
+     */
+    async changeSession(action) {
+      const { persistence } = get();
+      if (persistence) {
+        await get().closeProject();
+        // closeProject 落库失败时不会离开工作区 —— 那也就不能换人，否则编辑会丢
+        if (get().persistence) throw new Error("还有修改没保存成功，暂时不能切换账号");
+      }
+      const session = await action();
+      set({ session });
+      window.location.reload();
+    },
+
+    async loadMembers() {
+      const { project } = get();
+      if (!project) return;
+      const rows = await api.listMembers(project.id).catch(() => []);
+      set({ members: Array.isArray(rows) ? rows : [] });
+    },
+
     async loadPeople() {
-      set({ people: await api.listPeople().catch(() => []) });
+      const { project } = get();
+      if (!project) {
+        set({ people: [] });
+        return;
+      }
+      set({ people: await api.listPeople(project.id).catch(() => []) });
     },
 
     async addPerson(name) {
+      const { project } = get();
+      if (!project) throw new Error("先打开一个项目");
       const color = PROJECT_COLORS[get().people.length % PROJECT_COLORS.length];
-      await api.createPerson(name, color);
+      await api.createPerson(project.id, name, color);
       await get().loadPeople();
     },
 
@@ -1164,6 +1230,8 @@ export const useAppStore = create<AppState>((set, get) => {
 
       set({
         people: data.people ?? [],
+        projectRole: data.role ?? "owner",
+        members: [],
         nextTaskId: Math.max(1, data.nextTaskId ?? 1),
         screen: { name: "workspace", projectId: id },
         project: data.project,
@@ -1182,6 +1250,7 @@ export const useAppStore = create<AppState>((set, get) => {
         revision: get().revision + 1,
       });
 
+      void get().loadMembers();
       void get().refreshRisks();
       void get().loadDailyNotes();
       void get().loadItemNotes();
@@ -1219,6 +1288,9 @@ export const useAppStore = create<AppState>((set, get) => {
         detachGuards: null,
         selectedId: null,
         detailId: null,
+        people: [],
+        projectRole: null,
+        members: [],
         openRisks: new Map(),
         projectRisks: [],
         dailyNotes: [],

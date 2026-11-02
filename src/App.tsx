@@ -2,13 +2,15 @@ import { useEffect } from "react";
 import { LayoutGroup } from "motion/react";
 import { ProjectList } from "./screens/ProjectList";
 import { Workspace } from "./screens/Workspace";
+import { LoginScreen } from "./screens/Accounts";
 import { plugins } from "./plugins/registry";
 import { useAppStore } from "./store/useAppStore";
 
 export default function App() {
-  const screen = useAppStore((s) => s.screen);
+  const screen = useAppStore((s) => s.session?.current ? s.screen : null);
+  const session = useAppStore((s) => s.session);
+  const loadSession = useAppStore((s) => s.loadSession);
   const loadSettings = useAppStore((s) => s.loadSettings);
-  const loadPeople = useAppStore((s) => s.loadPeople);
   const setSystemDark = useAppStore((s) => s.setSystemDark);
 
   /**
@@ -28,16 +30,21 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
+      // 先问 Rust 现在是谁：没登录就停在登录页，插件和设置都按账号存，没人就无从读起。
+      // 登录 / 切换账号后整页重载（store.changeSession），会重新走这里
+      const current = await loadSession()
+        .then((s) => s.current)
+        .catch(() => null);
+      if (cancelled || !current) return;
       await plugins.boot();
       if (cancelled) return;
-      // 视图偏好是全局的，进哪个项目都一样，所以在应用挂载时读一次就够
+      // 视图偏好按账号存，进哪个项目都一样，所以在应用挂载时读一次就够
       await loadSettings();
     })();
-    void loadPeople();
     return () => {
       cancelled = true;
     };
-  }, [loadSettings, loadPeople]);
+  }, [loadSession, loadSettings]);
 
   /**
    * 系统深浅变化的唯一监听源。
@@ -61,6 +68,10 @@ export default function App() {
   }, [setSystemDark]);
   // LayoutGroup 让项目卡片和工作区共享同一个 layoutId，
   // 点击时卡片直接放大变形成工作区，而不是淡入淡出（DESIGN.md §4.3）
+  // 第一帧还不知道是谁：什么都不画，免得闪一下登录页
+  if (!session) return null;
+  if (!screen) return <LoginScreen />;
+
   return (
     <LayoutGroup>
       {screen.name === "list" ? <ProjectList /> : <Workspace />}
