@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -425,6 +425,40 @@ describe("「记一条」弹窗", () => {
     fireEvent.keyDown(box, { key: "Enter" });
 
     expect(store.getState().tasks.size).toBe(before);
+  });
+
+  /** 风险是默认就有的分类：选了它，存下时直接建成挂在任务上的风险 */
+  it("分类选「风险」但没选任务：先拦住，一条都不写", async () => {
+    settings["memo.composer.kind.7"] = JSON.stringify("risk");
+    const store = await openWorkspace();
+    store.getState().setActiveView("items");
+
+    fireEvent.click(await screen.findByRole("button", { name: /记一条/ }));
+    const box = await screen.findByPlaceholderText(/^会上提到的那件事、/);
+    fireEvent.change(box, { target: { value: "电机可能延期" } });
+    // 等记忆里的分类读回来（弹窗打开时异步读设置）
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "记下来" }));
+    expect(await screen.findByText("风险要关联一条任务")).toBeTruthy();
+    expect(invoke.mock.calls.some(([c]) => c === "add_item_note")).toBe(false);
+  });
+
+  it("分类选「风险」并关联了任务：存下就建成那条任务上的风险", async () => {
+    settings["memo.composer.kind.7"] = JSON.stringify("risk");
+    settings["memo.composer.task.7"] = JSON.stringify(12);
+    const again = await openWorkspace();
+    again.getState().setActiveView("items");
+    fireEvent.click(await screen.findByRole("button", { name: /记一条/ }));
+    const box2 = await screen.findByPlaceholderText(/^会上提到的那件事、/);
+    fireEvent.change(box2, { target: { value: "电机可能延期" } });
+    // 等记忆里的任务和分类读回来
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "记下来" }));
+    await waitFor(() =>
+      expect(invoke.mock.calls.some(([c]) => c === "promote_note_to_risk")).toBe(true),
+    );
+    const args = invoke.mock.calls.find(([c]) => c === "promote_note_to_risk")![1];
+    expect(args).toMatchObject({ noteId: 99, taskId: 12, content: "电机可能延期", level: 1 });
   });
 });
 

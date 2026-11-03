@@ -1,14 +1,11 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ALT_LABEL, IS_MAC, shortcut } from "../core/keys";
+import { ALT_LABEL } from "../core/keys";
 import { dayToIso, today } from "../gantt/time";
 
 /**
- * 详情抽屉：阻碍、风险与评论。
- *
- * 这两类附注刻意**不进撤销栈** —— ⌘Z 该撤销的是排期误操作，
- * 而不是把刚敲的一条评论悄悄抹掉。这里验证它们走的是独立的持久化路径。
+ * 详情抽屉：基本信息、阻碍，以及关联这条任务的事项（风险也在其中）。
  */
 
 const invoke = vi.fn();
@@ -19,6 +16,24 @@ vi.mock("@tauri-apps/api/core", async () => {
 
 let risks: unknown[] = [];
 let comments: unknown[] = [];
+let itemNotes: unknown[] = [];
+
+const itemNote = (id: number, over: Record<string, unknown> = {}) => ({
+  id,
+  projectId: 7,
+  name: `事项${id}`,
+  kind: null,
+  priority: 2,
+  personId: null,
+  taskId: null,
+  promotedKind: null,
+  promotedRef: null,
+  closedAt: null,
+  resolution: null,
+  createdAt: 1_770_000_000 + id,
+  updatedAt: 1_770_000_000 + id,
+  ...over,
+});
 
 const taskRow = (id: number, over: Record<string, unknown> = {}) => ({
   id,
@@ -45,6 +60,7 @@ beforeEach(() => {
   invoke.mockReset();
   risks = [];
   comments = [];
+  itemNotes = [];
 
   window.matchMedia ??= ((q: string) => ({
     matches: false,
@@ -88,6 +104,8 @@ beforeEach(() => {
       // 角标和风险清单都从这一份数据算出来（store.refreshRisks）
       case "load_project_risks":
         return Promise.resolve(risks);
+      case "load_item_notes":
+        return Promise.resolve(itemNotes);
       case "add_risk": {
         const row = {
           id: risks.length + 1,
@@ -129,106 +147,60 @@ async function openWorkspace() {
 }
 
 describe("详情抽屉", () => {
-  it("双击任务行打开详情，Esc 关闭", async () => {
+  it("双击任务行打开详情，Esc 关闭；风险和评论不再单独成块，换成「事项」", async () => {
     const useAppStore = await openWorkspace();
     expect(useAppStore.getState().detailId).toBe(null);
 
     fireEvent.doubleClick(screen.getByText("任务1"));
     expect(useAppStore.getState().detailId).toBe(1);
-    expect(await screen.findByText("风险")).toBeTruthy();
-    expect(screen.getByText("评论")).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "事项" })).toBeTruthy();
+    expect(screen.queryByText("评论")).toBeNull();
+    expect(screen.queryByPlaceholderText(/记一条风险/)).toBeNull();
 
     act(() => useAppStore.getState().openDetail(null));
     expect(screen.queryByText("阻碍")).toBeNull();
   });
 
-  it("能添加风险点，并在左侧行上显示未解决角标", async () => {
+  it("列出关联这条任务的事项（含风险），别的任务的不列；网格行上出现事项角标", async () => {
+    itemNotes = [
+      itemNote(1, { name: "夹具尺寸不对", kind: "issue", taskId: 1 }),
+      itemNote(2, { name: "补验收清单", kind: "todo", taskId: 1, closedAt: 1_770_000_100, resolution: "已发出" }),
+      itemNote(3, { name: "别的任务的事", kind: "issue", taskId: 99 }),
+    ];
+    risks = [
+      { id: 5, taskId: 1, content: "电机可能延期", level: 0, resolved: false, createdAt: 1_770_000_000 },
+    ];
     const useAppStore = await openWorkspace();
     await act(async () => {
       useAppStore.getState().openDetail(1);
     });
-    await screen.findByText("阻碍");
+    await screen.findByRole("heading", { name: "事项" });
 
-    const input = screen.getByPlaceholderText(/记一条风险/);
-    fireEvent.change(input, { target: { value: "第三方接口还没确认" } });
-    await act(async () => {
-      fireEvent.keyDown(input, { key: "Enter" });
-    });
-
-    expect(await screen.findByText("第三方接口还没确认")).toBeTruthy();
-    // 角标要出现在左侧网格，否则风险记了也看不见
-    expect(await screen.findByText("⚠1")).toBeTruthy();
+    expect(await screen.findByText("夹具尺寸不对")).toBeTruthy();
+    expect(screen.getByText("电机可能延期")).toBeTruthy();
+    expect(screen.getByText("已解决：已发出")).toBeTruthy();
+    expect(screen.queryByText("别的任务的事")).toBeNull();
+    expect(screen.getByText("2 条未关闭 / 共 3 条")).toBeTruthy();
+    // 只数还开着、没分拣成实体的：已关的代办不算，风险有自己的 ⚠
+    expect(screen.getByText("☰1")).toBeTruthy();
+    expect(screen.getByText("⚠1")).toBeTruthy();
   });
 
-  /**
-   * 风险输入是 textarea 而不是单行 input：一条风险说清楚往往要一整句话，
-   * 单行框里只看得见光标附近那一小段。换行行为和评论区刻意相反 ——
-   * 风险多半就是一句话，连记三条时每条都按 ⌘↵ 是纯粹的摩擦。
-   */
-  it("风险输入可换行：⇧Enter 换行不提交，Enter 才提交", async () => {
+  it("「在事项中查看」按这条任务筛好再切过去", async () => {
+    itemNotes = [itemNote(1, { name: "夹具尺寸不对", kind: "issue", taskId: 1 })];
     const useAppStore = await openWorkspace();
     await act(async () => {
       useAppStore.getState().openDetail(1);
     });
-    await screen.findByText("阻碍");
-
-    const box = screen.getByPlaceholderText(/记一条风险/);
-    expect(box.tagName).toBe("TEXTAREA");
-
-    fireEvent.change(box, { target: { value: "接口协议还没定" } });
     await act(async () => {
-      fireEvent.keyDown(box, { key: "Enter", shiftKey: true });
-    });
-    expect(invoke.mock.calls.some(([cmd]) => cmd === "add_risk")).toBe(false);
-
-    fireEvent.change(box, { target: { value: "接口协议还没定\n下周一前不确认就阻塞" } });
-    await act(async () => {
-      fireEvent.keyDown(box, { key: "Enter" });
+      fireEvent.click(await screen.findByText("在事项中查看 →"));
     });
 
-    const added = invoke.mock.calls.find(([cmd]) => cmd === "add_risk");
-    expect(added?.[1]).toMatchObject({ content: "接口协议还没定\n下周一前不确认就阻塞" });
-  });
-
-  it("能添加评论（⌘Enter 提交，单独 Enter 用于换行）", async () => {
-    const useAppStore = await openWorkspace();
-    await act(async () => {
-      useAppStore.getState().openDetail(1);
-    });
-    await screen.findByText("评论");
-
-    const box = screen.getByPlaceholderText(`写点什么…（${shortcut("mod", "Enter")} 提交）`);
-    fireEvent.change(box, { target: { value: "和后端约了周三联调" } });
-
-    // 单独 Enter 只换行，不提交 —— 直接看有没有发出写库命令，
-    // 比查 DOM 更准（textarea 的值本身就含这段文字）
-    await act(async () => {
-      fireEvent.keyDown(box, { key: "Enter" });
-    });
-    expect(invoke.mock.calls.some(([cmd]) => cmd === "add_comment")).toBe(false);
-
-    await act(async () => {
-      fireEvent.keyDown(box, { key: "Enter", metaKey: IS_MAC, ctrlKey: !IS_MAC });
-    });
-    expect(await screen.findByText("和后端约了周三联调")).toBeTruthy();
-  });
-
-  it("风险与评论不进撤销栈 —— ⌘Z 不会把它们撤掉", async () => {
-    const useAppStore = await openWorkspace();
-    await act(async () => {
-      useAppStore.getState().openDetail(1);
-    });
-    await screen.findByText("阻碍");
-
-    const input = screen.getByPlaceholderText(/记一条风险/);
-    fireEvent.change(input, { target: { value: "依赖未定" } });
-    await act(async () => {
-      fireEvent.keyDown(input, { key: "Enter" });
-    });
-    await screen.findByText("依赖未定");
-
-    // 加风险不该在撤销栈里留下任何东西
-    expect(useAppStore.getState().stack!.canUndo).toBe(false);
+    const saved = invoke.mock.calls.find(
+      ([cmd, a]) => cmd === "set_setting" && String((a as { key: string }).key) === "memo.items.filter.7",
+    );
+    expect(JSON.parse(String((saved?.[1] as { value: string }).value)).tasks).toEqual([1]);
+    expect(useAppStore.getState().activeView).toBe("items");
   });
 
   it("详情里改进度会走命令栈，可以撤销", async () => {

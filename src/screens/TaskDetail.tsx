@@ -1,12 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useAuthorLabel } from "./Accounts";
+import { useEffect, useMemo, useState } from "react";
 import { motion } from "motion/react";
 import { resolve, type Task } from "../gantt/model";
 import { PRIORITY_COLORS, PRIORITY_LABELS } from "../gantt/theme";
 import { withAlpha } from "../gantt/coloring";
 import { dayToIso } from "../gantt/time";
 import { setEnd, setStart } from "../core/dateLink";
-import { api, type Comment, type Risk } from "../db/api";
+import { api } from "../db/api";
 import {
   BLOCK_REASONS,
   blockedDays,
@@ -15,8 +14,9 @@ import {
   type BlockedPeriod,
 } from "../core/blocked";
 import { isInProgress } from "../core/board";
-import { canAddRisk, RISK_COLORS, RISK_LEVELS, sortRisks } from "../core/risks";
-import { RiskRow } from "./RiskRow";
+import { RISK_LEVELS } from "../core/risks";
+import { EMPTY_FILTER, kindColor, kindLabel, mergeItems, sortItems } from "../core/items";
+import { memoKey } from "../core/memo";
 import { BlockedDetail } from "./BlockedDetail";
 import { today } from "../gantt/time";
 import { useAppStore } from "../store/useAppStore";
@@ -24,7 +24,6 @@ import { Avatar } from "./Avatar";
 import { MenuItem, Popover } from "./Popover";
 import { DatePicker } from "./DatePicker";
 import { ALT_LABEL, shortcut } from "../core/keys";
-import { GrowingTextarea } from "./GrowingTextarea";
 
 /**
  * 任务详情抽屉。
@@ -32,9 +31,8 @@ import { GrowingTextarea } from "./GrowingTextarea";
  * 做成右侧抽屉而不是居中弹窗：甘特图是这个应用的主体，看一条任务的细节时
  * 通常还想同时看到它在时间轴上的位置。居中弹窗会把整张图盖掉。
  *
- * 风险点和评论**不走命令栈**。它们不是排期数据 —— ⌘Z 应该撤销的是
- * 「我刚才把这条任务拖错了」，而不是把你刚敲的一条评论悄悄抹掉。
- * 所以它们即写即存，删除用二次确认而不是靠撤销兜底。
+ * 风险和评论不再单独放在这里：它们都并进了事项（风险本来就是事项的一个类型），
+ * 抽屉底部列出关联这条任务的事项，增删改去事项视图做。
  */
 
 export function TaskDetail() {
@@ -47,7 +45,6 @@ export function TaskDetail() {
   const patchTask = useAppStore((s) => s.patchTask);
   const assignPerson = useAppStore((s) => s.assignPerson);
   const setPriority = useAppStore((s) => s.setPriority);
-  const projectRisks = useAppStore((s) => s.projectRisks);
   const updateBlocked = useAppStore((s) => s.updateBlocked);
   const removeBlocked = useAppStore((s) => s.removeBlocked);
   const addBlocker = useAppStore((s) => s.addBlocker);
@@ -59,31 +56,8 @@ export function TaskDetail() {
     [taskMap, revision, detailId],
   );
 
-  const [comments, setComments] = useState<Comment[]>([]);
   /** 双击某一行打开的阻碍详情。存 id 而不是对象 —— 对象会在编辑后变旧 */
   const [blockedDetailId, setBlockedDetailId] = useState<string | null>(null);
-
-  /**
-   * 风险从 store 里取，不再由这个面板自己查一份。
-   *
-   * 两份拷贝意味着两个真相：在全局风险清单里关掉一条，抽屉这边还显示未关闭，
-   * 用户会以为哪一边坏了。评论只有这里一个入口，仍旧本地加载。
-   */
-  const risks = useMemo(
-    () => sortRisks(projectRisks.filter((r) => r.taskId === detailId)),
-    [projectRisks, detailId],
-  );
-
-  const reload = useCallback(async () => {
-    if (detailId == null) return;
-    const notes = await api.loadTaskNotes(detailId).catch(() => null);
-    if (notes) setComments(notes.comments);
-  }, [detailId]);
-
-  useEffect(() => {
-    setComments([]);
-    void reload();
-  }, [reload]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -106,10 +80,6 @@ export function TaskDetail() {
   const natural = calendar.countCalendarDays(task.startDay, task.endDay);
   const working = calendar.countWorkdays(task.startDay, task.endDay);
   const span = { startDay: task.startDay, endDay: task.endDay };
-
-  const afterNotesChange = () => {
-    void reload();
-  };
 
   // 每次渲染都从任务里重新取那条阻碍：详情面板保存后要立刻反映新值，
   // 而且这条被删掉时面板会自己消失，不必单独收拾
@@ -246,19 +216,7 @@ export function TaskDetail() {
 
         <Divider />
 
-        <RiskSection
-          taskId={task.id}
-          risks={risks}
-          canAdd={canAddRisk(task, today())}
-        />
-
-        <Divider />
-
-        <CommentSection
-          taskId={task.id}
-          comments={comments}
-          onChanged={afterNotesChange}
-        />
+        <ItemsSection taskId={task.id} />
       </div>
 
       {blockedDetail && (
@@ -552,185 +510,125 @@ function BlockedRow({
 }
 
 /* ------------------------------------------------------------------ */
-/* 风险点                                                              */
+/* 关联事项                                                            */
 /* ------------------------------------------------------------------ */
 
-function RiskSection({
-  taskId,
-  risks,
-  canAdd,
-}: {
-  taskId: number;
-  /** 已经按「未关闭 → 等级高 → 记得早」排好（core/risks.sortRisks） */
-  risks: Risk[];
-  canAdd: boolean;
-}) {
-  const addRisk = useAppStore((s) => s.addRisk);
-  const [draft, setDraft] = useState("");
-  const [level, setLevel] = useState(1);
+/**
+ * 挂在这条任务上的事项：问题、风险、代办、自建类型……和事项视图同一个合并层，
+ * 所以在哪边关掉、改名，两边说法都一致。阻碍不列 —— 上面「受阻时段」就是它。
+ *
+ * 这里只看不改：增删改都去事项视图做（「记一条」会预选这条任务，「在事项中查看」
+ * 会按这条任务筛好）。抽屉里再长一套编辑，就又是两个入口两套规则。
+ * 风险和评论原先各有一块，现在都并进事项：风险本来就是事项的一个类型。
+ */
+function ItemsSection({ taskId }: { taskId: number }) {
+  const project = useAppStore((s) => s.project);
+  const notes = useAppStore((s) => s.itemNotes);
+  const kinds = useAppStore((s) => s.itemKinds);
+  const projectRisks = useAppStore((s) => s.projectRisks);
+  const people = useAppStore((s) => s.people);
+  const setActiveView = useAppStore((s) => s.setActiveView);
+  const setQuickNoteOpen = useAppStore((s) => s.setQuickNoteOpen);
 
-  const open = risks.filter((r) => !r.resolved);
+  const rows = useMemo(
+    () =>
+      sortItems(
+        // 阻碍要从任务上读，这里不需要，tasks 传空
+        mergeItems({
+          notes: Array.isArray(notes) ? notes : [],
+          tasks: [],
+          risks: Array.isArray(projectRisks) ? projectRisks : [],
+          today: today(),
+        }),
+      ).filter((r) => r.taskId === taskId && r.source !== "blocker"),
+    [notes, projectRisks, taskId],
+  );
+  const open = rows.filter((r) => !r.closed);
 
-  const add = async () => {
-    if (!draft.trim()) return;
-    await addRisk(taskId, draft, level);
-    setDraft("");
+  /** 先把设置写进库再切视图：两边都是读库，不 await 的话会读到旧值 */
+  const showInItems = async () => {
+    if (!project) return;
+    await api
+      .setSetting(memoKey.itemsFilter(project.id), JSON.stringify({ ...EMPTY_FILTER, tasks: [taskId] }))
+      .catch(() => {});
+    setActiveView("items");
+  };
+  const addItem = async () => {
+    if (project) {
+      await api.setSetting(memoKey.composerTask(project.id), JSON.stringify(taskId)).catch(() => {});
+    }
+    setQuickNoteOpen(true);
   };
 
   return (
     <section className="px-4 py-3.5">
       <SectionTitle
-        title="风险"
-        count={open.length > 0 ? `${open.length} 条未关闭` : undefined}
-        danger={open.length > 0}
+        title="事项"
+        count={rows.length ? `${open.length} 条未关闭 / 共 ${rows.length} 条` : undefined}
+        action={
+          <button
+            onClick={() => void addItem()}
+            title="记一条事项，已预选这条任务"
+            className="rounded px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent)] hover:bg-[var(--row-hover)]"
+          >
+            ＋ 记一条
+          </button>
+        }
       />
 
-      {/* 只有进行中的活能记风险。禁用输入框而不是藏起来 ——
-          藏起来的话，用户会以为这个功能没做；写清楚原因才能让他知道下一步做什么 */}
-      {canAdd ? (
-        <div className="mb-2 flex items-start gap-1.5">
-          <div className="flex shrink-0 overflow-hidden rounded-md border border-[var(--rule)]">
-            {RISK_LEVELS.map((label, i) => (
-              <button
-                key={label}
-                onClick={() => setLevel(i)}
-                title={`${label}风险`}
-                className="px-1.5 py-1 text-[10px] font-medium transition-colors"
-                style={
-                  level === i
-                    ? { background: RISK_COLORS[i], color: "#fff" }
-                    : { color: "var(--text-dim)" }
-                }
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          {/*
-            用 textarea 而不是 input：一条风险说清楚往往要一整句话，单行输入框
-            里只看得见光标附近那一小段，写到一半就无法回头检查自己写了什么。
-            高度跟着内容长，所以短风险不会白占地方。
-          */}
-          <GrowingTextarea
-            value={draft}
-            onChange={setDraft}
-            onSubmit={() => void add()}
-            placeholder={`记一条风险…（${shortcut("shift", "↵")} 换行）`}
-            className="min-w-0 flex-1 rounded-md border border-[var(--rule)] bg-[var(--surface-alt)] px-2 py-1 text-[11px] leading-relaxed focus:border-[var(--accent)]"
-          />
-        </div>
-      ) : (
-        <EmptyHint>
-          风险只能记在进行中的任务上。这条活还没开工或已经完成 ——
-          前者该改的是计划，后者该记的是复盘。
-        </EmptyHint>
-      )}
-
-      {risks.length === 0 && canAdd && (
-        <EmptyHint>还没有记录风险。想到什么先写下来，别指望记得住。</EmptyHint>
+      {rows.length === 0 && (
+        <EmptyHint>还没有关联这条任务的事项。问题、风险、代办都在事项里记，关联上这条任务就会出现在这里。</EmptyHint>
       )}
 
       <div className="flex flex-col gap-1">
-        {risks.map((risk) => (
-          <RiskRow key={risk.id} risk={risk} />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/* 评论                                                                */
-/* ------------------------------------------------------------------ */
-
-function CommentSection({
-  taskId,
-  comments,
-  onChanged,
-}: {
-  taskId: number;
-  comments: Comment[];
-  onChanged: () => void;
-}) {
-  const [draft, setDraft] = useState("");
-  const ref = useRef<HTMLTextAreaElement>(null);
-
-  const add = async () => {
-    if (!draft.trim()) return;
-    await api.addComment(taskId, draft.trim()).catch(() => {});
-    setDraft("");
-    onChanged();
-  };
-
-  return (
-    <section className="px-4 py-3.5">
-      <SectionTitle title="评论" count={comments.length ? `${comments.length} 条` : undefined} />
-
-      <div className="mb-2">
-        <textarea
-          ref={ref}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            e.stopPropagation();
-            // ⌘Enter 提交；单独的 Enter 留给换行，因为评论经常是多行的
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void add();
-          }}
-          rows={2}
-          placeholder={`写点什么…（${shortcut("mod", "Enter")} 提交）`}
-          className="w-full resize-none rounded-md border border-[var(--rule)] bg-[var(--surface-alt)] px-2 py-1.5 text-[11px] leading-relaxed outline-none focus:border-[var(--accent)]"
-        />
-        {draft.trim() && (
-          <button
-            onClick={() => void add()}
-            className="mt-1 rounded-md bg-[var(--accent)] px-2.5 py-1 text-[10px] font-medium text-white"
-          >
-            提交
-          </button>
-        )}
+        {rows.map((r) => {
+          const color = kindColor(r.kind, kinds);
+          const person = people.find((p) => p.id === r.personId);
+          return (
+            <div
+              key={r.key}
+              className={`rounded-md bg-[var(--surface-alt)] px-2.5 py-1.5 ${r.closed ? "opacity-60" : ""}`}
+            >
+              <div className="flex items-start gap-1.5">
+                <span
+                  className="mt-[1px] shrink-0 rounded px-1 text-[9px] font-medium leading-[15px]"
+                  style={{ color, background: withAlpha(color, 0.14) }}
+                >
+                  {kindLabel(r.kind, kinds)}
+                  {r.risk && ` · ${RISK_LEVELS[r.risk.level] ?? "中"}`}
+                </span>
+                <span
+                  className={`min-w-0 flex-1 whitespace-pre-wrap break-words text-[11px] leading-relaxed text-[var(--text)] ${
+                    r.closed ? "line-through" : ""
+                  }`}
+                >
+                  {r.title || "（没写内容）"}
+                </span>
+                {person && (
+                  <span className="shrink-0 text-[9px] leading-[17px] text-[var(--text-dim)]">
+                    {person.name}
+                  </span>
+                )}
+              </div>
+              {r.closed && r.resolution && (
+                <div className="mt-0.5 pl-1 text-[10px] leading-snug text-[var(--text-dim)]">
+                  已解决：{r.resolution}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
 
-      {comments.length === 0 && <EmptyHint>还没有评论。</EmptyHint>}
-
-      <div className="flex flex-col gap-1.5">
-        {comments.map((c) => (
-          <CommentRow key={c.id} comment={c} onChanged={onChanged} />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function CommentRow({ comment, onChanged }: { comment: Comment; onChanged: () => void }) {
-  const [confirming, setConfirming] = useState(false);
-  const author = useAuthorLabel(comment.authorId);
-
-  return (
-    <div className="group rounded-md bg-[var(--surface-alt)] px-2.5 py-2">
-      <div className="whitespace-pre-wrap break-words text-[11px] leading-relaxed text-[var(--text)]">
-        {comment.content}
-      </div>
-      <div className="mt-1 flex items-center gap-2">
-        <span className="text-[9px] text-[var(--text-dim)]">
-          {author && <span className="font-medium text-[var(--text)]">{author} · </span>}
-          {formatTime(comment.createdAt)}
-        </span>
+      {rows.length > 0 && (
         <button
-          onClick={() => {
-            if (!confirming) return setConfirming(true);
-            void api.deleteComment(comment.id).then(onChanged, (err) => alert(String(err)));
-          }}
-          onBlur={() => setConfirming(false)}
-          className={`ml-auto rounded px-1 text-[9px] transition-opacity ${
-            confirming
-              ? "bg-[var(--danger)] text-white opacity-100"
-              : "text-[var(--text-dim)] opacity-0 hover:text-[var(--danger)] group-hover:opacity-100"
-          }`}
+          onClick={() => void showInItems()}
+          className="mt-2 text-[10px] text-[var(--text-dim)] hover:text-[var(--accent)]"
         >
-          {confirming ? "确认" : "删除"}
+          在事项中查看 →
         </button>
-      </div>
-    </div>
+      )}
+    </section>
   );
 }
 
@@ -1004,13 +902,3 @@ function InlineText({
   );
 }
 
-/** Unix 秒 → 本地时间。库里存的是时间戳，本地化只发生在显示这一层。 */
-function formatTime(unixSeconds: number): string {
-  const d = new Date(unixSeconds * 1000);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const sameYear = d.getFullYear() === new Date().getFullYear();
-  const date = sameYear
-    ? `${d.getMonth() + 1}/${d.getDate()}`
-    : `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
-  return `${date} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}

@@ -129,6 +129,17 @@ export function TaskGrid({ width, height, scrollY, onScroll }: Props) {
   const openDetail = useAppStore((s) => s.openDetail);
   const detailId = useAppStore((s) => s.detailId);
   const openRisks = useAppStore((s) => s.openRisks);
+  const itemNotes = useAppStore((s) => s.itemNotes);
+  /** 每条任务上还开着的事项（不含已分拣成阻碍/风险的，那两样各有自己的标识） */
+  const openItems = useMemo(() => {
+    const m = new Map<number, number>();
+    // 旧库 / 测试替身里可能读回来不是数组，别让整张网格白掉
+    for (const n of Array.isArray(itemNotes) ? itemNotes : []) {
+      if (n.taskId == null || n.closedAt != null || n.promotedKind != null) continue;
+      m.set(n.taskId, (m.get(n.taskId) ?? 0) + 1);
+    }
+    return m;
+  }, [itemNotes]);
   const pendingEditId = useAppStore((s) => s.pendingEditId);
   const consumePendingEdit = useAppStore((s) => s.consumePendingEdit);
   const moveTask = useAppStore((s) => s.moveTask);
@@ -242,6 +253,7 @@ export function TaskGrid({ width, height, scrollY, onScroll }: Props) {
               selected={task.id === selectedId}
               active={task.id === detailId}
               risk={openRisks.get(task.id) ?? null}
+              openItems={openItems.get(task.id) ?? 0}
               blockedNow={isBlockedOn(task, day)}
               onOpenDetail={() => openDetail(task.id)}
               onRename={() => setEditing({ id: task.id, field: "name" })}
@@ -433,6 +445,7 @@ function Row({
   selected,
   active,
   risk,
+  openItems,
   blockedNow,
   striped,
   editing,
@@ -468,6 +481,8 @@ function Row({
   active: boolean;
   /** 未关闭的风险：几条、最高一档。没有就是 null */
   risk: RiskFlag | null;
+  /** 关联这条任务、还没关的事项条数（问题、代办、自建类型……） */
+  openItems: number;
   /** 此刻是否受阻；与风险是两件事，标识也分开 */
   blockedNow: boolean;
   striped: boolean;
@@ -596,6 +611,15 @@ function Row({
                 }}
               >
                 ⚠{risk.count}
+              </span>
+            )}
+            {openItems > 0 && (
+              <span
+                title={`${openItems} 条未关闭的事项关联这条任务 —— 双击打开详情查看`}
+                className="shrink-0 rounded px-1 text-[9px] font-semibold leading-none text-[var(--accent)]"
+                style={{ background: "color-mix(in srgb, var(--accent) 14%, transparent)" }}
+              >
+                ☰{openItems}
               </span>
             )}
 
@@ -943,7 +967,7 @@ function RowMenu({
             onOpenDetail();
           }}
         >
-          详情、风险与评论
+          详情与事项
         </MenuItem>
         <MenuItem
           onClick={() => {

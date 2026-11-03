@@ -7,7 +7,7 @@ import { today } from "../gantt/time";
 import { PRIORITY_COLORS, PRIORITY_LABELS } from "../gantt/theme";
 import { shortcut } from "../core/keys";
 import { FilterSelect, type SelectOption } from "./FilterSelect";
-import { kindColor } from "../core/items";
+import { kindColor, RISK_KIND } from "../core/items";
 import { loadMemo, memoKey, saveMemo } from "../core/memo";
 import { itemSnapshot } from "../plugins/registry";
 import { useRegistry } from "../plugins/usePlugins";
@@ -66,6 +66,7 @@ export function NoteComposer({
   const setActiveView = useAppStore((s) => s.setActiveView);
   const setPendingSortNote = useAppStore((s) => s.setPendingSortNote);
   const patchItemNote = useAppStore((s) => s.patchItemNote);
+  const promoteToRisk = useAppStore((s) => s.promoteToRisk);
   const project = useAppStore((s) => s.project);
   const itemKinds = useAppStore((s) => s.itemKinds);
   const { composerOptions } = useRegistry();
@@ -131,12 +132,13 @@ export function NoteComposer({
   );
 
   /**
-   * 分类下拉：只有普通类型（代办、问题、自定义）。阻碍和风险要挂到具体任务上、
-   * 会建一条真实的实体，那一步在事项页的分拣菜单里做
+   * 分类下拉：普通类型（代办、问题、自定义）加上风险。风险默认就有 —— 选了它
+   * 必须关联任务，存下时直接建成风险（中）。阻碍要定起止和归因，仍在事项页分拣
    */
   const kindOptions = useMemo<SelectOption<string | null>[]>(
     () => [
       { value: null, label: "未分拣", hint: "记完再分" },
+      { value: RISK_KIND.key, label: RISK_KIND.label, color: RISK_KIND.color, hint: "要关联任务" },
       ...itemKinds.map((k) => ({ value: k.key as string | null, label: k.label, color: kindColor(k.key, itemKinds) })),
     ],
     [itemKinds],
@@ -181,7 +183,7 @@ export function NoteComposer({
           setTaskId(t);
           setPersonId(st.tasks.get(t)?.personId ?? null);
         }
-        if (k != null && st.itemKinds.some((x) => x.key === k)) setKind(k);
+        if (k != null && (k === RISK_KIND.key || st.itemKinds.some((x) => x.key === k))) setKind(k);
       });
     }
     void Promise.all(
@@ -207,9 +209,17 @@ export function NoteComposer({
   const submit = async (thenSort: boolean) => {
     const text = name.trim();
     if (!text) return;
+    const isRisk = kind === RISK_KIND.key;
+    // 风险是挂在任务上的实体，没有任务建不出来；拦在写库之前，不留下半条
+    if (isRisk && taskId == null) {
+      setOptionError("风险要关联一条任务");
+      return;
+    }
+    setOptionError(null);
     const row = await addItemNote(text, priority, personId, taskId);
     if (!row) return;
-    if (kind != null) await patchItemNote(row.id, { kind });
+    if (isRisk) await promoteToRisk(row.id, taskId!, 1);
+    else if (kind != null) await patchItemNote(row.id, { kind });
 
     // 插件开关：存下之后逐个通知。失败只提示，事项已经存下了
     const on = composerOptions.filter((o) => optionOn[o.option.id]);
@@ -394,7 +404,7 @@ export function NoteComposer({
                 onPick={pickKind}
                 onOpenChange={onDropdown}
                 placeholder="未分拣"
-                title="现在就分好；不选就是未分拣，记完再到事项页分。阻碍、风险要挂到任务上，在事项页分拣"
+                title="现在就分好；不选就是未分拣，记完再到事项页分。阻碍在事项页分拣；风险要先选好关联任务"
                 width={124}
               />
             </Field>
@@ -432,7 +442,7 @@ export function NoteComposer({
             </Field>
           </div>
 
-          {composerOptions.length > 0 && (
+          {(composerOptions.length > 0 || optionError) && (
             <div className="mx-7 mt-3 flex flex-wrap items-center gap-2">
               {composerOptions.map(({ option }) => (
                 <OptionSwitch
@@ -516,7 +526,7 @@ export function NoteComposer({
               onPick={pickKind}
               onOpenChange={onDropdown}
               placeholder="未分拣"
-              title="现在就分好；不选就是未分拣，记完再分。阻碍、风险在事项页分拣"
+              title="现在就分好；不选就是未分拣，记完再分。阻碍在事项页分拣；风险要先选好关联任务"
               width={92}
             />
             <FilterSelect
@@ -546,7 +556,7 @@ export function NoteComposer({
               width={84}
             />
           </div>
-          {composerOptions.length > 0 && (
+          {(composerOptions.length > 0 || optionError) && (
             <div className="-mt-1 flex flex-wrap items-center gap-2 pb-3">
               {composerOptions.map(({ option }) => (
                 <OptionSwitch
