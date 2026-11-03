@@ -5,6 +5,7 @@ import { Workspace } from "./screens/Workspace";
 import { LoginScreen } from "./screens/Accounts";
 import { plugins } from "./plugins/registry";
 import { useAppStore } from "./store/useAppStore";
+import { startCloudSync } from "./cloud/sync";
 
 export default function App() {
   const screen = useAppStore((s) => s.session?.current ? s.screen : null);
@@ -29,6 +30,7 @@ export default function App() {
    */
   useEffect(() => {
     let cancelled = false;
+    let stopCloud: (() => void) | null = null;
     void (async () => {
       // 先问 Rust 现在是谁：没登录就停在登录页，插件和设置都按账号存，没人就无从读起。
       // 登录 / 切换账号后整页重载（store.changeSession），会重新走这里
@@ -40,9 +42,13 @@ export default function App() {
       if (cancelled) return;
       // 视图偏好按账号存，进哪个项目都一样，所以在应用挂载时读一次就够
       await loadSettings();
+      if (cancelled) return;
+      // 云备份配置也按账号存，登录之后才起定时器
+      stopCloud = startCloudSync();
     })();
     return () => {
       cancelled = true;
+      stopCloud?.();
     };
   }, [loadSession, loadSettings]);
 

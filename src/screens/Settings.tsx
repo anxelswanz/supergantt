@@ -27,8 +27,9 @@ import { CalendarPane } from "./CalendarSettings";
 import { ExportButton } from "./ExportButton";
 import { Icon } from "../brand/Icon";
 import { AccountPane } from "./AccountSettings";
+import { CloudPane } from "./CloudSettings";
 
-type Tab = "account" | "appearance" | "views" | "kinds" | "people" | "calendar" | "plugins" | "data";
+type Tab = "account" | "appearance" | "views" | "kinds" | "people" | "calendar" | "plugins" | "cloud" | "data";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "account", label: "账号" },
@@ -38,6 +39,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "people", label: "负责人" },
   { id: "calendar", label: "工作日历" },
   { id: "plugins", label: "插件" },
+  { id: "cloud", label: "云备份" },
   { id: "data", label: "数据" },
 ];
 
@@ -112,6 +114,7 @@ export function Settings({
           {tab === "people" && <PeoplePane />}
           {tab === "calendar" && <CalendarPane />}
           {tab === "plugins" && <PluginsPane />}
+          {tab === "cloud" && <CloudPane />}
           {tab === "data" && <DataPane />}
         </div>
       </motion.div>
@@ -1477,7 +1480,10 @@ function DataPane() {
   }, []);
 
   return (
-    <Section title="数据文件" desc="全部数据都在这一个 SQLite 文件里，不联网、不上云。">
+    <Section
+      title="数据文件"
+      desc="全部数据都在这一个 SQLite 文件里。默认不联网；要多台电脑共用同一份数据，在「云备份」里接上自己的 Supabase。"
+    >
       <div className="mb-3 break-all rounded-lg border border-[var(--rule)] bg-[var(--surface-alt)] p-2.5 font-mono text-[10px] text-[var(--text-dim)]">
         {dir || "读取中…"}
       </div>

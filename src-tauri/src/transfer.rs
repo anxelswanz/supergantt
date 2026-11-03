@@ -717,7 +717,18 @@ pub fn write_archive(
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("创建目录失败：{e}"))?;
     }
+    let bytes = archive_bytes(app_version, exported_at, bundle, people, avatars)?;
+    std::fs::write(path, bytes).map_err(|e| format!("写入失败：{e}"))
+}
 
+/// 整个 .ganttproj 的字节，不落盘。云同步直接上传它，和导出文件是同一份格式
+pub(crate) fn archive_bytes(
+    app_version: &str,
+    exported_at: &str,
+    bundle: &Bundle,
+    people: &[FilePerson],
+    avatars: &HashMap<String, Vec<u8>>,
+) -> Result<Vec<u8>> {
     let manifest = Manifest {
         format_version: format!("{FORMAT_MAJOR}.{FORMAT_MINOR}"),
         app: "gantt".into(),
@@ -753,16 +764,25 @@ pub fn write_archive(
         zw.finish().map_err(|e| format!("收尾失败：{e}"))?;
     }
 
-    std::fs::write(path, buf.into_inner()).map_err(|e| format!("写入失败：{e}"))
+    Ok(buf.into_inner())
 }
 
 pub fn read_archive(path: &Path) -> Result<Archive> {
     let file = std::fs::File::open(path)
         .map_err(|e| format!("打不开这个文件：{e}"))?;
-    let mut zip = zip::ZipArchive::new(file)
+    read_archive_from(file)
+}
+
+/// 从内存里的 .ganttproj 读（云端下载下来的那份）
+pub(crate) fn read_archive_bytes(bytes: &[u8]) -> Result<Archive> {
+    read_archive_from(std::io::Cursor::new(bytes))
+}
+
+fn read_archive_from<R: Read + std::io::Seek>(src: R) -> Result<Archive> {
+    let mut zip = zip::ZipArchive::new(src)
         .map_err(|_| "这不是一个有效的项目文件（内容不是 zip 容器）".to_string())?;
 
-    let read_entry = |zip: &mut zip::ZipArchive<std::fs::File>, name: &str| -> Result<Vec<u8>> {
+    let read_entry = |zip: &mut zip::ZipArchive<R>, name: &str| -> Result<Vec<u8>> {
         let mut f = zip
             .by_name(name)
             .map_err(|_| format!("这不是一个有效的项目文件（缺少 {name}）"))?;
@@ -1084,7 +1104,7 @@ pub(crate) fn file_summary(a: &Archive) -> SideSummary {
 }
 
 /// 版本闸门。major 不同直接拒绝，minor 更高只提示。
-fn version_gate(a: &Archive) -> (Vec<String>, Vec<String>) {
+pub(crate) fn version_gate(a: &Archive) -> (Vec<String>, Vec<String>) {
     let mut problems = Vec::new();
     let mut warnings = Vec::new();
     match parse_version(&a.manifest.format_version) {
@@ -1243,7 +1263,7 @@ pub struct ImportOutcome {
     pub new_people: Vec<String>,
 }
 
-fn now_secs() -> i64 {
+pub(crate) fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -1798,7 +1818,7 @@ pub fn safe_stem(name: &str) -> String {
 }
 
 /// `backups/` 目录，没有就建。和滚动备份共用。
-trait BackupDir {
+pub(crate) trait BackupDir {
     fn path_resolver_backups(&self) -> Option<PathBuf>;
 }
 

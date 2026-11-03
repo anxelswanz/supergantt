@@ -2,6 +2,7 @@ use tauri::Manager;
 
 mod ai;
 mod backup;
+mod cloud;
 mod db;
 mod dbfile;
 mod export;
@@ -131,6 +132,10 @@ pub fn run() {
             db::update_milestone,
             db::reorder_milestones,
             db::delete_milestone,
+            cloud::cloud_sql,
+            cloud::cloud_save_sql,
+            cloud::cloud_check,
+            cloud::cloud_sync,
             ai::ai_available,
             ai::ai_ask,
             plugin::list_plugins,

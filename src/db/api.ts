@@ -16,6 +16,31 @@ export interface Project {
   updatedAt: string;
 }
 
+/** 云备份配置，存在账号设置 cloud.config 里 */
+export interface CloudConfig {
+  enabled: boolean;
+  /** Supabase 的 Project URL */
+  url: string;
+  /** anon key 或 publishable key */
+  anonKey: string;
+  /** 执行 SQL 后显示的同步密钥 */
+  syncKey: string;
+  /** 自动同步间隔（分钟） */
+  intervalMin: number;
+}
+
+export interface CloudSyncReport {
+  pushed: string[];
+  pulled: { id: number; name: string; created: boolean }[];
+  deletedLocal: number[];
+  deletedRemote: string[];
+  backups: string[];
+  notes: string[];
+  errors: string[];
+  /** Unix 秒 */
+  at: number;
+}
+
 export interface ProjectSummary {
   project: Project;
   taskCount: number;
@@ -607,6 +632,14 @@ export const api = {
   revealDataDir: () => invoke<void>("reveal_data_dir"),
 
   backupNow: () => invoke<string>("backup_now"),
+
+  /* ---- 云备份（Supabase），见 src-tauri/src/cloud.rs ---- */
+  cloudSql: () => invoke<string>("cloud_sql"),
+  cloudSaveSql: (path: string) => invoke<string>("cloud_save_sql", { path }),
+  cloudCheck: (config: CloudConfig) => invoke<string>("cloud_check", { config }),
+  /** 跑一轮；openProjectId = 正开着的项目，调用前要先把它落库 */
+  cloudSync: (openProjectId: number | null, stamp: string) =>
+    invoke<CloudSyncReport>("cloud_sync", { openProjectId, stamp }),
 
   /** 内容用 base64 传：JSON 数字数组要 4 倍体积，raw IPC body 又带不了 path。 */
   writeExport: (path: string, base64: string) =>
