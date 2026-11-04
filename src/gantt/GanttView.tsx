@@ -37,9 +37,11 @@ interface Props {
   scrollY: number;
   onScroll: (y: number) => void;
   onViewportReady?: (vp: Viewport, invalidate: () => void) => void;
+  /** 滚轮缩放后的目标 pxPerDay。工具条据此更新档位高亮、记住缩放 */
+  onZoom?: (pxPerDay: number) => void;
 }
 
-export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
+export function GanttView({ scrollY, onScroll, onViewportReady, onZoom }: Props) {
   const revision = useAppStore((s) => s.revision);
   const taskMap = useAppStore((s) => s.tasks);
   const calendar = useAppStore((s) => s.calendar);
@@ -81,6 +83,9 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
   const contentRef = useRef<HTMLCanvasElement>(null);
   const interactRef = useRef<HTMLCanvasElement>(null);
   const vpRef = useRef(new Viewport());
+  // 滚轮监听只在少数依赖变化时重绑，回调走 ref，免得父组件每次渲染都拆装一遍
+  const onZoomRef = useRef(onZoom);
+  onZoomRef.current = onZoom;
 
   // 拆成两个 selector：zustand v5 无默认浅比较，返回新数组会在 React 19 下持续重渲染
   const themeMode = useAppStore((s) => s.themeMode);
@@ -294,6 +299,7 @@ export function GanttView({ scrollY, onScroll, onViewportReady }: Props) {
       if (e.metaKey || e.ctrlKey) {
         vp.zoomAt(x, Math.exp(-e.deltaY * 0.0022));
         markAll();
+        onZoomRef.current?.(vp.zoom.target);
       } else if (e.shiftKey) {
         vp.panBy(-e.deltaY);
         markAll();

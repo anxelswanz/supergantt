@@ -438,6 +438,10 @@ function makeApi(manifest: PluginManifest, dir: string, disposables: Disposable[
           return store().people.map((p) => ({ id: p.id, name: p.name }));
         },
       },
+      account() {
+        const a = store().session?.current;
+        return a ? { id: a.id, name: a.name } : null;
+      },
       tasks: {
         list: taskSnapshot,
         byId(taskId) {
@@ -518,6 +522,10 @@ function makeApi(manifest: PluginManifest, dir: string, disposables: Disposable[
       },
       items: {
         list: itemSnapshot,
+        async reload() {
+          const s = store();
+          await Promise.all([s.loadItemNotes(), s.refreshRisks(), s.loadItemKinds()]);
+        },
         close: closeItem,
         reopen: reopenItem,
         subscribe(listener) {
@@ -671,6 +679,13 @@ function makeApi(manifest: PluginManifest, dir: string, disposables: Disposable[
         track(disposable(() => run.cancel()));
         return run;
       },
+    },
+
+    async pickFiles(opts) {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const picked = await open({ multiple: opts.multiple ?? false, filters: opts.filters });
+      if (picked == null) return [];
+      return Array.isArray(picked) ? picked : [picked];
     },
 
     export: {

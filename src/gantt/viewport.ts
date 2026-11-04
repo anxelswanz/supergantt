@@ -27,6 +27,33 @@ export type ZoomPreset = keyof typeof ZOOM_PRESETS;
 const clampZoom = (v: number) =>
   Math.min(MAX_PX_PER_DAY, Math.max(MIN_PX_PER_DAY, v));
 
+/**
+ * 存下来的缩放值 → 可用的 pxPerDay，读不懂返回 null。
+ *
+ * 存的是 pxPerDay 而不是「日/周/月/年」这个名字：滚轮缩放是连续量，
+ * 存档位名的话用户滚到一个中间密度、关掉再打开，会被拽回整档。
+ * 数值超出范围（换了显示器、改过预设值）就钳住，不丢用户的选择。
+ */
+export function parseZoom(raw: string | null | undefined): number | null {
+  if (raw == null || raw.trim() === "") return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? clampZoom(n) : null;
+}
+
+/** pxPerDay 最接近哪个预设档位。按对数距离比较 —— 缩放是指数的，线性比会偏粗档。 */
+export function nearestPreset(pxPerDay: number): ZoomPreset {
+  let best: ZoomPreset = "day";
+  let bestDist = Infinity;
+  for (const [name, value] of Object.entries(ZOOM_PRESETS)) {
+    const dist = Math.abs(Math.log(pxPerDay / value));
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = name as ZoomPreset;
+    }
+  }
+  return best;
+}
+
 export class Viewport {
   readonly zoom = new Spring(ZOOM_PRESETS.week, SPRING.wheel);
 
@@ -84,6 +111,14 @@ export class Viewport {
     this.zoom.target = ZOOM_PRESETS[preset];
   }
 
+  /**
+   * 恢复存档的缩放：直接落到目标值，不播动画。
+   * 打开项目那一下没有「从哪来」可言，播一段 spring 只会让人看见刻度先粗后细地跳一下。
+   */
+  setZoom(pxPerDay: number) {
+    this.zoom.snap(clampZoom(pxPerDay));
+  }
+
   /** 把锚点移到画布上的某个 x，且不改变当前画面。 */
   private reanchor(x: number) {
     this.anchorDay = this.dayAt(x);
@@ -108,17 +143,6 @@ export class Viewport {
 
   /** 当前 pxPerDay 最接近哪个预设档位（用于按钮高亮）。 */
   nearestPreset(): ZoomPreset {
-    const ppd = this.zoom.target;
-    let best: ZoomPreset = "day";
-    let bestDist = Infinity;
-    for (const [name, value] of Object.entries(ZOOM_PRESETS)) {
-      // 在对数尺度上比较 —— 缩放本身是指数的，线性比较会严重偏向大档位
-      const dist = Math.abs(Math.log(ppd / value));
-      if (dist < bestDist) {
-        bestDist = dist;
-        best = name as ZoomPreset;
-      }
-    }
-    return best;
+    return nearestPreset(this.zoom.target);
   }
 }

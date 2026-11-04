@@ -250,6 +250,8 @@ export interface PluginDataApi {
   };
   /** 当前打开的项目；项目列表页时为 null */
   project(): { id: number; name: string } | null;
+  /** 1.7：当前登录的账号。日志 / 「谁改的」用它，不要拿项目成员去猜 */
+  account(): { id: number; name: string } | null;
   /**
    * 1.6：项目此刻的快照（排期偏差、受阻归因、里程碑、阻碍、风险、事项、逐日记录），
    * 和「复盘」视图同一份计算。会先把还没落库的改动写掉。没打开项目时为 null
@@ -264,6 +266,11 @@ export interface PluginDataApi {
   /** 事项清单；与事项视图同一合并层（core/items.mergeItems） */
   items: {
     list(): ItemView[];
+    /**
+     * 1.8：从库里重读事项、风险和类型表，list() 读的是内存里那一份。
+     * 阻碍存在任务上，任务表不重读（内存里可能有没落库的改动）
+     */
+    reload(): Promise<void>;
     /**
      * 1.3：关闭一条事项并写下结论（key 即 ItemView.key）。
      * 事项、风险写进结论；阻碍在今天结束并记下结论。已关闭的事项、风险会覆盖结论，
@@ -390,6 +397,8 @@ export interface PluginApi {
   /** 1.6：零工具的 Claude 调用，要 permissions.ai */
   ai: PluginAiApi;
   /** 1.6：导出 */
+  /** 1.7：让用户挑文件（图片、PDF、CSV…）。取消时返回空数组 */
+  pickFiles(opts: { multiple?: boolean; filters?: { name: string; extensions: string[] }[] }): Promise<string[]>;
   export: {
     /** 弹保存框，把一份 Markdown 存成 .md 或 Word。用户取消时 path 为 null */
     document(input: { markdown: string; title: string; format: "md" | "docx"; fileName?: string }): Promise<{

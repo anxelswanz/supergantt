@@ -11,7 +11,7 @@ import {
 import { motion } from "motion/react";
 import { GanttView } from "../gantt/GanttView";
 import { FIXED_COLS_WIDTH, MIN_PANEL_WIDTH, TaskGrid } from "./TaskGrid";
-import { ZOOM_PRESETS, type ZoomPreset, type Viewport } from "../gantt/viewport";
+import { ZOOM_PRESETS, nearestPreset, parseZoom, type ZoomPreset, type Viewport } from "../gantt/viewport";
 import { today } from "../gantt/time";
 import { useAppStore } from "../store/useAppStore";
 import { isMod, shortcut } from "../core/keys";
@@ -52,6 +52,13 @@ const MIN_GRID_WIDTH = MIN_PANEL_WIDTH;
 const MAX_GRID_WIDTH = 900;
 const DEFAULT_GRID_WIDTH = FIXED_COLS_WIDTH + 240;
 const GRID_WIDTH_KEY = "grid_width";
+/**
+ * 甘特的缩放，存的是 pxPerDay 本身。
+ *
+ * 存档位名不行：滚轮缩放是连续的，用户滚到一个中间密度关掉再打开，
+ * 会被拽回整档。这里记的是画布此刻的刻度密度，读回来原样套上。
+ */
+const ZOOM_KEY = "gantt_zoom";
 
 /**
  * 内置视图的清单项。元信息照抄 core/views.ts，render 留空 —— 组件由下面的
@@ -194,6 +201,43 @@ export function Workspace() {
     }, 300);
   };
 
+  /* ---------------- 甘特缩放：读取与持久化 ---------------- */
+
+  /** 当前缩放。甘特重挂时从这里恢复；用 ref 是因为滚轮每一下都会改，不该触发重渲染 */
+  const zoomRef = useRef<number>(ZOOM_PRESETS.week);
+
+  useEffect(() => {
+    void api
+      .getSetting(ZOOM_KEY)
+      .then((raw) => {
+        const value = parseZoom(raw);
+        if (value == null) return;
+        zoomRef.current = value;
+        // 甘特此时可能已经挂载（读设置回来得比首帧晚），直接套上去
+        vpRef.current?.setZoom(value);
+        // 高亮不看甘特挂没挂：上次停在别的视图时，回到甘特也得是对的
+        setPreset(nearestPreset(value));
+        invalidateRef.current();
+      })
+      .catch(() => {});
+  }, []);
+
+  const persistZoom = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveZoom = (pxPerDay: number, delay = 400) => {
+    if (persistZoom.current) clearTimeout(persistZoom.current);
+    // 滚轮是连续量，松手之后再写；按钮是单次动作，可以立刻写
+    persistZoom.current = setTimeout(() => {
+      void api.setSetting(ZOOM_KEY, String(Math.round(pxPerDay * 100) / 100)).catch(() => {});
+    }, delay);
+  };
+
+  /** 滚轮缩放：按钮高亮跟着走，缩放值也一起记下来 */
+  const onZoom = useCallback((pxPerDay: number) => {
+    zoomRef.current = pxPerDay;
+    setPreset(nearestPreset(pxPerDay));
+    saveZoom(pxPerDay);
+  }, []);
+
   useLayoutEffect(() => {
     const el = bodyRef.current;
     if (!el) return;
@@ -227,14 +271,25 @@ export function Workspace() {
   };
 
   const onViewportReady = useCallback((vp: Viewport, invalidate: () => void) => {
+    // 画布宽度一变这里就会再调一次，只有换了 Viewport 才恢复缩放，否则会打断缩放动画
+    const isNew = vpRef.current !== vp;
     vpRef.current = vp;
     invalidateRef.current = invalidate;
+    // 甘特是切视图就重挂的（切去事项再切回来是一个新的 Viewport），
+    // 不在这里把存档的缩放套上去，回来的就永远是默认的「周」，
+    // 而工具条上的高亮还停在用户上次点的「日」—— 两者就此错开
+    if (isNew) {
+      vp.setZoom(zoomRef.current);
+      invalidate();
+    }
   }, []);
 
   const jump = useCallback((p: ZoomPreset) => {
     vpRef.current?.zoomToPreset(p);
     invalidateRef.current();
     setPreset(p);
+    zoomRef.current = ZOOM_PRESETS[p];
+    saveZoom(ZOOM_PRESETS[p], 0);
   }, []);
 
   const goToday = useCallback(() => {
@@ -589,6 +644,7 @@ export function Workspace() {
               scrollY={scrollY}
               onScroll={setScrollY}
               onViewportReady={onViewportReady}
+              onZoom={onZoom}
             />
           </>
         )}
