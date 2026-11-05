@@ -24,7 +24,7 @@
 
 use gantt_core::calendar::{days_to_iso, parse_cli_date, parse_cli_duration, resolve_span};
 use gantt_core::model::*;
-use gantt_core::{feishu, locate, query, write};
+use gantt_core::{feishu, locate, query, spare, write};
 use rusqlite::Connection;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -266,6 +266,7 @@ fn run(argv: Vec<String>) -> CliResult<()> {
         "baseline" => dispatch_baseline(&rest),
         "setting" => dispatch_setting(&rest),
         "feishu" => dispatch_feishu(&rest),
+        "spare" => dispatch_spare(&rest),
         "check" => cmd_check(&Args::parse(&rest)?),
         "account" => dispatch_account(&rest),
         other => Err(CliError::args(format!(
@@ -427,6 +428,189 @@ fn dispatch_setting(rest: &[String]) -> CliResult<()> {
         other => Err(CliError::args(format!(
             "setting 没有子命令「{other}」。可用：get / set / list。"
         ))),
+    }
+}
+
+fn dispatch_spare(rest: &[String]) -> CliResult<()> {
+    let (sub, tail) = split_sub(rest, "spare")?;
+    let args = Args::parse(tail)?;
+    match sub.as_str() {
+        "list" => cmd_spare_list(&args),
+        "push" => cmd_spare_push(&args),
+        "revert" => cmd_spare_revert(&args),
+        other => Err(CliError::args(format!(
+            "spare 没有子命令「{other}」。可用：list / push / revert。"
+        ))),
+    }
+}
+
+/// 备件台账的范围：数据目录 + 当前账号 uuid + 项目 id。
+///
+/// 台账**跟着项目走**（一个项目一个文件）。写入要求应用没开着 —— 应用里插件
+/// 持有内存中的那一份，下一次写回会把 CLI 的改动整份盖掉。
+fn spare_scope(args: &Args, need_write: bool) -> CliResult<(PathBuf, i64, PathBuf)> {
+    let dir = resolve_data_dir(args)?;
+    if need_write && !args.has("force") {
+        if let Some(lock) = locate::running_app(&dir) {
+            return Err(CliError {
+                message: format!(
+                    "桌面应用 Gantt 正在运行（PID {}），备件台账在应用里是内存中的一份，\
+                     你现在写文件会被下一次写回覆盖。\n\n  · 先在应用里切到别的项目（或关掉 Gantt）再重试，或\n  \
+                     · 加 --force 承担风险（仅适合应用闲置时快速补一批）",
+                    lock.pid
+                ),
+                code: code::APP_BUSY,
+            });
+        }
+    }
+    let conn = open_ro(args)?;
+    let project_id = resolve_project(&conn, project_selector(args)?)?;
+    let uuid = spare::account_uuid(&conn, conn.me).map_err(CliError::db)?;
+    let path = spare::ledger_path(&dir, &uuid, project_id);
+    Ok((dir, project_id, path))
+}
+
+fn cmd_spare_list(args: &Args) -> CliResult<()> {
+    let (_, project_id, path) = spare_scope(args, false)?;
+    let ledger = spare::load(&path).map_err(CliError::db)?;
+    let rows = spare::search(&ledger, args.get("q").unwrap_or(""), args.has("archived"));
+
+    if args.json() {
+        print_json(&serde_json::json!({
+            "projectId": project_id,
+            "path": path.to_string_lossy(),
+            "total": ledger.parts.iter().filter(|p| !p.archived).count(),
+            "items": rows,
+        }))?;
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("（没有备件。用 `gantt spare push <file>` 从发货单导入一批）");
+        return Ok(());
+    }
+    println!("{:>4}  {:<20} {:<14} {:>8}  {}", "序号", "名称", "SKU", "库存", "分类");
+    for r in rows {
+        let low = r.min_qty.is_some_and(|m| r.qty <= m);
+        println!(
+            "{:>4}  {:<20} {:<14} {:>5} {}  {}{}",
+            r.seq,
+            truncate(&r.name, 20),
+            truncate(&r.sku, 14),
+            r.qty,
+            r.unit,
+            r.category,
+            if low { "  ⚠不足" } else { "" }
+        );
+    }
+    Ok(())
+}
+
+/// 把一份 Agent 产出的 JSON 写进台账：SKU 命中就入库，没命中就新建。
+///
+/// 应用开着时不直接写台账（插件内存里那份的下一次写回会把它盖掉），而是放进收件箱，
+/// 插件几秒内自己入库；应用没开就直接写。两种情况都不用用户在界面上确认。
+fn cmd_spare_push(args: &Args) -> CliResult<()> {
+    let file = args.positionals.first().ok_or_else(|| {
+        CliError::args("要给出推送文件，例如 `gantt spare push draft.json --project 3`")
+    })?;
+    let raw = std::fs::read_to_string(file)
+        .map_err(|e| CliError::args(format!("读不了 {file}：{e}")))?;
+    let batch = spare::Batch::parse(&raw).map_err(CliError::args)?;
+    if batch.items.is_empty() {
+        return Err(CliError::validation("推送文件里没有条目"));
+    }
+
+    let dir = resolve_data_dir(args)?;
+    let app_open = locate::running_app(&dir).is_some() && !args.has("force");
+    let (_, project_id, path) = spare_scope(args, false)?;
+    let conn = open_ro(args)?;
+    let account = gantt_core::account::get_account(&conn, conn.me).map_err(CliError::db)?;
+    let by = account.name.clone();
+    let at = chrono_iso();
+
+    if app_open {
+        let inbox = spare::inbox_path(&dir, &account.uuid, project_id);
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let id = spare::push_inbox(&inbox, &batch, &by, &at, seed).map_err(CliError::db)?;
+        if args.json() {
+            print_json(&serde_json::json!({
+                "queued": true, "importId": id, "projectId": project_id,
+                "items": batch.items.len(), "inbox": inbox.to_string_lossy(),
+            }))?;
+        } else {
+            println!(
+                "应用正开着：{} 条已放进项目 {} 的收件箱（批次 {id}），插件会在几秒内自动入库。",
+                batch.items.len(),
+                project_id
+            );
+        }
+        return Ok(());
+    }
+
+    // 插件那侧也在写这个文件，互斥一下：同一个目录下建一个锁文件（应用没开时才走到这里）
+    let lock = spare::WriteLock::acquire(&path).map_err(CliError::validation)?;
+    let mut ledger = spare::load(&path).map_err(CliError::db)?;
+    let seed = (ledger.rev + 1) * 1000 + project_id;
+    let summary = spare::apply_batch(&mut ledger, &batch, &by, &at, seed).map_err(CliError::validation)?;
+    spare::save(&path, &ledger).map_err(CliError::db)?;
+    drop(lock);
+
+    if args.json() {
+        print_json(&summary)?;
+    } else {
+        println!(
+            "已写入项目 {}：新建 {} 条，入库 {} 条，跳过 {} 条（批次 {}）",
+            project_id,
+            summary.created.len(),
+            summary.received.len(),
+            summary.skipped.len(),
+            summary.import_id
+        );
+        for s in &summary.skipped {
+            println!("  · {s}");
+        }
+    }
+    Ok(())
+}
+
+/// 撤销一整批导入：写反向调整，不删原日志（和插件里「整批撤销」同一语义）
+fn cmd_spare_revert(args: &Args) -> CliResult<()> {
+    let import_id = args
+        .positionals
+        .first()
+        .ok_or_else(|| CliError::args("要给出导入批次 id，例如 `gantt spare revert imp_12`"))?
+        .clone();
+    let (_, project_id, path) = spare_scope(args, true)?;
+    let conn = open_ro(args)?;
+    let by = gantt_core::account::get_account(&conn, conn.me)
+        .map(|a| a.name)
+        .map_err(CliError::db)?;
+
+    let lock = spare::WriteLock::acquire(&path).map_err(CliError::validation)?;
+    let mut ledger = spare::load(&path).map_err(CliError::db)?;
+    let n = spare::revert_batch(&mut ledger, &import_id, &by, &chrono_iso()).map_err(CliError::validation)?;
+    spare::save(&path, &ledger).map_err(CliError::db)?;
+    drop(lock);
+
+    if args.json() {
+        print_json(&serde_json::json!({ "projectId": project_id, "importId": import_id, "reverted": n }))?;
+    } else {
+        println!("已撤销批次 {import_id}：{n} 条写回反向调整");
+    }
+    Ok(())
+}
+
+/// 本地时间 ISO 8601（带时区偏移），和插件 `new Date().toISOString()` 同口径，故意不用 UTC
+fn chrono_iso() -> String {
+    // chrono 不在依赖里；用 SQLite 的 datetime 保持和库里其它时间戳一个来源
+    match rusqlite::Connection::open_in_memory()
+        .and_then(|c| c.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')", [], |r| r.get::<_, String>(0)))
+    {
+        Ok(s) => s,
+        Err(_) => String::new(),
     }
 }
 
@@ -2682,6 +2866,13 @@ fn print_usage() {
       没同步过就新建，同步过就更新它自己那条；不删除、不接受 --record-id、空值字段不写
   gantt feishu mark-synced <key> --target <base-token>:<table-id> --record-id <rec…> [--json]
   gantt feishu mark-failed <key> --target <base-token>:<table-id> --error <原因> [--json]
+
+备件台账（读写 spare-parts 插件的台账；台账跟着项目走，写要求应用未运行）：
+  gantt spare list --project <id 或 项目名> [--q 关键字] [--archived] [--json]
+  gantt spare push <推送文件.json> --project <id 或 项目名> [--json]
+      按 SKU 匹配：命中就入库（+数量），没命中就新建；序号单调递增、不复用
+  gantt spare revert <导入批次 id> --project <id 或 项目名> [--json]
+      整批回退：写反向调整日志，原记录保留
 
 自检：
   gantt check [--json]

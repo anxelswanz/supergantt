@@ -35,6 +35,7 @@ pub mod locate;
 pub mod model;
 pub mod query;
 pub mod schema;
+pub mod spare;
 pub mod write;
 
 pub use model::Result;
